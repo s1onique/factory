@@ -1,0 +1,46 @@
+name: Build PDF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**/*.tex"
+      - "scripts/build_pdf.sh"
+      - ".github/workflows/build-pdf.yml"
+  pull_request:
+    paths:
+      - "docs/**/*.tex"
+      - "scripts/build_pdf.sh"
+      - ".github/workflows/build-pdf.yml"
+  workflow_dispatch:
+
+jobs:
+  build-pdf:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install LaTeX dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            latexmk \
+            texlive-xetex \
+            texlive-latex-recommended \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            texlive-pictures \
+            fonts-dejavu-core \
+            fonts-dejavu-extra
+
+      - name: Build Factory presentation PDF
+        run: ./scripts/build_pdf.sh docs/factory_presentation.tex
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-presentation
+          path: build/factory_presentation.pdf
+          if-no-files-found: error
