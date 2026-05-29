@@ -291,6 +291,7 @@ Total score bands (0–39 to 95–100) and their meanings are documented in [sco
 
 ## Related documents
 
+- [Reviewer checklist](./reviewer-checklist.md): Compact checklist for reviewers — use before, during, and after every review
 - [Review template](./review-template.md): Use this to conduct a review of a specific project
 - [Scorecard](./scorecard.md): Numeric interpretation of total scores
 
