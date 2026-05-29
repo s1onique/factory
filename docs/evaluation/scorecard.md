@@ -145,3 +145,18 @@ When reviewing a project (especially one's own), ask:
 
 - [Project fitness review framework](./project-fitness-review.md): Full dimension descriptions and scoring scale
 - [Review template](./review-template.md): Conduct a structured review of a specific project
+
+---
+
+## About example reviews
+
+Example reviews in this framework are **illustrative, not canonical truth**. They demonstrate how to apply the framework in an evidence-based, non-hype way. Example reviews:
+
+- Show the framework in action on real or realistic projects
+- Make modest, evidence-shaped claims rather than universal verdicts
+- Are honest about reviewer blind spots and confidence levels
+- Should be useful to third-party readers who have never seen the original project
+
+> Example reviews are teaching tools, not benchmarks. A project that scores lower than an example review is not "worse"—it may simply face different constraints or be at a different maturity stage. Use examples to learn the framework, not to compare projects.
+
+See [project-fitness-review.md](./project-fitness-review.md) for a link to available example reviews.

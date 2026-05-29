@@ -293,3 +293,13 @@ Total score bands (0–39 to 95–100) and their meanings are documented in [sco
 
 - [Review template](./review-template.md): Use this to conduct a review of a specific project
 - [Scorecard](./scorecard.md): Numeric interpretation of total scores
+
+---
+
+## Examples
+
+Illustrative example reviews demonstrating how to apply the framework:
+
+- [KGB/tovarisch review](./examples/tovarisch-review.md): A constrained-node daemon evaluated against the 10 dimensions. Demonstrates evidence-based scoring, modest claims, and honest acknowledgment of blind spots.
+
+> **Note:** Example reviews are illustrative, not canonical truth. They are meant to show how the framework can be applied, not to serve as benchmarks. See [scorecard.md](./scorecard.md) for a note on example reviews.
