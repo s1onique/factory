@@ -6,7 +6,7 @@ Use this template to conduct a fitness review of any project. Copy it, fill in t
 
 ## Project identity
 
-**Project name:** <!-- e.g., k9b, my-service, trim-platform -->
+**Project name:** <!-- e.g., my-service, my-tool, example-project -->
 
 **Version / commit inspected:** <!-- e.g., v2.1.0, abc123 -->
 

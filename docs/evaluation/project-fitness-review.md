@@ -6,7 +6,7 @@ The Factory Project Fitness Review is a framework for evaluating whether a softw
 
 Factory evaluates projects by **evolvability under real work**—whether they can be understood after cold start, changed in small safe increments, tested through honest gates, resumed after context loss, and improved through feedback loops.
 
-This framework distills the practices developed from reviewing k9b, TRIM-Platform, KGB/tovarisch, InDeep, Orchid, blockstor, and related projects.
+This framework distills practices from reviewing multiple real and illustrative software projects across platform engineering, developer tooling, operations, and product codebases.
 
 ---
 
