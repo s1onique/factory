@@ -28,23 +28,23 @@ Status: **Implemented**
 
 Blank template for conducting a structured review of a specific project. Part of the evaluation module.
 
-### Epic
-Status: **Planned**
+### [Epic](./epic.md)
+Status: **Implemented**
 
 Template for framing a problem and slicing it into ACTs.
 
-### ACT
-Status: **Planned**
+### [ACT](./act.md)
+Status: **Implemented**
 
 Template for documenting an actionable, concrete, time-bound increment.
 
-### Close report
-Status: **Planned**
+### [Close report](./close-report.md)
+Status: **Implemented**
 
 Template for capturing what was learned after completing an epic or major effort.
 
-### Reviewer prompt
-Status: **Planned**
+### [Reviewer prompt](./reviewer-prompt.md)
+Status: **Implemented**
 
 Prompt template for guiding a review conversation or generating review output.
 

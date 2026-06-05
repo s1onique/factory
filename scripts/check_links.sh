@@ -45,6 +45,10 @@ check_path "docs/playbooks/" "docs/playbooks"
 check_path "docs/playbooks/README.md" "docs/playbooks/README.md"
 check_path "docs/templates/" "docs/templates"
 check_path "docs/templates/README.md" "docs/templates/README.md"
+check_path "docs/templates/epic.md" "docs/templates/epic.md"
+check_path "docs/templates/act.md" "docs/templates/act.md"
+check_path "docs/templates/close-report.md" "docs/templates/close-report.md"
+check_path "docs/templates/reviewer-prompt.md" "docs/templates/reviewer-prompt.md"
 check_path "docs/evaluation/" "docs/evaluation"
 check_path "docs/evaluation/README.md" "docs/evaluation/README.md"
 check_path "docs/evaluation/review-template.md" "docs/evaluation/review-template.md"
@@ -60,6 +64,12 @@ check_link_text "docs/playbooks/README.md" "\.\./evaluation/" "playbooks -> eval
 
 # docs/templates/README.md should link to ../evaluation/review-template.md
 check_link_text "docs/templates/README.md" "\.\./evaluation/review-template\.md" "templates -> review-template.md"
+
+# docs/templates/README.md should link to new template files
+check_link_text "docs/templates/README.md" "epic\.md" "templates -> epic.md"
+check_link_text "docs/templates/README.md" "act\.md" "templates -> act.md"
+check_link_text "docs/templates/README.md" "close-report\.md" "templates -> close-report.md"
+check_link_text "docs/templates/README.md" "reviewer-prompt\.md" "templates -> reviewer-prompt.md"
 
 # docs/README.md should link to all sections (using directory links)
 check_link_text "docs/README.md" "\./concepts/" "docs -> concepts/"
