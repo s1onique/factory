@@ -19,6 +19,8 @@ This section is growing as patterns are validated across multiple projects.
 ### [Playbooks](./playbooks/)
 Step-by-step procedures for running Factory loops. Playbooks turn concepts and doctrine into actionable sequences.
 
+The first implemented playbook is **[Run a Project Fitness Review](./playbooks/run-project-fitness-review.md)** — a step-by-step guide from repo intake to evidence-backed review with 2–3 actionable ACTs.
+
 ### [Templates](./templates/)
 Copy-and-fill artifacts for common Factory tasks. Templates save time and ensure consistency.
 

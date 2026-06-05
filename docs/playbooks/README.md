@@ -24,14 +24,17 @@ A playbook should be detailed enough that someone unfamiliar with the process ca
 
 ## Playbooks
 
-### [Run a Project Fitness Review](../evaluation/)
-Status: **Implemented** — See the evaluation module.
+### [Run a Project Fitness Review](./run-project-fitness-review.md)
+Status: **Implemented** — Step-by-step playbook for conducting a review from repo intake to evidence-backed output with 2–3 ACTs.
 
-The Project Fitness Review is the first complete Factory module. It includes:
-- Review framework with 10 dimensions
-- Reviewer checklist
-- Review template
-- Scorecard interpretation
+The Project Fitness Review is the first complete Factory module. The evaluation module contains the framework and reference docs:
+- [Project Fitness Review framework](../evaluation/project-fitness-review.md)
+- [Reviewer checklist](../evaluation/reviewer-checklist.md)
+- [Review template](../evaluation/review-template.md)
+- [Scorecard](../evaluation/scorecard.md)
+- [Example review: KGB/tovarisch](../evaluation/examples/tovarisch-review.md)
+
+Use [run-project-fitness-review.md](./run-project-fitness-review.md) to run a review. The evaluation module provides the framework reference.
 
 ### Extract doctrine from an epic
 Status: **Planned**

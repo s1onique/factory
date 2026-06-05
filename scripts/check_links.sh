@@ -43,6 +43,7 @@ check_path "docs/doctrine/" "docs/doctrine"
 check_path "docs/doctrine/README.md" "docs/doctrine/README.md"
 check_path "docs/playbooks/" "docs/playbooks"
 check_path "docs/playbooks/README.md" "docs/playbooks/README.md"
+check_path "docs/playbooks/run-project-fitness-review.md" "docs/playbooks/run-project-fitness-review.md"
 check_path "docs/templates/" "docs/templates"
 check_path "docs/templates/README.md" "docs/templates/README.md"
 check_path "docs/templates/epic.md" "docs/templates/epic.md"
@@ -61,6 +62,18 @@ echo "Checking link patterns..."
 
 # docs/playbooks/README.md should link to ../evaluation/
 check_link_text "docs/playbooks/README.md" "\.\./evaluation/" "playbooks -> evaluation/"
+check_link_text "docs/playbooks/README.md" "run-project-fitness-review\.md" "playbooks -> run-project-fitness-review.md"
+
+# docs/playbooks/run-project-fitness-review.md should link to evaluation and template docs
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/README\.md" "playbook -> evaluation README"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/project-fitness-review\.md" "playbook -> project-fitness-review.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/reviewer-checklist\.md" "playbook -> reviewer-checklist.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/review-template\.md" "playbook -> review-template.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/scorecard\.md" "playbook -> scorecard.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/examples/tovarisch-review\.md" "playbook -> tovarisch-review.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./templates/act\.md" "playbook -> act.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./templates/close-report\.md" "playbook -> close-report.md"
+check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./templates/reviewer-prompt\.md" "playbook -> reviewer-prompt.md"
 
 # docs/templates/README.md should link to ../evaluation/review-template.md
 check_link_text "docs/templates/README.md" "\.\./evaluation/review-template\.md" "templates -> review-template.md"
@@ -75,6 +88,7 @@ check_link_text "docs/templates/README.md" "reviewer-prompt\.md" "templates -> r
 check_link_text "docs/README.md" "\./concepts/" "docs -> concepts/"
 check_link_text "docs/README.md" "\./doctrine/" "docs -> doctrine/"
 check_link_text "docs/README.md" "\./playbooks/" "docs -> playbooks/"
+check_link_text "docs/README.md" "playbooks/run-project-fitness-review\.md" "docs -> run-project-fitness-review.md"
 check_link_text "docs/README.md" "\./templates/" "docs -> templates/"
 check_link_text "docs/README.md" "\./evaluation/" "docs -> evaluation/"
 check_link_text "docs/README.md" "factory_presentation\.tex" "docs -> presentation"
