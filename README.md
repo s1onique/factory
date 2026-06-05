@@ -4,6 +4,10 @@ Factory is an open process for building and improving feedback loops around soft
 
 It helps turn repeated engineering practice into inspectable doctrine, reusable templates, review frameworks, examples, talks, and onboarding paths. The goal is not to prescribe one true way to build software, but to make useful development loops visible enough that others can run them, challenge them, and improve them.
 
-## Documentation
+## Start here
 
-- [Project Fitness Review](./docs/evaluation/README.md) — Evaluate whether a software project can evolve safely under real-world conditions.
+- **[Documentation](./docs/README.md)** — Factory documentation map. Start here to understand how concepts, doctrine, playbooks, templates, and evaluation are organized.
+
+## Modules
+
+- **[Project Fitness Review](./docs/evaluation/README.md)** — Evaluate whether a software project can evolve safely under real-world conditions.
