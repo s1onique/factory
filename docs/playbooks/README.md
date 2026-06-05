@@ -36,6 +36,11 @@ The Project Fitness Review is the first complete Factory module. The evaluation 
 
 Use [run-project-fitness-review.md](./run-project-fitness-review.md) to run a review. The evaluation module provides the framework reference.
 
+### [Digest-driven Review](./digest-driven-review.md)
+Status: **Implemented** — Step-by-step procedure for generating a reusable review prompt from a repository digest using `make_review_prompt.py`.
+
+This playbook bridges the [targeted digest script](../../scripts/make_targeted_digest.sh) to the Project Fitness Review framework, enabling repeatable evidence-backed reviews without manual prompt rewriting.
+
 ### Extract doctrine from an epic
 Status: **Planned**
 

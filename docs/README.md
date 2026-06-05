@@ -21,6 +21,8 @@ Step-by-step procedures for running Factory loops. Playbooks turn concepts and d
 
 The first implemented playbook is **[Run a Project Fitness Review](./playbooks/run-project-fitness-review.md)** — a step-by-step guide from repo intake to evidence-backed review with 2–3 actionable ACTs.
 
+The second implemented playbook is **[Digest-driven Review](./playbooks/digest-driven-review.md)** — a procedure for generating reusable review prompts from repository digests, bridging the digest tooling to the Project Fitness Review framework.
+
 ### [Templates](./templates/)
 Copy-and-fill artifacts for common Factory tasks. Templates save time and ensure consistency.
 

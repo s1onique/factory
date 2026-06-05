@@ -53,6 +53,8 @@ check_path "docs/templates/reviewer-prompt.md" "docs/templates/reviewer-prompt.m
 check_path "docs/evaluation/" "docs/evaluation"
 check_path "docs/evaluation/README.md" "docs/evaluation/README.md"
 check_path "docs/evaluation/review-template.md" "docs/evaluation/review-template.md"
+check_path "docs/playbooks/digest-driven-review.md" "docs/playbooks/digest-driven-review.md"
+check_path "scripts/make_review_prompt.py" "scripts/make_review_prompt.py"
 check_path "docs/factory_presentation.tex" "docs/factory_presentation.tex"
 
 echo ""
@@ -63,6 +65,7 @@ echo "Checking link patterns..."
 # docs/playbooks/README.md should link to ../evaluation/
 check_link_text "docs/playbooks/README.md" "\.\./evaluation/" "playbooks -> evaluation/"
 check_link_text "docs/playbooks/README.md" "run-project-fitness-review\.md" "playbooks -> run-project-fitness-review.md"
+check_link_text "docs/playbooks/README.md" "digest-driven-review\.md" "playbooks -> digest-driven-review.md"
 
 # docs/playbooks/run-project-fitness-review.md should link to evaluation and template docs
 check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/README\.md" "playbook -> evaluation README"
@@ -74,6 +77,14 @@ check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./evaluation/
 check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./templates/act\.md" "playbook -> act.md"
 check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./templates/close-report\.md" "playbook -> close-report.md"
 check_link_text "docs/playbooks/run-project-fitness-review.md" "\.\./templates/reviewer-prompt\.md" "playbook -> reviewer-prompt.md"
+
+# docs/playbooks/digest-driven-review.md should link to related docs
+check_link_text "docs/playbooks/digest-driven-review.md" "run-project-fitness-review\.md" "digest-review -> run-project-fitness-review.md"
+check_link_text "docs/playbooks/digest-driven-review.md" "\.\./evaluation/README\.md" "digest-review -> evaluation/README.md"
+check_link_text "docs/playbooks/digest-driven-review.md" "\.\./evaluation/review-template\.md" "digest-review -> review-template.md"
+check_link_text "docs/playbooks/digest-driven-review.md" "\.\./templates/act\.md" "digest-review -> act.md"
+check_link_text "docs/playbooks/digest-driven-review.md" "\.\./\.\./scripts/make_review_prompt\.py" "digest-review -> make_review_prompt.py"
+check_link_text "docs/playbooks/digest-driven-review.md" "\.\./\.\./scripts/make_targeted_digest\.sh" "digest-review -> make_targeted_digest.sh"
 
 # docs/templates/README.md should link to ../evaluation/review-template.md
 check_link_text "docs/templates/README.md" "\.\./evaluation/review-template\.md" "templates -> review-template.md"
@@ -92,6 +103,7 @@ check_link_text "docs/README.md" "playbooks/run-project-fitness-review\.md" "doc
 check_link_text "docs/README.md" "\./templates/" "docs -> templates/"
 check_link_text "docs/README.md" "\./evaluation/" "docs -> evaluation/"
 check_link_text "docs/README.md" "factory_presentation\.tex" "docs -> presentation"
+check_link_text "docs/README.md" "digest-driven-review\.md" "docs -> digest-driven-review.md"
 
 # docs/concepts/README.md should link to factory.md
 check_link_text "docs/concepts/README.md" "factory\.md" "concepts -> factory.md"
