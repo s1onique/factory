@@ -308,20 +308,66 @@ bytes has returned. The newline is the commit marker. On recovery:
   - **Case A — file ends with `\n`:** validate every record normally.
     Any malformed newline-terminated record fails closed.
   - **Case B — file contains a non-empty unterminated final suffix:**
-    the suffix is treated as an uncommitted torn tail. The exact bytes
-    are preserved in `events.jsonl.torn-tail.<sha256>.bin`, the
-    authoritative ledger is truncated to the committed prefix, the
-    prefix is `fsync`'d, and replay proceeds on the prefix.
+    the suffix is treated as an uncommitted torn tail. Recovery
+    ordering is **CRITICAL** (CORRECTION02):
+    1. (test seam) pre-quarantine fault hook may abort the
+       recovery BEFORE any destructive IO. If it does, the
+       authoritative file is **byte-identical** to its pre-recovery
+       snapshot.
+    2. durably preserve the torn bytes via
+       `events.jsonl.torn-tail.<sha256>.bin`. The quarantine file
+       is `open`-ed, written, `sync`-ed, and closed before return.
+       If a file already exists with the content-addressed name,
+       its bytes are verified by sha256 + byte compare; a
+       hash-named file with the wrong bytes is rejected and the
+       authoritative file is left untouched.
+    3. attempt to `fsync` the parent directory entry where
+       supported. The capability is classified as
+       `ok | unsupported | error`; the `error` case fails closed
+       and the authoritative file is NOT truncated.
+    4. only NOW truncate authoritative ledger to committed prefix
+       and `fsync` the repaired file.
 
 Within a single process, concurrent `append()` calls are serialized
 through a promise-chain mutex. A failed append does not poison the
-queue — subsequent appends continue normally. Cross-process writers
-are **unsupported** in CORRECTION01; the lab uses a single-writer
-process model.
+queue — subsequent appends continue normally. **CORRECTION02**
+proves this with a real injected pre-write failure
+(`test/ledger.test.ts` `C13 append remains usable after a real
+pre-write failure`) that:
+  - allocates no sequence for the failed append,
+  - leaves the promise-chain mutex unpoisoned,
+  - lets a subsequent append succeed with the next contiguous
+    sequence.
+
+Cross-process writers are **unsupported** in CORRECTION02; the lab
+uses a single-writer process model.
 
 The ledger API takes the event payload + identity metadata and returns a
 `CommittedRunEvent` with the ledger-allocated `seq`. Event producers
 do NOT fabricate committed events.
+
+## Test-claim congruence
+
+Every claim in the lab's final reports corresponds to a concrete
+mechanically executed test. In particular:
+
+  - "32 concurrent appends produced unique contiguous committed
+    sequences" — proven by `C12 concurrent sequence allocation`.
+  - "fresh ledger instance reopened the file and replayed the
+    resulting legal stream" — proven by `C12-R` (fresh ledger
+    construction + reopen + `readAll`) and `C12-L` (legal
+    concurrent lifecycle replayed after reopen).
+  - "append remains usable after failure" — proven by `C13` using
+    a real pre-write injected failure; the failed append
+    allocates no sequence and the queue is unpoisoned.
+  - "quarantine failure leaves authoritative bytes untouched" —
+    proven by `QF01`, which byte-compares the authoritative file
+    before and after a failing recovery.
+  - "torn-tail bytes preserved exactly" — proven by `QF03`, which
+    byte-hashes the quarantine file and asserts it equals the
+    torn suffix.
+  - "malformed committed evidence fails closed" — proven by
+    `TT16` (malformed newline-terminated line).
 
 
 
