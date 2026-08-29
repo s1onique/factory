@@ -303,3 +303,266 @@ test("F12 cancel wakes before long deadline", async () => {
   assert.ok(elapsed < 2000, "cancel must wake within 2s");
   assert.ok(result.outcome.kind === "cancelled", "outcome must be cancelled");
 });
+
+// ========================================================================
+// CORRECTION02 regression tests
+// ========================================================================
+test("PS01 immediate pre-spawn cancel: child materialized later is cleaned up", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const originalSignal = signals.signalGroup.bind(signals);
+  signals.signalGroup = (pgid, signal) => {
+    const r = originalSignal(pgid, signal);
+    if (signal === "SIGKILL" && r.kind === "sent") signals.aliveGroups.delete(pgid);
+    return r;
+  };
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 60000 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  supervisor.cancel();
+  queueMicrotask(() => child.fireSpawn());
+  await new Promise((res) => setImmediate(res));
+  child.fireClose(0, "SIGKILL");
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cancelled");
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+  assert.ok(signals.log.some((e) => e.signal === "SIGTERM"), "TERM must have been sent");
+  assert.ok(signals.log.some((e) => e.signal === "SIGKILL"), "KILL must have been sent");
+});
+
+test("PS02 pre-spawn deadline: child materialized later is terminated", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  // Yield a few macrotask ticks so deadline fires + escalation runs
+  // before we close the fake child. Otherwise the supervisor would
+  // observe the close as a natural exit before cleanup.
+  await new Promise((res) => setImmediate(res));
+  await new Promise((res) => setImmediate(res));
+  if (!child.closed) child.fireClose(null, "SIGKILL");
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "deadline");
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+});
+
+test("PS03 pre-spawn cancel + spawn failure: outcome is spawn_failed", async () => {
+  const signals = new FakeSignalPort();
+  const spawner = new FakeSpawnPort();
+  const events: import("../../src/process/process-types.js").RuntimeEvent[] = [];
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 60000 }, clock: manualClock(), signals, spawner, sink: (e) => events.push(e) });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  supervisor.cancel();
+  queueMicrotask(() => { child.fireError(new Error("ENOENT")); child.fireClose(1, null); });
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "spawn_failed");
+  assert.ok(!events.some((e) => e.kind === "process_spawned"), "no process_spawned on spawn failure");
+  assert.equal(signals.log.length, 0);
+});
+
+test("PS04 pre-spawn deadline + spawn failure: outcome is spawn_failed", async () => {
+  const signals = new FakeSignalPort();
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => { child.fireError(new Error("ENOENT")); child.fireClose(1, null); });
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "spawn_failed");
+  assert.equal(signals.log.length, 0);
+});
+
+test("CV01 cleanup_verified emitted only after group absence proof", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  const events: import("../../src/process/process-types.js").RuntimeEvent[] = [];
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner, sink: (e) => events.push(e) });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  await new Promise((res) => setImmediate(res));
+  await new Promise((res) => setImmediate(res));
+  if (!child.closed) child.fireClose(null, "SIGKILL");
+  await supervisor.await();
+  const verified = events.filter((e) => e.kind === "cleanup_verified");
+  const failed = events.filter((e) => e.kind === "cleanup_failed");
+  assert.equal(verified.length, 1);
+  assert.equal(failed.length, 0);
+});
+
+test("CV02 EPERM: no cleanup_verified, outcome cleanup_failed(capability_unavailable)", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  signals.signalGroup = (_pgid, _signal) => ({ kind: "permission_denied", code: "EPERM" });
+  const spawner = new FakeSpawnPort();
+  const events: import("../../src/process/process-types.js").RuntimeEvent[] = [];
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner, sink: (e) => events.push(e) });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed");
+  const outcome = result.outcome as { kind: "cleanup_failed"; failure: { kind: string } };
+  assert.equal(outcome.failure.kind, "capability_unavailable");
+  assert.ok(!events.some((e) => e.kind === "cleanup_verified"), "no cleanup_verified on EPERM");
+  assert.ok(events.some((e) => e.kind === "cleanup_failed"), "cleanup_failed must be emitted on EPERM");
+});
+
+test("CV03 final probe alive: no cleanup_verified, outcome cleanup_failed", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  signals.probeGroup = (_pgid) => ({ kind: "alive" });
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed");
+  const outcome = result.outcome as { kind: "cleanup_failed"; failure: { kind: string } };
+  assert.equal(outcome.failure.kind, "cleanup_timeout");
+});
+
+test("CV04 probe_error: no cleanup_verified, outcome cleanup_failed", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  signals.signalGroup = (_pgid, _signal) => ({ kind: "error", code: "EIO", message: "disk gone" });
+  signals.probeGroup = (_pgid) => ({ kind: "probe_error", code: "EIO", message: "disk gone" });
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed");
+  const outcome = result.outcome as { kind: "cleanup_failed"; failure: { kind: string } };
+  assert.equal(outcome.failure.kind, "cleanup_timeout");
+});
+
+test("CL01 close during escalation is not missed (cooperative TERM)", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  const originalSignal = signals.signalGroup.bind(signals);
+  signals.signalGroup = (pgid, signal) => {
+    if (signal === "SIGTERM") {
+      const child = spawner.children[0];
+      if (child !== undefined && !child.closed) {
+        // Cooperative exit during TERM: report as sent + remove
+        // group + schedule close.
+        signals.aliveGroups.delete(pgid);
+        queueMicrotask(() => child.fireClose(0, null));
+        return { kind: "sent", signal: "SIGTERM" };
+      }
+    }
+    return originalSignal(pgid, signal);
+  };
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "deadline");
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, false);
+});
+
+test("CL02 close during escalation is captured by original promise", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  const originalSignal = signals.signalGroup.bind(signals);
+  signals.signalGroup = (pgid, signal) => {
+    const r = originalSignal(pgid, signal);
+    if (signal === "SIGKILL") {
+      const child = spawner.children[0];
+      if (child !== undefined && !child.closed) child.fireClose(0, "SIGKILL");
+    }
+    return r;
+  };
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.ok(result !== undefined, "result must settle");
+});
+
+test("CL03 close-wait bound elapses without close: cleanup outcome", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  signals.signalGroup = (_pgid, signal) => signal === "SIGKILL" ? { kind: "sent", signal: "SIGKILL" } : { kind: "sent", signal: "SIGTERM" };
+  signals.probeGroup = (_pgid) => ({ kind: "alive" });
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.ok(result.outcome.kind === "cleanup_failed", "must be cleanup_failed");
+});
+
+test("SE01 synchronous spawn throw emits process_spawn_failed before seal", async () => {
+  class ThrowingSpawnPort { spawn() { throw new Error("EPERM-fake-spawn"); } }
+  const events: import("../../src/process/process-types.js").RuntimeEvent[] = [];
+  const r = startSupervised({ spec: basicSpec(), clock: manualClock(), signals: new FakeSignalPort(), spawner: new ThrowingSpawnPort() as unknown as FakeSpawnPort, sink: (e) => events.push(e) });
+  if (r.ok === false) throw new Error("expected ok");
+  const result = await r.value.await();
+  assert.equal(result.outcome.kind, "spawn_failed");
+  assert.ok(events.filter((e) => e.kind === "process_spawn_started").length === 1, "exactly one spawn_started");
+  assert.ok(events.filter((e) => e.kind === "process_spawn_failed").length === 1, "exactly one spawn_failed");
+  assert.ok(!events.some((e) => e.kind === "process_spawned"), "NO process_spawned on sync throw");
+});
+
+test("IO01 injected stdout stream failure appears in final result", async () => {
+  const signals = new FakeSignalPort();
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), stdoutLimitBytes: 1024 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => {
+    child.fireSpawn();
+    (child.stdout as unknown as { emit: (e: string, ...args: unknown[]) => void }).emit("error", new Error("stdout-broken"));
+    child.fireClose(0, null);
+  });
+  const result = await supervisor.await();
+  assert.ok(result.outcome.kind === "exited", "still classified exited");
+  if (result.outcome.kind === "exited") assert.ok(result.outcome.stdoutFailure !== null, "stdoutFailure must be set");
+});
+
+test("IO02 injected stderr stream failure appears in final result", async () => {
+  const signals = new FakeSignalPort();
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), stderrLimitBytes: 1024 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => {
+    child.fireSpawn();
+    (child.stderr as unknown as { emit: (e: string, ...args: unknown[]) => void }).emit("error", new Error("stderr-broken"));
+    child.fireClose(0, null);
+  });
+  const result = await supervisor.await();
+  assert.ok(result.outcome.kind === "exited", "still classified exited");
+  if (result.outcome.kind === "exited") assert.ok(result.outcome.stderrFailure !== null, "stderrFailure must be set");
+});

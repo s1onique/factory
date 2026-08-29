@@ -18,6 +18,7 @@ import type { Clock } from "./process-ports.js";
 export type SinkLike = {
   readonly captured: () => CapturedOutput;
   readonly closed: () => boolean;
+  readonly stdioFailure: () => import("./process-types.js").ProcessFailure | null;
 };
 
 /**
@@ -68,17 +69,21 @@ export function buildOutOutcomeResult(args: {
   startedAtMs: number;
 }): ProcessResult {
   const { spec, processId, stdoutSink, stderrSink, closeObserved, startedAtMs } = args;
+  const soF = stdoutSink.stdioFailure();
+  const seF = stderrSink.stdioFailure();
   let outcome: ProcessOutcome;
   if (closeObserved.signal !== null) {
     outcome = {
       kind: "signaled",
       signal: closeObserved.signal,
       exitCode: closeObserved.code,
+      stdoutFailure: soF,
+      stderrFailure: seF,
     };
   } else if (closeObserved.code !== null) {
-    outcome = { kind: "exited", exitCode: closeObserved.code };
+    outcome = { kind: "exited", exitCode: closeObserved.code, stdoutFailure: soF, stderrFailure: seF };
   } else {
-    outcome = { kind: "signaled", signal: null, exitCode: null };
+    outcome = { kind: "signaled", signal: null, exitCode: null, stdoutFailure: soF, stderrFailure: seF };
   }
   return {
     processId: processId as ProcessResult["processId"],
@@ -108,7 +113,13 @@ export function buildOutCleanupFailure(args: {
   return {
     processId: args.processId as ProcessResult["processId"],
     spec: args.spec,
-    outcome: { kind: "cleanup_failed", failure: args.failure, escalation: args.escalation },
+    outcome: {
+      kind: "cleanup_failed",
+      failure: args.failure,
+      escalation: args.escalation,
+      stdoutFailure: args.stdoutSink.stdioFailure(),
+      stderrFailure: args.stderrSink.stdioFailure(),
+    },
     stdout: args.stdoutSink.captured(),
     stderr: args.stderrSink.captured(),
     startedAtMs: args.startedAtMs,

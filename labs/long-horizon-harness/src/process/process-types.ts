@@ -90,12 +90,37 @@ export type EscalationEvidence = {
 };
 
 export type ProcessOutcome =
-  | { readonly kind: "exited"; readonly exitCode: number | null }
-  | { readonly kind: "signaled"; readonly signal: NodeJS.Signals | null; readonly exitCode: number | null }
-  | { readonly kind: "deadline"; readonly escalation: EscalationEvidence }
-  | { readonly kind: "cancelled"; readonly escalation: EscalationEvidence }
+  | { readonly kind: "exited"; readonly exitCode: number | null; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
+  | { readonly kind: "signaled"; readonly signal: NodeJS.Signals | null; readonly exitCode: number | null; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
+  | { readonly kind: "deadline"; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
+  | { readonly kind: "cancelled"; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
   | { readonly kind: "spawn_failed"; readonly failure: ProcessFailure }
-  | { readonly kind: "cleanup_failed"; readonly failure: ProcessFailure; readonly escalation: EscalationEvidence };
+  | { readonly kind: "cleanup_failed"; readonly failure: ProcessFailure; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null };
+
+/**
+ * Spawn resolution is a first-class state. Established eagerly
+ * during supervisor construction. Resolves when Node has
+ * definitively told us whether the child exists:
+ *
+ *   - spawned(pid, pgid)  — Node "spawn" event fired.
+ *   - spawn_failed(failure) — Node "error" event fired BEFORE
+ *     "spawn", or the spawn port threw synchronously.
+ */
+export type SpawnResolution =
+  | { readonly kind: "spawned"; readonly pid: number; readonly pgid: number }
+  | { readonly kind: "spawn_failed"; readonly failure: ProcessFailure };
+
+/**
+ * Final state of the eager process-completion promise:
+ *
+ *   - close(code, signal)  — Node "close" event fired (after
+ *     exit and stdio streams).
+ *   - spawn_error(error)  — Node "error" event fired BEFORE
+ *     "close" (spawn failure).
+ */
+export type ProcessCompletion =
+  | { readonly kind: "close"; readonly code: number | null; readonly signal: NodeJS.Signals | null }
+  | { readonly kind: "spawn_error"; readonly error: Error };
 
 export type ProcessHandle = {
   readonly processId: ProcessId;
@@ -127,7 +152,9 @@ export type RuntimeEvent =
   | { readonly kind: "signal_sent"; readonly processId: ProcessId; readonly signal: "SIGTERM" | "SIGKILL" | 0; readonly result: SignalAttemptResult }
   | { readonly kind: "process_exit_observed"; readonly processId: ProcessId; readonly exitCode: number | null; readonly signal: NodeJS.Signals | null }
   | { readonly kind: "cleanup_probe"; readonly processId: ProcessId; readonly probe: GroupProbe }
-  | { readonly kind: "cleanup_verified"; readonly processId: ProcessId };
+  | { readonly kind: "cleanup_verified"; readonly processId: ProcessId }
+  | { readonly kind: "cleanup_failed"; readonly processId: ProcessId; readonly failure: ProcessFailure }
+  | { readonly kind: "stdio_failure"; readonly processId: ProcessId; readonly stream: "stdout" | "stderr"; readonly failure: ProcessFailure };
 
 export type RuntimeEventSink = (e: RuntimeEvent) => void;
 

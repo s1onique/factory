@@ -99,10 +99,15 @@ export function createTerminationEngine(args: {
     };
 
     if (termResult.kind === "permission_denied") {
-      // Fail closed: do not fall back to immediate child.
+      // Fail closed: do not fall back to immediate child. The
+      // group probe may itself be denied; if so, propagate the
+      // permission_denied result truthfully.
       const finalProbe = args.signals.probeGroup(pgid);
-      evidence = { ...evidence, finalGroupProbe: finalProbe };
-      args.emitProbe(finalProbe);
+      const effectiveProbe = finalProbe.kind === "alive" || finalProbe.kind === "absent"
+        ? { kind: "permission_denied" as const }
+        : finalProbe;
+      evidence = { ...evidence, finalGroupProbe: effectiveProbe };
+      args.emitProbe(effectiveProbe);
       return evidence;
     }
 
