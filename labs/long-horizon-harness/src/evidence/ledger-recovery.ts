@@ -12,7 +12,12 @@
  *   3. attempt to fsync the parent directory entry where supported.
  *      If fsyncDir returns "error" we FAIL CLOSED — we do NOT
  *      truncate the authoritative ledger.
- *   4. only NOW truncate authoritative ledger to committed prefix.
+ *   4. (test seam) pre-truncate fault hook. If it aborts, the
+ *      authoritative ledger is byte-identical to its pre-recovery
+ *      snapshot.
+ *   5. only NOW truncate authoritative ledger to committed prefix
+ *      in place via `FileHandle.truncate(len)`. The committed prefix
+ *      is NEVER re-read or re-written.
  */
 
 import { promises as fs } from "node:fs";
@@ -25,7 +30,7 @@ import {
   quarantineTornTail,
   sha256OfBytes,
   splitOnTornTail,
-  writeAuthoritativeAndSync,
+  truncateAuthoritativeAndSync,
 } from "./ledger-internals.js";
 
 export type TornTailRecovery = {
@@ -39,21 +44,35 @@ export type TornTailRecovery = {
 /**
  * Test-only fault hook types. Production code MUST NOT pass these.
  *
- * The recovery phase emits only `InternalLedgerError`; other ledger
- * errors (`invalid_evidence`, `invalid_transition`) cannot arise here
- * because torn-tail recovery does not decode persisted envelope
- * contents. The hook callback accepts the wider {@link LedgerError}
- * union for compatibility with the {@link LedgerFaultHook} in
- * {@link jsonl-ledger.ts}, but the recovery phase only feeds it
- * `InternalLedgerError` results.
+ * Two seams:
+ *   - `beforeQuarantineWrite` — fires after torn detection but
+ *     before any destructive IO. Used by QF01.
+ *   - `beforeAuthoritativeTruncate` — fires AFTER quarantine is
+ *     durable and AFTER directory fsync, but BEFORE the
+ *     authoritative ledger is truncated. Used by TR01.
+ *
+ * The recovery phase emits only `InternalLedgerError`. The hook
+ * callbacks accept the wider {@link LedgerError} union for
+ * compatibility with {@link LedgerFaultHook}, but the recovery
+ * phase only feeds them `InternalLedgerError` results.
  */
 import type { LedgerError } from "./jsonl-ledger.js";
 
-export type RecoveryFaultHook = {
-  readonly kind: "beforeQuarantineWrite";
-  readonly tornBytes: Buffer;
-  readonly respond: (r: Result<void, LedgerError>) => Result<void, LedgerError>;
-};
+export type RecoveryFaultHook =
+  | {
+      readonly kind: "beforeQuarantineWrite";
+      readonly tornBytes: Buffer;
+      readonly respond: (
+        r: Result<void, LedgerError>,
+      ) => Result<void, LedgerError>;
+    }
+  | {
+      readonly kind: "beforeAuthoritativeTruncate";
+      readonly committedPrefixLength: number;
+      readonly respond: (
+        r: Result<void, LedgerError>,
+      ) => Result<void, LedgerError>;
+    };
 
 export type RecoveryResult = Result<TornTailRecovery, InternalLedgerError>;
 
@@ -66,7 +85,11 @@ export async function performTornTailRecovery(args: {
   try {
     raw = await fs.readFile(args.filePath);
   } catch (e: unknown) {
-    return err(e instanceof Error ? { kind: "internal_failure", message: e.message } : { kind: "internal_failure", message: String(e) });
+    return err(
+      e instanceof Error
+        ? { kind: "internal_failure", message: e.message }
+        : { kind: "internal_failure", message: String(e) },
+    );
   }
   const split = splitOnTornTail(raw);
   if (split.tornBytes.length === 0) {
@@ -76,7 +99,10 @@ export async function performTornTailRecovery(args: {
   const sha = sha256OfBytes(split.tornBytes);
 
   // 1. (test seam) fire pre-quarantine fault hook.
-  if (args.faultHook !== null) {
+  if (
+    args.faultHook !== null &&
+    args.faultHook.kind === "beforeQuarantineWrite"
+  ) {
     const hook = args.faultHook;
     const response = hook.respond(ok(undefined));
     if (response.ok === false) {
@@ -108,20 +134,37 @@ export async function performTornTailRecovery(args: {
     });
   }
 
-  // 4. only NOW truncate authoritative ledger to committed prefix.
+  // 4. arithmetic sanity + (test seam) pre-truncate fault hook.
   if (
     split.committedBytes.length + split.tornBytes.length !== raw.length
   ) {
     return err(internal("torn-tail split arithmetic mismatch"));
   }
-  const writeResult = await writeAuthoritativeAndSync(
+  const committedPrefixLength = split.committedBytes.length;
+  if (
+    args.faultHook !== null &&
+    args.faultHook.kind === "beforeAuthoritativeTruncate"
+  ) {
+    const hook = args.faultHook;
+    const response = hook.respond(ok(undefined));
+    if (response.ok === false) {
+      return err({
+        kind: "internal_failure",
+        message: `Pre-truncate hook aborted recovery: ${response.error.kind === "internal_failure" ? response.error.message : response.error.kind}`,
+      });
+    }
+  }
+
+  // 5. MONOTONIC repair: shorten the file in place; never re-read
+  //    or re-write the committed prefix.
+  const truncResult = await truncateAuthoritativeAndSync(
     args.filePath,
-    split.committedBytes,
+    committedPrefixLength,
   );
-  if (writeResult.ok === false) {
+  if (truncResult.ok === false) {
     return err({
       kind: "internal_failure",
-      message: `Authoritative ledger repair failed: ${writeResult.error.message}`,
+      message: `Authoritative ledger repair failed: ${truncResult.error.message}`,
     });
   }
 

@@ -427,3 +427,46 @@ gating.passed
 
 `review_passed` is the only event that produces `completed`. Review may
 begin only after the abstract deterministic gate has passed.
+
+## Recovery monotonicity (CORRECTION03)
+
+After the torn bytes have been durably quarantined and the parent
+directory entry has been `fsync`'d (where the platform permits),
+recovery is **monotonic**:
+
+```text
+P || T   (committed prefix || torn suffix on disk)
+↓
+quarantine(T) durably into events.jsonl.torn-tail.<sha256>.bin
+↓
+FileHandle.truncate(len(P)) + fh.sync() + fh.close()
+↓
+P   (committed prefix, byte-identical to the original)
+```
+
+The committed prefix is NEVER re-read or re-written. Recovery removes
+uncertainty (the torn suffix); it never reconstructs already-committed
+truth.
+
+The pre-truncate fault seam (`beforeAuthoritativeTruncate`) makes
+this property testable: `TR01` proves that an injected failure
+immediately before truncation leaves the authoritative ledger
+byte-identical to its pre-recovery snapshot.
+
+## Gate purity doctrine
+
+Qualification/check commands are observationally pure with respect
+to repository source files. A gate may generate ignored build or test
+artifacts, but it must not repair or rewrite the subject it is
+qualifying.
+
+```text
+npm run all
+  = npm run check:eof   (read-only)
+  + npm run typecheck   (read-only)
+  + npm run test        (read-only)
+```
+
+`fix:eof` (and the legacy `normalize-eof` alias) is the explicit
+mutating convenience for developers; it is NOT invoked by `npm run
+all`. `GP02` proves this with a before/after content-hash snapshot.

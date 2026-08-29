@@ -15,8 +15,9 @@
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",
     "check:eof": "node --import tsx --test --test-reporter=spec test/ledger-evidence.test.ts",
+    "fix:eof": "node scripts/normalize-eof.mjs",
     "normalize-eof": "node scripts/normalize-eof.mjs",
-    "all": "npm run normalize-eof && npm run typecheck && npm run test"
+    "all": "npm run check:eof && npm run typecheck && npm run test"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

@@ -623,14 +623,6 @@ test("C13 append remains usable after a real pre-write failure", async () => {
 
     ledger.armFaultHook({
       kind: "beforeAppendWrite",
-      payload: {
-        ...makeEvent("preparation_started"),
-        eventId: makeEventId("e-injected"),
-        runId: RUN_ID,
-        missionId: MISSION_ID,
-        seq: 0,
-        observedAt: 0,
-      },
       respond: () => ({
         ok: false,
         error: {
@@ -665,6 +657,10 @@ test("C13 append remains usable after a real pre-write failure", async () => {
     });
     assert.equal(r2.ok, true);
     if (r2.ok === true) {
+      // The failed append did NOT consume a sequence. The next
+      // successful append uses the same next sequence (2), which
+      // proves the mutex released and the sequence allocator did
+      // not advance for the failed call.
       assert.equal(r2.value.seq, 2);
     }
 

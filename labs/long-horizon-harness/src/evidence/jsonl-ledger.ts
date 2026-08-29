@@ -84,11 +84,15 @@ export type LedgerOpenOptions = {
  *    opened for append.
  *  - beforeQuarantineWrite — fires inside torn-tail recovery AFTER
  *    torn-tail detection and BEFORE quarantine preservation.
+ *  - beforeAuthoritativeTruncate — fires inside torn-tail recovery
+ *    AFTER quarantine is durable and AFTER directory fsync, but
+ *    BEFORE the authoritative ledger is truncated. If it aborts,
+ *    the authoritative ledger is byte-identical to its pre-recovery
+ *    snapshot (recovery is monotonic up to the destructive step).
  */
 export type LedgerFaultHook =
   | {
       readonly kind: "beforeAppendWrite";
-      readonly payload: CommittedRunEvent;
       readonly respond: (
         r: Result<void, LedgerError>,
       ) => Result<void, LedgerError>;
@@ -96,6 +100,13 @@ export type LedgerFaultHook =
   | {
       readonly kind: "beforeQuarantineWrite";
       readonly tornBytes: Buffer;
+      readonly respond: (
+        r: Result<void, LedgerError>,
+      ) => Result<void, LedgerError>;
+    }
+  | {
+      readonly kind: "beforeAuthoritativeTruncate";
+      readonly committedPrefixLength: number;
       readonly respond: (
         r: Result<void, LedgerError>,
       ) => Result<void, LedgerError>;
@@ -204,19 +215,25 @@ export class JsonlLedger {
       // Probe for torn tail: read raw bytes and attempt recovery
       // only if a non-empty unterminated suffix is present.
       const probe = await fs.readFile(this.filePath).catch(() => null);
-      if (probe !== null && probe.length > 0 && probe[probe.length - 1] !== 0x0a) {
-        const preQuarantine: RecoveryFaultHook | null =
-          this.faultHook !== null && this.faultHook.kind === "beforeQuarantineWrite"
+      if (
+        probe !== null &&
+        probe.length > 0 &&
+        probe[probe.length - 1] !== 0x0a
+      ) {
+        const recoveryHook: RecoveryFaultHook | null =
+          this.faultHook !== null &&
+          (this.faultHook.kind === "beforeQuarantineWrite" ||
+            this.faultHook.kind === "beforeAuthoritativeTruncate")
             ? this.faultHook
             : null;
         const rec = await performTornTailRecovery({
           filePath: this.filePath,
           dirPath: this.dirPath,
-          faultHook: preQuarantine,
+          faultHook: recoveryHook,
         });
         if (rec.ok === false) return err(rec.error);
         recovery = rec.value;
-        if (preQuarantine !== null) {
+        if (recoveryHook !== null) {
           this.faultHook = null;
         }
       }
