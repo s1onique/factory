@@ -17,6 +17,8 @@ import {
   NODE_RUNTIME,
   makeEnv,
   withLiveSupervisor,
+  registerLiveFixturePgid,
+  unregisterLiveFixturePgid,
 } from "./helpers.js";
 
 import assert from "node:assert/strict";
@@ -206,18 +208,33 @@ export const LIVE_CASES: readonly LiveCase[] = [
     run: async ({ ok }) => {
       const { spawn } = await import("node:child_process");
       const c = spawn(NODE_RUNTIME, [FIXTURE_JS, "sleep", "--ms", "5000"], { detached: true, stdio: ["ignore", "ignore", "ignore"], env: { ...makeEnv() } });
+      const pgid = c.pid;
+      if (pgid === null || pgid === undefined) throw new Error("no pid");
+      // Synchronous registration: register BEFORE any further
+      // hazardous logic (signal-zero, SIGKILL, reap).
+      registerLiveFixturePgid(pgid);
       try {
         await new Promise((res) => setTimeout(res, 50));
-        const pgid = c.pid;
-        if (pgid === null || pgid === undefined) throw new Error("no pid");
         process.kill(-pgid, 0);
         process.kill(-pgid, "SIGKILL");
-      } finally {
         await new Promise<void>((resolve) => {
           let done = false;
           c.on("exit", () => { if (!done) { done = true; resolve(); } });
           setTimeout(() => { if (!done) resolve(); }, 1000);
         });
+        // Probe absence before unregistering.
+        let absent = false;
+        try {
+          process.kill(-pgid, 0);
+        } catch (e: unknown) {
+          const code = typeof e === "object" && e !== null && "code" in e ? (e as { code: unknown }).code : undefined;
+          if (code === "ESRCH") absent = true;
+        }
+        if (absent) unregisterLiveFixturePgid(pgid);
+      } catch (e) {
+        // Leave the registry entry intact so after-suite sweep
+        // can see it.
+        throw e;
       }
       ok(true, "negative-PGID signal-zero probe succeeded");
     },

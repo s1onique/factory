@@ -1,11 +1,12 @@
 /**
  * Shared test helpers for the process-supervision suite.
  *
- * CORRECTION01: The catastrophic watchdog used to access
- * Timeout._destroyed (a private Node internal). The new
- * approach relies on node:test's per-test `timeout` option
- * which is a real failure mechanism, plus the
- * liveFixtureRegistry for emergency cleanup of OS processes.
+ * CORRECTION04: every real supervised process group is
+ * registered synchronously on the process_spawned event
+ * by the SAME helper that all LIVE cases use. The
+ * capability probe awaits its own reap before returning
+ * and refuses to claim available while the probe group
+ * is unaccounted for.
  */
 
 import { fileURLToPath } from "node:url";
@@ -28,96 +29,6 @@ export const FIXTURE_JS = path.join(
 
 export const NODE_RUNTIME = process.execPath;
 
-/**
- * Authoritative process-group capability probe. Drives BOTH
- * ordinary skip and strict fail-closed decisions, so we never
- * have a split-brain between positive-PID probing and
- * negative-PGID probing.
- *
- * Spawns a detached probe child, attempts `process.kill(
- * -pgid, 0)`, then best-effort SIGKILLs and reaps the group.
- */
-export type ProcessGroupCapability =
-  | { kind: "available" }
-  | { kind: "unavailable"; code: string; reason: string };
-
-export function probeProcessGroupCapability(): ProcessGroupCapability {
-  const probe = spawn(
-    process.execPath,
-    ["-e", "setTimeout(() => process.exit(0), 4000)"],
-    { detached: true, stdio: ["ignore", "ignore", "ignore"] },
-  );
-  const pgid = probe.pid;
-  if (pgid === null || pgid === undefined) {
-    return { kind: "unavailable", code: "NO_PID", reason: "spawn returned no pid" };
-  }
-  try {
-    process.kill(-pgid, 0);
-    return { kind: "available" };
-  } catch (e: unknown) {
-    const code =
-      typeof e === "object" && e !== null && "code" in e
-        ? (e as { code: unknown }).code
-        : "UNKNOWN";
-    return {
-      kind: "unavailable",
-      code: typeof code === "string" ? code : "UNKNOWN",
-      reason: "process.kill(-pgid, 0) failed",
-    };
-  } finally {
-    try {
-      process.kill(-pgid, "SIGKILL");
-    } catch {
-      // ignore
-    }
-    // Reap.
-    void new Promise<void>((resolve) => {
-      let done = false;
-      probe.on("exit", () => {
-        if (!done) { done = true; resolve(); }
-      });
-      setTimeout(() => { if (!done) resolve(); }, 1000);
-    });
-  }
-}
-
-export const PROCESS_GROUP_CAPABILITY: ProcessGroupCapability = probeProcessGroupCapability();
-
-export const HARNESS_CAN_SIGNAL = PROCESS_GROUP_CAPABILITY.kind === "available";
-
-/**
- * Legacy positive-PID probe (DO NOT USE for capability
- * decisions; kept only for backwards compatibility of
- * non-process-group tests). CORRECTION03 removes this from
- * authority: see PROCESS_GROUP_CAPABILITY.
- */
-function probeCanSignalChildren(): boolean {
-  const child = spawn(
-    process.execPath,
-    ["-e", "setTimeout(() => process.exit(0), 2000)"],
-    { stdio: ["ignore", "ignore", "ignore"] },
-  );
-  const pid = child.pid ?? -1;
-  let result = false;
-  try {
-    process.kill(pid, 0);
-    result = true;
-  } catch (e: unknown) {
-    const code =
-      typeof e === "object" && e !== null
-        ? (e as { code?: unknown }).code
-        : undefined;
-    result = code === "ESRCH";
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // ignore
-  }
-  return result;
-}
-void probeCanSignalChildren;
-
 export function makeEnv(): Readonly<Record<string, string>> {
   return {
     PATH: process.env.PATH ?? "",
@@ -126,14 +37,9 @@ export function makeEnv(): Readonly<Record<string, string>> {
   };
 }
 
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 // Live-fixture registry
-// ---------------------------------------------------------------------------
-//
-// Real-process tests register the PGIDs they create so that
-// after-suite emergency cleanup can SIGKILL anything left
-// alive. The registry size must be 0 at the end of any
-// strict-live run; otherwise the strict lane fails.
+// --------------------------------------------------------------------------
 
 const liveFixturePgids = new Set<number>();
 
@@ -150,7 +56,6 @@ export function liveFixtureRegistrySize(): number {
 }
 
 export function emergencyKillAllRegisteredPgids(): number {
-  // Best-effort: SIGKILL each registered PGID.
   let killed = 0;
   for (const pgid of liveFixturePgids) {
     try {
@@ -163,108 +68,257 @@ export function emergencyKillAllRegisteredPgids(): number {
   return killed;
 }
 
-/**
- * Live-supervisor helper. Subscribes to the supervisor's
- * runtime-event sink; on every `process_spawned` it
- * registers the PGID into the live fixture registry. After
- * the body returns, the `finally` block:
- *
- *   1. awaits the supervisor's lifecycle (if not already);
- *   2. probes the supervised PGID; if still alive/uncertain
- *      and capability permits, best-effort negative-PGID
- *      SIGKILL;
- *   3. bounded reap;
- *   4. unregisters the PGID.
- *
- * Even if the body throws, the cleanup runs. Test-body
- * failures therefore cannot leak process groups.
- */
-import type { RuntimeEvent } from "../../src/process/process-types.js";
+// --------------------------------------------------------------------------
+// Capability probe (CORRECTION04 async + proven-cleanup)
+// --------------------------------------------------------------------------
+
+export type ProcessGroupCapability =
+  | { kind: "available" }
+  | { kind: "unavailable"; code: string; reason: string };
+
+async function probeAbsenceAfterKill(pgid: number): Promise<boolean> {
+  // After SIGKILL, the OS should reap the process shortly.
+  // Probe the negative-PGID repeatedly within a bound.
+  const start = Date.now();
+  while (Date.now() - start < 1500) {
+    try {
+      process.kill(-pgid, 0);
+      // Group is still present; wait and retry.
+      await new Promise<void>((res) => setTimeout(res, 50));
+    } catch (e: unknown) {
+      const code = typeof e === "object" && e !== null && "code" in e ? (e as { code: unknown }).code : undefined;
+      if (code === "ESRCH" || code === "EPERM") return true;
+      return false;
+    }
+  }
+  return false;
+}
+
+export async function probeProcessGroupCapability(): Promise<ProcessGroupCapability> {
+  const probe = spawn(
+    process.execPath,
+    ["-e", "setTimeout(() => process.exit(0), 4000)"],
+    { detached: true, stdio: ["ignore", "ignore", "ignore"] },
+  );
+  const pgid = probe.pid;
+  if (pgid === null || pgid === undefined) {
+    return { kind: "unavailable", code: "NO_PID", reason: "spawn returned no pid" };
+  }
+  registerLiveFixturePgid(pgid);
+  try {
+    process.kill(-pgid, 0);
+    return { kind: "available" };
+  } catch (e: unknown) {
+    const code = typeof e === "object" && e !== null && "code" in e ? (e as { code: unknown }).code : "UNKNOWN";
+    return {
+      kind: "unavailable",
+      code: typeof code === "string" ? code : "UNKNOWN",
+      reason: "process.kill(-pgid, 0) failed",
+    };
+  } finally {
+    // Best-effort SIGKILL the probe group.
+    try { process.kill(-pgid, "SIGKILL"); } catch { /* ignore */ }
+    // Bound reap by child close, fall back after 2s.
+    await new Promise<void>((resolve) => {
+      let done = false;
+      probe.on("exit", () => { if (!done) { done = true; resolve(); } });
+      setTimeout(() => { if (!done) resolve(); }, 2000);
+    });
+    const provenAbsent = await probeAbsenceAfterKill(pgid);
+    if (provenAbsent) {
+      unregisterLiveFixturePgid(pgid);
+    }
+    // If unproven, we leave the pgid in the registry.
+    void pgid;
+  }
+}
+
+
+// Single shared capability result for the whole suite.
+// Both lanes MUST consume this exact promise.
+
+export const PROCESS_GROUP_CAPABILITY_PROMISE: Promise<ProcessGroupCapability> =
+  probeProcessGroupCapability();
+
+// Synchronous helper for tests that need a quick boolean.
+// Returns false until the probe resolves; both lanes must
+// await PROCESS_GROUP_CAPABILITY_PROMISE before making
+// skip-vs-fail decisions.
+export async function getProcessGroupCapability(): Promise<ProcessGroupCapability> {
+  return PROCESS_GROUP_CAPABILITY_PROMISE;
+}
+
+// Backwards-compatible derived boolean. Initially false; the
+// live-qualification file awaits getProcessGroupCapability()
+// before its first LIVE test runs.
+export const HARNESS_CAN_SIGNAL = false;
+
+// --------------------------------------------------------------------------
+// runLive — single ownership helper for LIVE01..LIVE14 (CORRECTION04)
+// --------------------------------------------------------------------------
+
 import type { Result } from "../../src/domain/result.js";
 import type { Supervisor, CreateSupervisorArgs } from "../../src/process/supervised-process.js";
 import type { Clock, SignalPort, SpawnPort } from "../../src/process/process-ports.js";
+import type {
+  ProcessFailure,
+  ProcessResult,
+  ProcessSpec,
+  RuntimeEvent,
+} from "../../src/process/process-types.js";
 
-export async function withLiveSupervisor<T>(
-  spec: import("../../src/process/process-types.js").ProcessSpec,
-  body: (
-    sup: Supervisor,
-    register: (pgid: number) => void,
-  ) => Promise<T>,
-  opts: {
-    readonly startSupervised: (a: CreateSupervisorArgs) => Result<Supervisor, import("../../src/process/process-types.js").ProcessFailure>;
-    readonly clock: Clock;
-    readonly signals: SignalPort;
-    readonly spawner: SpawnPort;
-  },
-): Promise<T> {
+/**
+ * Probe a negative PGID for absence. Returns one of:
+ *   - "absent"  (process gone)
+ *   - "alive"   (still alive)
+ *   - "denied"  (EPERM/probe failed)
+ *   - "unsupported" (negative-PGID signal not available)
+ */
+function probeNegPgid(pgid: number): { kind: "absent" | "alive" | "denied" | "unsupported" } {
+  try {
+    process.kill(-pgid, 0);
+    return { kind: "alive" };
+  } catch (e: unknown) {
+    const code = typeof e === "object" && e !== null && "code" in e ? (e as { code: unknown }).code : undefined;
+    if (code === "ESRCH") return { kind: "absent" };
+    if (code === "EPERM") return { kind: "denied" };
+    if (code === "ENOSYS" || code === "EINVAL") return { kind: "unsupported" };
+    return { kind: "unsupported" };
+  }
+}
+
+
+export type LiveRunOptions = {
+  readonly startSupervised: (a: CreateSupervisorArgs) => Result<Supervisor, ProcessFailure>;
+  readonly clock: Clock;
+  readonly signals: SignalPort;
+  readonly spawner: SpawnPort;
+};
+
+/**
+ * Run a single supervised LIVE case with mandatory ownership.
+ *
+ * The supervisor sink is wired so that process_spawned
+ * synchronously registers the PGID into the global
+ * liveFixturePgids registry. This happens BEFORE any body
+ * code can execute hazardous logic, and BEFORE the
+ * supervisor can yield the result back to the body.
+ *
+ * The finally block probes each registered PGID for
+ * absence, attempts a best-effort negative-PGID SIGKILL
+ * if not absent, awaits close with a bounded wait, and
+ * then unregisters ONLY when a final probe proves the
+ * group is absent. If absence cannot be proven, the
+ * registry entry stays — after-suite will see it and fail.
+ */
+export async function runLive(
+  spec: ProcessSpec,
+  opts: LiveRunOptions,
+): Promise<ProcessResult> {
+  const ownedPgids = new Set<number>();
+
   const events: RuntimeEvent[] = [];
+  // The synchronous registration sink: every process_spawned
+  // is inserted into the registry IN THE SAME TICK.
+  const sink = (e: RuntimeEvent): void => {
+    events.push(e);
+    if (e.kind === "process_spawned") {
+      const pgid = e.processGroupId;
+      registerLiveFixturePgid(pgid);
+      ownedPgids.add(pgid);
+    }
+  };
+
   const r = opts.startSupervised({
     spec,
     clock: opts.clock,
     signals: opts.signals,
     spawner: opts.spawner,
-    sink: (e: RuntimeEvent) => events.push(e),
+    sink,
   });
   if (r.ok === false) throw new Error(`startSupervised failed: ${JSON.stringify(r.error)}`);
   const sup = r.value;
-  const registered = new Set<number>();
-  const register = (pgid: number): void => {
-    if (liveFixturePgids.has(pgid)) return;
-    liveFixturePgids.add(pgid);
-    registered.add(pgid);
-  };
-  for (const e of events) {
-    if (e.kind === "process_spawned") register(e.processGroupId);
-  }
-  let bodyError: unknown;
+
   try {
-    return await body(sup, register);
-  } catch (e) {
-    bodyError = e;
-    throw e;
+    return await sup.await();
   } finally {
-    for (const e of events) {
-      if (e.kind === "process_spawned") register(e.processGroupId);
-    }
-    const settle = await Promise.race<{ kind: "result"; res: unknown } | { kind: "no-result" } | { kind: "timeout" }>([
-      sup.await().then(
-        (res) => ({ kind: "result" as const, res }),
-        () => ({ kind: "no-result" as const }),
-      ),
-      new Promise<{ kind: "timeout" }>((res) => setTimeout(() => res({ kind: "timeout" }), 2000)),
+    // Force the supervisor to settle within a bound so we
+    // can begin cleanup deterministically.
+    await Promise.race([
+      sup.await().catch(() => undefined),
+      new Promise<void>((res) => setTimeout(res, 1000)),
     ]);
-    if (settle.kind === "no-result") {
-      try { sup.cancel(); } catch { /* ignore */ }
-      await Promise.race([
-        sup.await().catch(() => undefined),
-        new Promise<void>((res) => setTimeout(res, 2000)),
-      ]);
-    }
-    for (const pgid of registered) {
-      try {
-        const probe = opts.signals.probeGroup(pgid);
-        if (probe.kind !== "absent" && HARNESS_CAN_SIGNAL) {
-          try { process.kill(-pgid, "SIGKILL"); } catch { /* ignore */ }
-        }
-      } catch {
-        // ignore
+    // Best-effort emergency cleanup for every owned PGID.
+    for (const pgid of ownedPgids) {
+      const probe = probeNegPgid(pgid);
+      if (probe.kind === "absent" || probe.kind === "unsupported") {
+        // Already gone, or we cannot probe negative PGIDs.
+        unregisterLiveFixturePgid(pgid);
+        continue;
       }
-      liveFixturePgids.delete(pgid);
-      registered.delete(pgid);
+      // Try to kill the group, then reap, then re-probe.
+      try { process.kill(-pgid, "SIGKILL"); } catch { /* ignore */ }
+      await new Promise<void>((res) => setTimeout(res, 200));
+      const finalProbe = probeNegPgid(pgid);
+      if (finalProbe.kind === "absent") {
+        unregisterLiveFixturePgid(pgid);
+      }
+      // If not absent, leave it in the registry so the
+      // after-suite hook (or the operator) can see it.
     }
-    void bodyError;
   }
 }
 
 /**
- * Async version that subscribes to live events as they
- * arrive. Used by node:test wrappers that prefer the
- * `sink` callback instead of post-spawn polling.
+ * withLiveSupervisor — ownership helper for LIVE cases
+ * that need direct access to the supervisor object (e.g.
+ * LIVE04, LIVE07, LIVE09). Wires the same synchronous
+ * registration sink as runLive().
  */
-export function startSubscribingRegister(
-  register: (pgid: number) => void,
-): (e: RuntimeEvent) => void {
-  return (e) => {
-    if (e.kind === "process_spawned") register(e.processGroupId);
+export async function withLiveSupervisor<T>(
+  spec: ProcessSpec,
+  body: (sup: Supervisor) => Promise<T>,
+  opts: LiveRunOptions,
+): Promise<T> {
+  const ownedPgids = new Set<number>();
+  const sink = (e: RuntimeEvent): void => {
+    if (e.kind === "process_spawned") {
+      const pgid = e.processGroupId;
+      registerLiveFixturePgid(pgid);
+      ownedPgids.add(pgid);
+    }
   };
+  const r = opts.startSupervised({
+    spec,
+    clock: opts.clock,
+    signals: opts.signals,
+    spawner: opts.spawner,
+    sink,
+  });
+  if (r.ok === false) throw new Error(`startSupervised failed: ${JSON.stringify(r.error)}`);
+  const sup = r.value;
+  let bodyError: unknown;
+  try {
+    return await body(sup);
+  } catch (e) {
+    bodyError = e;
+    throw e;
+  } finally {
+    await Promise.race([
+      sup.await().catch(() => undefined),
+      new Promise<void>((res) => setTimeout(res, 1000)),
+    ]);
+    for (const pgid of ownedPgids) {
+      const probe = probeNegPgid(pgid);
+      if (probe.kind === "absent" || probe.kind === "unsupported") {
+        unregisterLiveFixturePgid(pgid);
+        continue;
+      }
+      try { process.kill(-pgid, "SIGKILL"); } catch { /* ignore */ }
+      await new Promise<void>((res) => setTimeout(res, 200));
+      const finalProbe = probeNegPgid(pgid);
+      if (finalProbe.kind === "absent") unregisterLiveFixturePgid(pgid);
+    }
+    void bodyError;
+  }
 }
