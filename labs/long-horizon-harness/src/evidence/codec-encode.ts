@@ -1,8 +1,13 @@
 /**
- * Encoder: lift typed domain events into the persisted envelope shape.
+ * Encoder: lift a typed {@link CommittedRunEvent} into the persisted
+ * envelope shape.
+ *
+ * The encoder accepts a single committed event (payload + metadata)
+ * and derives the envelope identity from that event's branded fields.
+ * No `as` assertions are used.
  */
 
-import type { RunEvent } from "../domain/run-event.js";
+import type { CommittedRunEvent } from "../domain/run-event.js";
 import type { Failure } from "../domain/failure.js";
 import type { BudgetObservation } from "../domain/budget.js";
 import type {
@@ -11,28 +16,20 @@ import type {
   PersistedEvent,
   PersistedFailure,
 } from "./codec-types.js";
-import type { EventId, MissionId, RunId } from "../domain/ids.js";
 
-export function encodeEnvelope(args: {
-  readonly eventId: string;
-  readonly runId: string;
-  readonly missionId: string;
-  readonly sequence: number;
-  readonly observedAt: number;
-  readonly event: RunEvent;
-}): EventEnvelope {
+export function encodeEnvelope(event: CommittedRunEvent): EventEnvelope {
   return {
     schema_version: 1,
-    event_id: args.eventId as EventId,
-    run_id: args.runId as RunId,
-    mission_id: args.missionId as MissionId,
-    sequence: args.sequence,
-    observed_at: args.observedAt,
-    event: encodePersistedEvent(args.event),
+    event_id: event.eventId,
+    run_id: event.runId,
+    mission_id: event.missionId,
+    sequence: event.seq,
+    observed_at: event.observedAt,
+    event: encodePersistedEvent(event),
   };
 }
 
-export function encodePersistedEvent(e: RunEvent): PersistedEvent {
+export function encodePersistedEvent(e: CommittedRunEvent): PersistedEvent {
   switch (e.type) {
     case "run_created":
     case "preparation_started":

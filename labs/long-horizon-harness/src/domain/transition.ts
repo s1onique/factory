@@ -11,9 +11,10 @@
  *
  * Doctrines enforced:
  *  - D02: agent_reported_completion NEVER produces completed.
- *  - I07: gate_failed never produces completed.
  *  - I02..I06: terminal states are immutable under ordinary events.
  *  - I08: invalid state/event pairs return typed rejections.
+ *  - F01/CORRECTION01: gating requires explicit gate proof; review
+ *    cannot start before the abstract deterministic gate has passed.
  *
  * Per-state logic lives in sibling files to keep this entry-point small.
  */

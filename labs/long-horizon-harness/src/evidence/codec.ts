@@ -8,9 +8,10 @@
  *   - `codec-decode-internals.ts` — shared field decoders
  *   - `codec-decode-failure.ts`   — failure/budget decoders
  *   - `codec-decode-lift.ts`  — typed envelope → typed RunEvent
+ *   - `envelope-to-committed.ts` — envelope → committed RunEvent
  */
 
 export * from "./codec-types.js";
 export * from "./codec-encode.js";
 export * from "./codec-decode.js";
-export type { EventEnvelope } from "./codec-types.js";
+export * from "./envelope-to-committed.js";

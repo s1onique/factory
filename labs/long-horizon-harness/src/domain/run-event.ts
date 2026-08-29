@@ -64,15 +64,22 @@ export function isRunEventType(value: unknown): value is RunEventType {
 }
 
 /**
- * Common payload fields every event carries.
+ * Common metadata fields every committed event carries.
  *
- * - eventId: stable identifier of this event.
- * - runId/missionId: identity. missionId must match the run's mission.
- * - seq: monotonically increasing per-run sequence (validated by codec).
- * - observedAt: timestamp observed by the supervisor at the moment the event
- *   was emitted. Replay correctness MUST NOT depend on this value.
+ *  - eventId:    stable identifier of this event.
+ *  - runId:      run identity. Must equal the run this event belongs to.
+ *  - missionId:  mission identity. Must equal the run's mission.
+ *  - seq:        monotonically increasing per-run sequence (allocated by
+ *                the ledger; never supplied by event producers).
+ *  - observedAt: timestamp observed by the supervisor at the moment the
+ *                event was emitted. Replay correctness MUST NOT depend
+ *                on this value.
+ *
+ * This shape is only constructed by the ledger when committing a payload.
+ * Event producers do NOT produce this shape directly; they produce
+ * {@link RunEventPayload} and let the ledger attach the metadata.
  */
-type EventBase = {
+export type EventMetadata = {
   readonly eventId: EventId;
   readonly runId: RunId;
   readonly missionId: MissionId;
@@ -80,25 +87,51 @@ type EventBase = {
   readonly observedAt: number;
 };
 
-export type RunEvent =
-  | (EventBase & { readonly type: "run_created" })
-  | (EventBase & { readonly type: "preparation_started" })
-  | (EventBase & { readonly type: "preparation_succeeded" })
-  | (EventBase & { readonly type: "preparation_failed"; readonly failure: Failure })
-  | (EventBase & { readonly type: "attempt_started"; readonly attemptId: AttemptId })
-  | (EventBase & { readonly type: "agent_reported_completion"; readonly attemptId: AttemptId; readonly summary: string })
-  | (EventBase & { readonly type: "agent_failed"; readonly attemptId: AttemptId; readonly failure: Failure })
-  | (EventBase & { readonly type: "gating_started"; readonly attemptId: AttemptId; readonly gate: string })
-  | (EventBase & { readonly type: "gate_passed"; readonly attemptId: AttemptId; readonly gate: string })
-  | (EventBase & { readonly type: "gate_failed"; readonly attemptId: AttemptId; readonly gate: string; readonly failure: Failure })
-  | (EventBase & { readonly type: "repair_started"; readonly reason: Failure })
-  | (EventBase & { readonly type: "review_started" })
-  | (EventBase & { readonly type: "review_passed" })
-  | (EventBase & { readonly type: "review_failed"; readonly failure: Failure })
-  | (EventBase & { readonly type: "budget_exhausted"; readonly observation: BudgetObservation })
-  | (EventBase & { readonly type: "blocked"; readonly reason: Failure })
-  | (EventBase & { readonly type: "crashed"; readonly reason: Failure })
-  | (EventBase & { readonly type: "cancelled" });
+/**
+ * Authoritative event payload.
+ *
+ * This is the candidate-neutral description of what happened. It carries
+ * no ledger-owned metadata (sequence, run/mission ids, observedAt). The
+ * ledger stamps metadata onto a payload to produce a
+ * {@link CommittedRunEvent}.
+ *
+ * Every lifecycle event in FOUNDATION01 corresponds to exactly one
+ * payload variant below.
+ */
+export type RunEventPayload =
+  | { readonly type: "run_created" }
+  | { readonly type: "preparation_started" }
+  | { readonly type: "preparation_succeeded" }
+  | { readonly type: "preparation_failed"; readonly failure: Failure }
+  | { readonly type: "attempt_started"; readonly attemptId: AttemptId }
+  | { readonly type: "agent_reported_completion"; readonly attemptId: AttemptId; readonly summary: string }
+  | { readonly type: "agent_failed"; readonly attemptId: AttemptId; readonly failure: Failure }
+  | { readonly type: "gating_started"; readonly attemptId: AttemptId; readonly gate: string }
+  | { readonly type: "gate_passed"; readonly attemptId: AttemptId; readonly gate: string }
+  | { readonly type: "gate_failed"; readonly attemptId: AttemptId; readonly gate: string; readonly failure: Failure }
+  | { readonly type: "repair_started"; readonly reason: Failure }
+  | { readonly type: "review_started" }
+  | { readonly type: "review_passed" }
+  | { readonly type: "review_failed"; readonly failure: Failure }
+  | { readonly type: "budget_exhausted"; readonly observation: BudgetObservation }
+  | { readonly type: "blocked"; readonly reason: Failure }
+  | { readonly type: "crashed"; readonly reason: Failure }
+  | { readonly type: "cancelled" };
+
+/**
+ * A committed event: payload stamped with ledger-owned metadata.
+ *
+ * This is the only shape the rest of the lab consumes; the encoder and
+ * decoder both produce it. The ledger produces it; event producers do
+ * not.
+ */
+export type CommittedRunEvent = EventMetadata & RunEventPayload;
+
+/**
+ * Ergonomic alias preserved from FOUNDATION01. The lab calls these
+ * "RunEvent"s everywhere; the type itself is now `CommittedRunEvent`.
+ */
+export type RunEvent = CommittedRunEvent;
 
 export type RunEventOf<T extends RunEventType> = Extract<RunEvent, { type: T }>;
 

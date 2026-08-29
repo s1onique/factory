@@ -2,8 +2,15 @@
  * Transitions out of `running`.
  *
  * D02: agent_reported_completion does NOT produce completed; it moves
- * the run into `gating` so an external gate may authorize completion.
- * I07: gate_failed does NOT produce completed.
+ * the run into `gating.awaiting_start` so an external gate may
+ * authorize completion.
+ *
+ * CORRECTION01:
+ *  - `review_started` from `running` is FORBIDDEN. The only path from
+ *    `running` into `gating` is `agent_reported_completion`.
+ *  - `gating_started` from `running` is FORBIDDEN. Gating must be
+ *    entered only via `agent_reported_completion`.
+ *  - `gate_passed` / `gate_failed` from `running` are FORBIDDEN.
  */
 
 import { err, ok, type Result } from "./result.js";
@@ -39,12 +46,14 @@ export function fromRunning(
           ),
         );
       }
+      // D02: the only legal transition from running into gating.
       return ok({
         kind: "gating",
         runId: state.runId,
         missionId: state.missionId,
         counters: state.counters,
         currentAttempt: state.currentAttempt,
+        gateProgress: { phase: "awaiting_start" },
         lastEventId: event.eventId,
         seq: event.seq,
       });
@@ -66,35 +75,6 @@ export function fromRunning(
         reason: event.failure,
       });
     }
-    case "gating_started": {
-      if (event.attemptId !== state.currentAttempt) {
-        return err(
-          invalidTransition(
-            state.kind,
-            event.type,
-            `gating_started attemptId '${event.attemptId}' does not match current attempt '${state.currentAttempt}'.`,
-          ),
-        );
-      }
-      return ok({
-        kind: "gating",
-        runId: state.runId,
-        missionId: state.missionId,
-        counters: state.counters,
-        currentAttempt: state.currentAttempt,
-        lastEventId: event.eventId,
-        seq: event.seq,
-      });
-    }
-    case "review_started":
-      return ok({
-        kind: "reviewing",
-        runId: state.runId,
-        missionId: state.missionId,
-        counters: state.counters,
-        lastEventId: event.eventId,
-        seq: event.seq,
-      });
     case "crashed":
       return makeTerminal({ kind: "crashed", state, event, reason: event.reason });
     case "cancelled":

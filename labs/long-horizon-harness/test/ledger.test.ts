@@ -1,7 +1,11 @@
 /**
- * T07-T16 ledger tests (malformed JSONL, schema version, sequence
- * duplicate, sequence gap, mixed run IDs, failure taxonomy persistence,
- * budget exhaustion persistence, durable restart, continue after restart).
+ * Ledger tests:
+ *   T07-T16 (durable restart, error cases, persistence, mixed identities)
+ *   C12-C13 (concurrency, post-failure usability)
+ *   TT01/TT02/TT16/TT17 (torn-tail recovery)
+ *
+ * CORRECTION01 uses the new append API: payload + identity metadata;
+ * the ledger allocates sequence.
  */
 
 import { test } from "node:test";
@@ -10,6 +14,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 
 import {
   RUN_ID,
@@ -19,6 +24,8 @@ import {
 } from "./helpers.js";
 import type { RunEvent } from "../src/domain/run-event.js";
 import { JsonlLedger } from "../src/evidence/jsonl-ledger.js";
+import { makeEventId } from "../src/domain/ids.js";
+import type { EventId } from "../src/domain/ids.js";
 
 function asSeq(e: RunEvent, seq: number): RunEvent {
   return { ...e, seq };
@@ -32,82 +39,45 @@ async function rmDir(d: string): Promise<void> {
   await fs.rm(d, { recursive: true, force: true });
 }
 
-/**
- * Build a partial event payload suitable for `ledger.append`. The ledger
- * already handles `eventId/runId/missionId/observedAt/seq` itself; the
- * remaining fields are the type-specific payload of the event.
- */
-function stripBase(e: RunEvent): Record<string, unknown> {
-  switch (e.type) {
-    case "run_created":
-    case "preparation_started":
-    case "preparation_succeeded":
-    case "review_started":
-    case "review_passed":
-    case "cancelled":
-      return { type: e.type };
-    case "preparation_failed":
-      return { type: e.type, failure: e.failure };
-    case "attempt_started":
-      return { type: e.type, attemptId: e.attemptId };
-    case "agent_reported_completion":
-      return { type: e.type, attemptId: e.attemptId, summary: e.summary };
-    case "agent_failed":
-      return { type: e.type, attemptId: e.attemptId, failure: e.failure };
-    case "gating_started":
-    case "gate_passed":
-      return { type: e.type, attemptId: e.attemptId, gate: e.gate };
-    case "gate_failed":
-      return {
-        type: e.type,
-        attemptId: e.attemptId,
-        gate: e.gate,
-        failure: e.failure,
-      };
-    case "repair_started":
-      return { type: e.type, reason: e.reason };
-    case "review_failed":
-      return { type: e.type, failure: e.failure };
-    case "budget_exhausted":
-      return { type: e.type, observation: e.observation };
-    case "blocked":
-      return { type: e.type, reason: e.reason };
-    case "crashed":
-      return { type: e.type, reason: e.reason };
-  }
+async function appendPayload(
+  ledger: JsonlLedger,
+  seq: number,
+  payload: RunEvent,
+  idGen: () => EventId = () => makeEventId(`e-${seq}`),
+): Promise<void> {
+  const r = await ledger.append({
+    eventId: idGen(),
+    runId: RUN_ID,
+    missionId: MISSION_ID,
+    observedAt: seq,
+    event: payload,
+  });
+  assert.equal(r.ok, true, `append at seq=${seq} should succeed`);
 }
-
-
-test("T07 durable restart: persist → discard → reopen → replay → same state", async () => {
+test("T07 durable restart", async () => {
   const dir = await makeTmpDir();
   try {
     resetCounters();
-    const events: RunEvent[] = [
-      asSeq(makeEvent("run_created"), 1),
-      asSeq(makeEvent("preparation_started"), 2),
-      asSeq(makeEvent("preparation_succeeded"), 3),
-      asSeq(makeEvent("attempt_started"), 4),
-      asSeq(makeEvent("review_started"), 5),
-      asSeq(makeEvent("review_passed"), 6),
-    ];
+    const seq1 = asSeq(makeEvent("run_created"), 1);
+    const seq2 = asSeq(makeEvent("preparation_started"), 2);
+    const seq3 = asSeq(makeEvent("preparation_succeeded"), 3);
+    const seq4 = asSeq(makeEvent("attempt_started"), 4);
+    const seq5 = asSeq(makeEvent("agent_reported_completion"), 5);
+    const seq6 = asSeq(makeEvent("gating_started", { gate: "g1" }), 6);
+    const seq7 = asSeq(makeEvent("gate_passed", { gate: "g1" }), 7);
+    const seq8 = asSeq(makeEvent("review_started"), 8);
+    const seq9 = asSeq(makeEvent("review_passed"), 9);
 
     {
       const ledger = new JsonlLedger(dir);
       const o = await ledger.open();
       assert.equal(o.ok, true);
-      for (const e of events) {
-        const r = await ledger.append({
-          eventId: e.eventId,
-          runId: e.runId,
-          missionId: e.missionId,
-          observedAt: e.observedAt,
-          ...stripBase(e),
-        } as unknown as Parameters<typeof ledger.append>[0]);
-        assert.equal(r.ok, true);
+      for (const e of [seq1, seq2, seq3, seq4, seq5, seq6, seq7, seq8, seq9]) {
+        await appendPayload(ledger, e.seq, e);
       }
       const r1 = await ledger.replay(RUN_ID, MISSION_ID);
       assert.equal(r1.ok, true);
-      if (r1.ok === true) {
+      if (r1.ok) {
         assert.equal(r1.value.state.kind, "completed");
       }
     }
@@ -118,10 +88,10 @@ test("T07 durable restart: persist → discard → reopen → replay → same st
       assert.equal(o.ok, true);
       const r2 = await ledger2.replay(RUN_ID, MISSION_ID);
       assert.equal(r2.ok, true);
-      if (r2.ok === true) {
+      if (r2.ok) {
         assert.equal(r2.value.state.kind, "completed");
-        assert.equal(r2.value.eventsProcessed, 6);
-        assert.equal(r2.value.lastSeq, 6);
+        assert.equal(r2.value.eventsProcessed, 9);
+        assert.equal(r2.value.lastSeq, 9);
       }
     }
   } finally {
@@ -129,61 +99,48 @@ test("T07 durable restart: persist → discard → reopen → replay → same st
   }
 });
 
-test("T08 continue after restart: append next legal event and replay", async () => {
+test("T08 continue after restart", async () => {
   const dir = await makeTmpDir();
   try {
     resetCounters();
-    let seq = 0;
+    const initial: RunEvent[] = [
+      asSeq(makeEvent("run_created"), 1),
+      asSeq(makeEvent("preparation_started"), 2),
+      asSeq(makeEvent("preparation_succeeded"), 3),
+      asSeq(makeEvent("attempt_started"), 4),
+    ];
     {
       const ledger = new JsonlLedger(dir);
       await ledger.open();
-      const initial: RunEvent[] = [
-        asSeq(makeEvent("run_created"), ++seq),
-        asSeq(makeEvent("preparation_started"), ++seq),
-        asSeq(makeEvent("preparation_succeeded"), ++seq),
-        asSeq(makeEvent("attempt_started"), ++seq),
-      ];
       for (const e of initial) {
-        const r = await ledger.append({
-          eventId: e.eventId,
-          runId: e.runId,
-          missionId: e.missionId,
-          observedAt: e.observedAt,
-          ...stripBase(e),
-        } as unknown as Parameters<typeof ledger.append>[0]);
-        assert.equal(r.ok, true);
+        await appendPayload(ledger, e.seq, e);
       }
     }
     {
       const ledger2 = new JsonlLedger(dir);
       await ledger2.open();
       const more: RunEvent[] = [
-        asSeq(makeEvent("review_started"), ++seq),
-        asSeq(makeEvent("review_passed"), ++seq),
+        asSeq(makeEvent("agent_reported_completion"), 5),
+        asSeq(makeEvent("gating_started", { gate: "g1" }), 6),
+        asSeq(makeEvent("gate_passed", { gate: "g1" }), 7),
+        asSeq(makeEvent("review_started"), 8),
+        asSeq(makeEvent("review_passed"), 9),
       ];
       for (const e of more) {
-        const r = await ledger2.append({
-          eventId: e.eventId,
-          runId: e.runId,
-          missionId: e.missionId,
-          observedAt: e.observedAt,
-          ...stripBase(e),
-        } as unknown as Parameters<typeof ledger2.append>[0]);
-        assert.equal(r.ok, true);
+        await appendPayload(ledger2, e.seq, e);
       }
       const r2 = await ledger2.replay(RUN_ID, MISSION_ID);
       assert.equal(r2.ok, true);
-      if (r2.ok === true) {
+      if (r2.ok) {
         assert.equal(r2.value.state.kind, "completed");
-        assert.equal(r2.value.eventsProcessed, 6);
-        assert.equal(r2.value.lastSeq, 6);
+        assert.equal(r2.value.eventsProcessed, 9);
+        assert.equal(r2.value.lastSeq, 9);
       }
     }
   } finally {
     await rmDir(dir);
   }
 });
-
 test("T09 malformed JSONL rejects on load", async () => {
   const dir = await makeTmpDir();
   try {
@@ -238,6 +195,17 @@ test("T11 unsupported schema version rejects on load", async () => {
       observed_at: 0,
       event: { type: "run_created" },
     };
+    await fs.writeFile(file, JSON.stringify(bad) + "\n", "utf8");
+    const ledger = new JsonlLedger(dir);
+    const r = await ledger.replay(RUN_ID, MISSION_ID);
+    assert.equal(r.ok, false);
+    if (r.ok === false) {
+      assert.equal(r.error.kind, "invalid_evidence");
+    }
+  } finally {
+    await rmDir(dir);
+  }
+});
 
 test("T12 duplicate sequence rejects on load", async () => {
   const dir = await makeTmpDir();
@@ -334,8 +302,9 @@ test("T14 mixed run identities reject on replay", async () => {
     }
   } finally {
     await rmDir(dir);
-
-test("T15 failure taxonomy persistence: variants survive replay", async () => {
+  }
+});
+test("T15 failure taxonomy persistence", async () => {
   const dir = await makeTmpDir();
   try {
     resetCounters();
@@ -356,39 +325,18 @@ test("T15 failure taxonomy persistence: variants survive replay", async () => {
       { kind: "invalid_transition", from: "queued", event: "x", message: "m" },
       { kind: "internal_failure", message: "m" },
     ] as const;
-    let seq = 0;
-    const events: RunEvent[] = [
-      asSeq(makeEvent("run_created"), ++seq),
-      asSeq(makeEvent("preparation_started"), ++seq),
-    ];
-    for (const v of variants) {
-      const e = makeEvent("preparation_failed", { failure: v });
-      events.push(asSeq(e, ++seq));
-    }
     {
       const ledger = new JsonlLedger(dir);
       await ledger.open();
-      for (const e of events) {
-        if (e.type === "preparation_failed") {
-          const r = await ledger.append({
-            eventId: e.eventId,
-            runId: e.runId,
-            missionId: e.missionId,
-            observedAt: e.observedAt,
-            type: e.type,
-            failure: e.failure,
-          } as unknown as Parameters<typeof ledger.append>[0]);
-          assert.equal(r.ok, true);
-        } else {
-          const r = await ledger.append({
-            eventId: e.eventId,
-            runId: e.runId,
-            missionId: e.missionId,
-            observedAt: e.observedAt,
-            ...stripBase(e),
-          } as unknown as Parameters<typeof ledger.append>[0]);
-          assert.equal(r.ok, true);
-        }
+      await appendPayload(ledger, 1, asSeq(makeEvent("run_created"), 1));
+      for (let i = 0; i < variants.length; i++) {
+        const v = variants[i];
+        if (!v) continue;
+        await appendPayload(
+          ledger,
+          i + 2,
+          asSeq(makeEvent("preparation_failed", { failure: v }), i + 2),
+        );
       }
     }
     const ledger2 = new JsonlLedger(dir);
@@ -397,16 +345,22 @@ test("T15 failure taxonomy persistence: variants survive replay", async () => {
     assert.equal(all.ok, true);
     if (all.ok === true) {
       const arr: ReadonlyArray<{ readonly event: { readonly type: string; readonly failure?: unknown } }> = all.value;
-      assert.equal(arr.length, events.length);
-      for (let i = 2; i < arr.length; i++) {
+      assert.equal(arr.length, 1 + variants.length);
+      for (let i = 0; i < arr.length; i++) {
         const env = arr[i];
         if (env === undefined) {
           throw new Error(`missing envelope at ${i}`);
         }
-        assert.equal(env.event.type, "preparation_failed");
-        const persisted = env.event.failure;
-        const expected = variants[i - 2];
-        assert.deepEqual(JSON.parse(JSON.stringify(persisted)), expected);
+        if (i === 0) {
+          assert.equal(env.event.type, "run_created");
+        } else {
+          assert.equal(env.event.type, "preparation_failed");
+          const expected = variants[i - 1];
+          assert.deepEqual(
+            JSON.parse(JSON.stringify(env.event.failure)),
+            expected,
+          );
+        }
       }
     }
   } finally {
@@ -414,7 +368,7 @@ test("T15 failure taxonomy persistence: variants survive replay", async () => {
   }
 });
 
-test("T16 budget exhaustion persistence: typed budget survives replay", async () => {
+test("T16 budget exhaustion persistence", async () => {
   const dir = await makeTmpDir();
   try {
     resetCounters();
@@ -423,25 +377,25 @@ test("T16 budget exhaustion persistence: typed budget survives replay", async ()
       limit: 100,
       observed: 100,
     };
-    const events: RunEvent[] = [
-      asSeq(makeEvent("run_created"), 1),
-      asSeq(makeEvent("preparation_started"), 2),
-      asSeq(makeEvent("preparation_succeeded"), 3),
-      asSeq(makeEvent("budget_exhausted", { observation }), 4),
-    ];
     {
       const ledger = new JsonlLedger(dir);
       await ledger.open();
-      for (const e of events) {
-        const r = await ledger.append({
-          eventId: e.eventId,
-          runId: e.runId,
-          missionId: e.missionId,
-          observedAt: e.observedAt,
-          ...stripBase(e),
-        } as unknown as Parameters<typeof ledger.append>[0]);
-        assert.equal(r.ok, true);
-      }
+      await appendPayload(ledger, 1, asSeq(makeEvent("run_created"), 1));
+      await appendPayload(
+        ledger,
+        2,
+        asSeq(makeEvent("preparation_started"), 2),
+      );
+      await appendPayload(
+        ledger,
+        3,
+        asSeq(makeEvent("preparation_succeeded"), 3),
+      );
+      await appendPayload(
+        ledger,
+        4,
+        asSeq(makeEvent("budget_exhausted", { observation }), 4),
+      );
     }
     const ledger2 = new JsonlLedger(dir);
     await ledger2.open();
@@ -452,7 +406,10 @@ test("T16 budget exhaustion persistence: typed budget survives replay", async ()
       if (r.value.state.kind === "exhausted") {
         assert.equal(r.value.state.observation.kind, observation.kind);
         assert.equal(r.value.state.observation.limit, observation.limit);
-        assert.equal(r.value.state.observation.observed, observation.observed);
+        assert.equal(
+          r.value.state.observation.observed,
+          observation.observed,
+        );
       }
     }
   } finally {
@@ -460,15 +417,242 @@ test("T16 budget exhaustion persistence: typed budget survives replay", async ()
   }
 });
 
+test("C12 concurrent append: sequences unique and contiguous", async () => {
+  const dir = await makeTmpDir();
+  try {
+    resetCounters();
+    const ledger = new JsonlLedger(dir);
+    const o = await ledger.open();
+    assert.equal(o.ok, true);
+    await appendPayload(ledger, 1, asSeq(makeEvent("run_created"), 1));
+    await appendPayload(
+      ledger,
+      2,
+      asSeq(makeEvent("preparation_started"), 2),
+    );
+    await appendPayload(
+      ledger,
+      3,
+      asSeq(makeEvent("preparation_succeeded"), 3),
+    );
+    await appendPayload(ledger, 4, asSeq(makeEvent("attempt_started"), 4));
+    const attemptId = "a1";
+    const N = 32;
+    const promises: Array<Promise<{ ok: boolean }>> = [];
+    for (let i = 0; i < N; i++) {
+      const seq = i + 5;
+      const payload = asSeq(
+        makeEvent("attempt_started", { attemptId }),
+        seq,
+      );
+      promises.push(
+        ledger.append({
+          eventId: makeEventId(`e-${seq}`),
+          runId: RUN_ID,
+          missionId: MISSION_ID,
+          observedAt: seq,
+          event: payload,
+        }) as Promise<{ ok: boolean }>,
+      );
+    }
+    const results = await Promise.all(promises);
+    for (const r of results) {
+      assert.equal(r.ok, true);
+    }
+    const all = await ledger.readAll();
+    assert.equal(all.ok, true);
+    if (all.ok === true) {
+      assert.equal(all.value.length, 4 + N);
+      const seqs = all.value.map((e) => e.sequence);
+      const expected = Array.from({ length: 4 + N }, (_, i) => i + 1);
+      assert.deepEqual(seqs, expected);
+    }
+  } finally {
+    await rmDir(dir);
   }
 });
 
-    await fs.writeFile(file, JSON.stringify(bad) + "\n", "utf8");
+test("C13 append remains usable after a failure", async () => {
+  const dir = await makeTmpDir();
+  try {
+    resetCounters();
+    const ledger = new JsonlLedger(dir);
+    await ledger.open();
+    const r0 = await ledger.append({
+      eventId: makeEventId("e-1"),
+      runId: RUN_ID,
+      missionId: MISSION_ID,
+      observedAt: 1,
+      event: makeEvent("run_created"),
+    });
+    assert.equal(r0.ok, true);
+    const r1 = await ledger.append({
+      eventId: makeEventId("e-2"),
+      runId: RUN_ID,
+      missionId: MISSION_ID,
+      observedAt: 2,
+      event: makeEvent("preparation_started"),
+    });
+    assert.equal(r1.ok, true);
+    const r2 = await ledger.append({
+      eventId: makeEventId("e-3"),
+      runId: RUN_ID,
+      missionId: MISSION_ID,
+      observedAt: 3,
+      event: makeEvent("preparation_succeeded"),
+    });
+    assert.equal(r2.ok, true);
+    if (r2.ok === true) {
+      assert.equal(r2.value.seq, 3);
+    }
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("TT01 partial JSON final suffix is quarantined", async () => {
+  const dir = await makeTmpDir();
+  try {
+    const file = path.join(dir, "events.jsonl");
+    const committed =
+      JSON.stringify({
+        schema_version: 1,
+        event_id: "e-1",
+        run_id: RUN_ID,
+        mission_id: MISSION_ID,
+        sequence: 1,
+        observed_at: 0,
+        event: { type: "run_created" },
+      }) + "\n";
+    const torn = '{"schema_version":1,"event_';
+    await fs.writeFile(file, committed + torn, "utf8");
+
+    const ledger = new JsonlLedger(dir);
+    const o = await ledger.open();
+    assert.equal(o.ok, true);
+    if (o.ok === true) {
+      assert.notEqual(o.value.recovery, null);
+      if (o.value.recovery !== null) {
+        assert.equal(o.value.recovery.quarantinedBytes, torn.length);
+        assert.match(o.value.recovery.sha256, /^[0-9a-f]{64}$/);
+      }
+    }
+    const r = await ledger.replay(RUN_ID, MISSION_ID);
+    assert.equal(r.ok, true);
+    if (r.ok === true) {
+      assert.equal(r.value.eventsProcessed, 1);
+      assert.equal(r.value.lastSeq, 1);
+    }
+    const quarantineFiles = await fs.readdir(dir);
+    const quarantines = quarantineFiles.filter((f) =>
+      f.startsWith("events.jsonl.torn-tail."),
+    );
+    assert.equal(quarantines.length, 1);
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("TT02 syntactically valid JSON without newline is uncommitted", async () => {
+  const dir = await makeTmpDir();
+  try {
+    const file = path.join(dir, "events.jsonl");
+    const committed = JSON.stringify({
+      schema_version: 1,
+      event_id: "e-1",
+      run_id: RUN_ID,
+      mission_id: MISSION_ID,
+      sequence: 1,
+      observed_at: 0,
+      event: { type: "run_created" },
+    }) + "\n";
+    const torn = JSON.stringify({
+      schema_version: 1,
+      event_id: "e-2",
+      run_id: RUN_ID,
+      mission_id: MISSION_ID,
+      sequence: 2,
+      observed_at: 0,
+      event: { type: "preparation_started" },
+    });
+    await fs.writeFile(file, committed + torn, "utf8");
+
+    const ledger = new JsonlLedger(dir);
+    const o = await ledger.open();
+    assert.equal(o.ok, true);
+    if (o.ok === true) {
+      assert.notEqual(o.value.recovery, null);
+    }
+    const r = await ledger.replay(RUN_ID, MISSION_ID);
+    assert.equal(r.ok, true);
+    if (r.ok === true) {
+      assert.equal(r.value.eventsProcessed, 1);
+    }
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("TT16 malformed newline-terminated line fails closed", async () => {
+  const dir = await makeTmpDir();
+  try {
+    const file = path.join(dir, "events.jsonl");
+    await fs.writeFile(file, "{not valid json\n", "utf8");
     const ledger = new JsonlLedger(dir);
     const r = await ledger.replay(RUN_ID, MISSION_ID);
     assert.equal(r.ok, false);
     if (r.ok === false) {
       assert.equal(r.error.kind, "invalid_evidence");
+    }
+    const files = await fs.readdir(dir);
+    assert.equal(
+      files.filter((f) => f.startsWith("events.jsonl.torn-tail.")).length,
+      0,
+    );
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("TT17 committed prefix unchanged byte-for-byte after tail recovery", async () => {
+  const dir = await makeTmpDir();
+  try {
+    const file = path.join(dir, "events.jsonl");
+    const committed =
+      JSON.stringify({
+        schema_version: 1,
+        event_id: "e-1",
+        run_id: RUN_ID,
+        mission_id: MISSION_ID,
+        sequence: 1,
+        observed_at: 0,
+        event: { type: "run_created" },
+      }) + "\n";
+    const torn = "broken tail bytes";
+    const originalBytes = Buffer.from(committed, "utf8");
+    await fs.writeFile(file, committed + torn, "utf8");
+
+    const ledger = new JsonlLedger(dir);
+    await ledger.open();
+
+    const repairedBytes = await fs.readFile(file);
+    assert.equal(repairedBytes.length, originalBytes.length);
+    assert.deepEqual(repairedBytes, originalBytes);
+
+    const files = await fs.readdir(dir);
+    const quarantines = files.filter((f) =>
+      f.startsWith("events.jsonl.torn-tail."),
+    );
+    assert.equal(quarantines.length, 1);
+    if (quarantines[0]) {
+      const qBytes = await fs.readFile(path.join(dir, quarantines[0]));
+      const expectedHash = createHash("sha256")
+        .update(Buffer.from(torn, "utf8"))
+        .digest("hex");
+      assert.equal(
+        createHash("sha256").update(qBytes).digest("hex"),
+        expectedHash,
+      );
     }
   } finally {
     await rmDir(dir);

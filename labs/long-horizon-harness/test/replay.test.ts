@@ -116,8 +116,11 @@ test("replay round-trip via JSON preserves state", async () => {
     asSeq(makeEvent("preparation_started"), 2),
     asSeq(makeEvent("preparation_succeeded"), 3),
     asSeq(makeEvent("attempt_started"), 4),
-    asSeq(makeEvent("review_started"), 5),
-    asSeq(makeEvent("review_passed"), 6),
+    asSeq(makeEvent("agent_reported_completion"), 5),
+    asSeq(makeEvent("gating_started"), 6),
+    asSeq(makeEvent("gate_passed"), 7),
+    asSeq(makeEvent("review_started"), 8),
+    asSeq(makeEvent("review_passed"), 9),
   ];
   const r1 = replay(RUN_ID, MISSION_ID, events);
   assert.equal(r1.ok, true);
@@ -127,14 +130,7 @@ test("replay round-trip via JSON preserves state", async () => {
   const { envelopeToRunEvent } = await import("../src/evidence/codec.js");
   const decoded: RunEvent[] = [];
   for (const e of events) {
-    const env = encodeEnvelope({
-      eventId: e.eventId,
-      runId: e.runId,
-      missionId: e.missionId,
-      sequence: e.seq,
-      observedAt: e.observedAt,
-      event: e,
-    });
+    const env = encodeEnvelope(e);
     const text = JSON.stringify(env);
     const dEnv = decodeEnvelope(JSON.parse(text) as unknown);
     assert.equal(dEnv.ok, true);

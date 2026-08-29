@@ -235,9 +235,95 @@ candidate harness
 `derived RunState` can always be reconstructed from authoritative
 evidence by replaying the ledger.
 
+## Gate state must carry proof
 
-test/              # node:test runner; real fs IO in ledger tests
+The `gating` state carries an algebraic `GateProgress` sub-state:
+
+```ts
+type GateProgress =
+  | { readonly phase: "awaiting_start" }
+  | {
+      readonly phase: "running";
+      readonly gate: string;
+      readonly attemptId: AttemptId;
+    }
+  | {
+      readonly phase: "passed";
+      readonly gate: string;
+      readonly attemptId: AttemptId;
+    };
 ```
+
+The transition table is:
+
+| From                          | Event            | To                          |
+|-------------------------------|------------------|------------------------------|
+| `gating(awaiting_start)`      | `gating_started` | `gating(running, g, a)`      |
+| `gating(running, g, a)`       | `gate_passed`    | `gating(passed, g, a)`       |
+| `gating(running, g, a)`       | `gate_failed`    | `repairing`                  |
+| `gating(passed, g, a)`        | `review_started` | `reviewing`                  |
+
+`gating_started`, `gate_passed`, and `gate_failed` MUST carry the
+matching `attemptId`. `gate_passed` and `gate_failed` MUST additionally
+carry a `gate` matching the recorded gate.
+
+The FOUNDATION01 gate model is exactly one abstract deterministic gate
+phase. Multiple named gates, gate suites, or external gate executors
+are out of scope here; they belong to a later real-gate-executor ACT.
+
+## Identifier trust boundary
+
+Every persisted branded identifier must pass runtime grammar validation.
+The codec converts persisted bytes through `parseRunId`, `parseMissionId`,
+`parseEventId`, and `parseAttemptId` (in `src/domain/ids.ts`). Each
+returns `Result<Brand, InvalidId>`; the evidence layer translates
+`InvalidId` into `InvalidEvidence` so the persistence boundary never
+`as`-casts an unvalidated string into a branded type.
+
+The single identifier grammar:
+
+```
+[A-Za-z0-9_.:-]{1,128}
+```
+
+Identifiers may NOT contain whitespace, slashes, control characters,
+or quotes. Empty strings and out-of-range lengths are also rejected.
+
+## Ledger durability model
+
+```
+open               (file does not yet exist) -> truncate to empty,
+                                          fsync, done
+open               (file ends with no newline) -> torn-tail recovery
+open               (file ends with newline) -> validate normally
+append(payload)    read+validate, allocate seq, write complete line
+                                          terminated by '\n', fsync, close
+read_all           read, validate every newline-terminated line
+replay             read_all -> envelopeToRunEvent each -> replay
+```
+
+A successful append is acknowledged only after `fsync()` of the appended
+bytes has returned. The newline is the commit marker. On recovery:
+
+  - **Case A — file ends with `\n`:** validate every record normally.
+    Any malformed newline-terminated record fails closed.
+  - **Case B — file contains a non-empty unterminated final suffix:**
+    the suffix is treated as an uncommitted torn tail. The exact bytes
+    are preserved in `events.jsonl.torn-tail.<sha256>.bin`, the
+    authoritative ledger is truncated to the committed prefix, the
+    prefix is `fsync`'d, and replay proceeds on the prefix.
+
+Within a single process, concurrent `append()` calls are serialized
+through a promise-chain mutex. A failed append does not poison the
+queue — subsequent appends continue normally. Cross-process writers
+are **unsupported** in CORRECTION01; the lab uses a single-writer
+process model.
+
+The ledger API takes the event payload + identity metadata and returns a
+`CommittedRunEvent` with the ledger-allocated `seq`. Event producers
+do NOT fabricate committed events.
+
+
 
 ---
 
@@ -271,9 +357,27 @@ running / gating
   --gate_passed--> gating
   --review_started--> reviewing
 reviewing
-  --review_passed--> completed              (AUTHORITATIVE)
+  --review_passed--> completed              (AUTHORITATIVE — only this
+                                              event produces `completed`)
 ```
 
-A shortcut path is also valid for tests: `running --review_started-->
-reviewing --review_passed--> completed`. In both cases `review_passed`
-is the only event that produces `completed`.
+This is the only canonical path. No shortcut bypasses the gating step.
+Specifically rejected:
+
+```
+running       --review_started-->  (invalid_transition; I01, C01)
+running       --gating_started-->   (invalid_transition; C02)
+gating.awaiting_start
+              --review_started-->  (invalid_transition; C03)
+gating.awaiting_start
+              --gate_passed-->      (invalid_transition; C04)
+gating.awaiting_start
+              --gate_failed-->      (invalid_transition; C04)
+gating.running
+              --review_started-->   (invalid_transition; C03)
+gating.passed
+              --gate_passed-->      (invalid_transition; duplicate)
+```
+
+`review_passed` is the only event that produces `completed`. Review may
+begin only after the abstract deterministic gate has passed.

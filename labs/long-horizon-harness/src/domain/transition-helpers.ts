@@ -44,10 +44,6 @@ export function unexpected(
 
 export type TargetKind = TerminalState["kind"] | "repairing";
 
-/**
- * Build a new RunState from a non-queued source state, copying counters
- * and stamping the latest event id / sequence.
- */
 export function makeTerminal(args: {
   readonly kind: TargetKind;
   readonly state: Exclude<RunState, { kind: "queued" }>;

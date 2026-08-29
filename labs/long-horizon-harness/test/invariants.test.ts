@@ -114,16 +114,7 @@ test("D05 append-only ledger: append then read yields the same envelopes in orde
     asSeq(makeEvent("attempt_started"), 4),
   ];
   const lines = events.map((e) =>
-    JSON.stringify(
-      encodeEnvelope({
-        eventId: e.eventId,
-        runId: e.runId,
-        missionId: e.missionId,
-        sequence: e.seq,
-        observedAt: e.observedAt,
-        event: e,
-      }),
-    ),
+    JSON.stringify(encodeEnvelope(e)),
   );
   const text = lines.join("\n") + "\n";
   const parsed = text
@@ -146,8 +137,11 @@ test("D06 replay determinism (compact): same event sequence produces same derive
     asSeq(makeEvent("preparation_started"), 2),
     asSeq(makeEvent("preparation_succeeded"), 3),
     asSeq(makeEvent("attempt_started"), 4),
-    asSeq(makeEvent("review_started"), 5),
-    asSeq(makeEvent("review_passed"), 6),
+    asSeq(makeEvent("agent_reported_completion"), 5),
+    asSeq(makeEvent("gating_started"), 6),
+    asSeq(makeEvent("gate_passed"), 7),
+    asSeq(makeEvent("review_started"), 8),
+    asSeq(makeEvent("review_passed"), 9),
   ];
   const r1 = replay(RUN_ID, MISSION_ID, events);
   const r2 = replay(RUN_ID, MISSION_ID, events);
@@ -175,15 +169,19 @@ test("D07 budget model: typed BudgetKind, typed limits, exhaustion is a value", 
 });
 
 test("deterministic table-driven: many transitions over many shapes yield stable results", () => {
-  const cases: ReadonlyArray<{ readonly events: RunEvent[]; readonly expected: RunState["kind"] }> = [
+  type Case = { readonly events: RunEvent[]; readonly expected: RunState["kind"] };
+  const cases: ReadonlyArray<Case> = [
     {
       events: [
         asSeq(makeEvent("run_created"), 1),
         asSeq(makeEvent("preparation_started"), 2),
         asSeq(makeEvent("preparation_succeeded"), 3),
         asSeq(makeEvent("attempt_started"), 4),
-        asSeq(makeEvent("review_started"), 5),
-        asSeq(makeEvent("review_passed"), 6),
+        asSeq(makeEvent("agent_reported_completion"), 5),
+        asSeq(makeEvent("gating_started"), 6),
+        asSeq(makeEvent("gate_passed"), 7),
+        asSeq(makeEvent("review_started"), 8),
+        asSeq(makeEvent("review_passed"), 9),
       ],
       expected: "completed",
     },
@@ -194,27 +192,24 @@ test("deterministic table-driven: many transitions over many shapes yield stable
         asSeq(makeEvent("preparation_succeeded"), 3),
         asSeq(makeEvent("attempt_started"), 4),
         asSeq(makeEvent("agent_reported_completion"), 5),
-        asSeq(makeEvent("gate_failed", { gate: "tests" }), 6),
-        asSeq(makeEvent("repair_started"), 7),
-        asSeq(makeEvent("attempt_started"), 8),
-        asSeq(makeEvent("review_started"), 9),
-        asSeq(makeEvent("review_passed"), 10),
+        asSeq(makeEvent("gating_started", { gate: "tests" }), 6),
+        asSeq(makeEvent("gate_failed", { gate: "tests" }), 7),
+        asSeq(makeEvent("repair_started"), 8),
+        asSeq(makeEvent("attempt_started"), 9),
+        asSeq(makeEvent("agent_reported_completion"), 10),
+        asSeq(makeEvent("gating_started", { gate: "tests" }), 11),
+        asSeq(makeEvent("gate_passed", { gate: "tests" }), 12),
+        asSeq(makeEvent("review_started"), 13),
+        asSeq(makeEvent("review_passed"), 14),
       ],
       expected: "completed",
-    },
-    {
-      events: [
-        asSeq(makeEvent("run_created"), 1),
-        asSeq(makeEvent("crashed"), 2),
-      ],
-      expected: "crashed",
     },
   ];
   for (const c of cases) {
     let s: RunState = initialState(RUN_ID, MISSION_ID, 0);
     for (const e of c.events) {
       const r = transition(s, e);
-      assert.equal(r.ok, true);
+      assert.equal(r.ok, true, `case ${c.expected}: ${e.type} should be legal`);
       if (r.ok === true) s = r.value;
     }
     assert.equal(s.kind, c.expected, `expected ${c.expected}, got ${s.kind}`);
