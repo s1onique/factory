@@ -10,14 +10,15 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test --test-reporter=spec test/**/*.test.ts",
-    "test:lab": "node --import tsx --test --test-reporter=spec test/**/*.test.ts",
+    "test": "node --import tsx scripts/run-tests.mjs",
+    "test:lab": "node --import tsx scripts/run-tests.mjs",
+    "test:process": "node --import tsx --test --test-reporter=spec test/process/process-group.test.ts test/process/supervised-process.test.ts",
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",
     "check:eof": "node --import tsx --test --test-reporter=spec test/ledger-evidence.test.ts",
     "fix:eof": "node scripts/normalize-eof.mjs",
     "normalize-eof": "node scripts/normalize-eof.mjs",
-    "all": "npm run check:eof && npm run typecheck && npm run test"
+    "all": "npm run check:eof && npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

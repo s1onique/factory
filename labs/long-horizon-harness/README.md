@@ -470,3 +470,55 @@ npm run all
 `fix:eof` (and the legacy `normalize-eof` alias) is the explicit
 mutating convenience for developers; it is NOT invoked by `npm run
 all`. `GP02` proves this with a before/after content-hash snapshot.
+
+## Process supervision (FOUNDATION02)
+
+The supervisor at `src/process/` provides POSIX-first supervised
+process execution with:
+
+- Externally enforced deadlines (the supervisor owns the deadline).
+- Explicit `cancel()` API that uses the same termination engine as
+  deadlines (one escalation path; first terminal trigger wins).
+- TERM → grace → KILL → grace escalation against the supervised
+  process group (negative-PID `kill(2)`).
+- Bounded stdout/stderr capture that records
+  `bytesSeen / bytesRetained / truncated` per stream and continues
+  to drain pipes even after the retention cap is reached.
+- Algebraic `ProcessOutcome` distinguishing `exited | signaled |
+  deadline | cancelled | spawn_failed | cleanup_failed`.
+- Centralized PGID guards: invalid pgids (0, 1, negative, NaN,
+  non-integer) are rejected before the OS call. EPERM on
+  `kill(-pgid, ...)` from outside the supervised session falls
+  back to signalling the immediate child PID (the supervisor owns
+  it; descendants cannot be reached via the group in that case).
+- PID-reuse discipline: cleanup happens within the supervised
+  lifecycle while ownership is known. No delayed `child.kill()`
+  after observed exit.
+- POSIX scope: darwin + linux supported. `HARNESS_CAN_SIGNAL`
+  probe detects sandbox profiles (e.g. Cline IDE shell on macOS)
+  that deny cross-sandbox signal delivery; affected tests are
+  classified SKIP rather than FAIL.
+
+Known limitation: a descendant that deliberately escapes its
+process group via `setsid(2)` cannot be reached via group
+signalling from outside the new session. Full containment requires
+a stronger execution boundary (container, cgroup, PID namespace,
+job object). Process-group ownership is cleanup ownership for
+cooperative / non-escaping descendants; it is not a sandbox.
+
+Tests:
+
+- `test/process/process-group.test.ts` exercises the centralized
+  signal/probe helper (PG01..PG04).
+- `test/process/supervised-process.test.ts` exercises the full
+  lifecycle (P01..P20).
+- `test/fixtures/child-fixture.ts` is a deterministic Node fixture
+  with modes for exit, sleep, ignore-term, term-handler,
+  spawn-child, spawn-grandchild, flood-stdout/stderr, mixed,
+  invalid-utf8, crash, and echo-pid. Compiled into `build/` and
+  run via `process.execPath`.
+
+Sandbox caveat: the Cline IDE shell on macOS prevents
+`process.kill(2)` from reaching children we spawn. Tests that
+require real signal delivery are SKIPPED in this environment.
+Production supervisor code is unchanged.
