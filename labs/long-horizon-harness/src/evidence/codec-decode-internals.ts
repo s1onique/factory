@@ -1,22 +1,25 @@
 /**
  * Internal decoders for nested structures of an envelope.
  *
- * Kept in a sibling file to keep `codec-decode.ts` short enough to read.
+ * Kept in a sibling file so `codec-decode-envelope.ts` stays small.
  *
  * All persisted branded identifiers (including nested `attempt_id`) are
  * validated through the {@link ../domain/ids.ts} parsers and any failure
  * is translated into typed `invalid_evidence` — no `as` assertion at the
  * trust boundary.
+ *
+ * CORRECTION02: `decodeAttemptIdField` returns `AttemptId` (not `string`)
+ * so call-sites can construct PersistedEvent variants without an
+ * avoidable type assertion.
  */
 
 import { isRunEventType, RUN_EVENT_TYPES } from "../domain/run-event.js";
 import { andThen, err, map, ok, type Result } from "../domain/result.js";
 import type { InvalidEvidence } from "../domain/failure.js";
-import type { InvalidId } from "../domain/ids.js";
+import type { AttemptId, InvalidId } from "../domain/ids.js";
 import { parseAttemptId } from "../domain/ids.js";
 import type { PersistedEvent } from "./codec-types.js";
-import { decodeFailure } from "./codec-decode-failure.js";
-import { decodeBudgetObservation } from "./codec-decode-failure.js";
+import { decodeBudgetObservation, decodeFailure } from "./codec-decode-failure.js";
 
 function idToEvidence(field: string, e: InvalidId): InvalidEvidence {
   return {
@@ -52,64 +55,82 @@ export function decodePersistedEvent(
     case "cancelled":
       return ok({ type: t });
     case "attempt_started":
-      return map(decodeAttemptIdField(v), (attempt_id) =>
-        ({ type: t, attempt_id }) as PersistedEvent,
-      );
+      return map(decodeAttemptIdField(v), (attempt_id) => ({
+        type: t,
+        attempt_id,
+      }));
     case "agent_reported_completion":
       return andThen(decodeAttemptIdField(v), (attempt_id) =>
-        map(decodeStringField(v, "summary"), (summary) =>
-          ({ type: t, attempt_id, summary }) as PersistedEvent,
-        ),
+        map(decodeStringField(v, "summary"), (summary) => ({
+          type: t,
+          attempt_id,
+          summary,
+        })),
       );
     case "agent_failed":
       return andThen(decodeAttemptIdField(v), (attempt_id) =>
-        map(decodeFailure(v, "failure"), (failure) =>
-          ({ type: t, attempt_id, failure }) as PersistedEvent,
-        ),
+        map(decodeFailure(v, "failure"), (failure) => ({
+          type: t,
+          attempt_id,
+          failure,
+        })),
       );
     case "gating_started":
     case "gate_passed":
       return andThen(decodeAttemptIdField(v), (attempt_id) =>
-        map(decodeStringField(v, "gate"), (gate) =>
-          ({ type: t, attempt_id, gate }) as PersistedEvent,
-        ),
+        map(decodeStringField(v, "gate"), (gate) => ({
+          type: t,
+          attempt_id,
+          gate,
+        })),
       );
     case "gate_failed":
       return andThen(decodeAttemptIdField(v), (attempt_id) =>
         andThen(decodeStringField(v, "gate"), (gate) =>
-          map(decodeFailure(v, "failure"), (failure) =>
-            ({ type: t, attempt_id, gate, failure }) as PersistedEvent,
-          ),
+          map(decodeFailure(v, "failure"), (failure) => ({
+            type: t,
+            attempt_id,
+            gate,
+            failure,
+          })),
         ),
       );
     case "preparation_failed":
-      return map(decodeFailure(v, "failure"), (failure) =>
-        ({ type: t, failure }) as PersistedEvent,
-      );
+      return map(decodeFailure(v, "failure"), (failure) => ({
+        type: t,
+        failure,
+      }));
     case "repair_started":
     case "blocked":
     case "crashed":
-      return map(decodeFailure(v, "reason"), (reason) =>
-        ({ type: t, reason }) as PersistedEvent,
-      );
+      return map(decodeFailure(v, "reason"), (reason) => ({
+        type: t,
+        reason,
+      }));
     case "review_failed":
-      return map(decodeFailure(v, "failure"), (failure) =>
-        ({ type: t, failure }) as PersistedEvent,
-      );
+      return map(decodeFailure(v, "failure"), (failure) => ({
+        type: t,
+        failure,
+      }));
     case "budget_exhausted":
-      return map(decodeBudgetObservation(v, "observation"), (observation) =>
-        ({ type: t, observation }) as PersistedEvent,
-      );
+      return map(decodeBudgetObservation(v, "observation"), (observation) => ({
+        type: t,
+        observation,
+      }));
   }
 }
 
 /**
- * Decode the nested `attempt_id` field and validate it against the
- * identifier grammar. Translates any `InvalidId` into `InvalidEvidence`.
+ * Decode the nested `attempt_id` field, validate it against the
+ * identifier grammar, and return a typed {@link AttemptId}.
+ *
+ * Translates any `InvalidId` into `InvalidEvidence`. The returned brand
+ * is preserved through the decoder so callers can compose PersistedEvent
+ * variants without an avoidable `as PersistedEvent` cast.
  */
-function decodeAttemptIdField(
+export function decodeAttemptIdField(
   v: Record<string, unknown>,
-): Result<string, InvalidEvidence> {
+): Result<AttemptId, InvalidEvidence> {
   const r = parseAttemptId(v["attempt_id"]);
   if (r.ok === false) {
     return err(idToEvidence("attempt_id", r.error));

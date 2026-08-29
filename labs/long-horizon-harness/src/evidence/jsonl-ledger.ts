@@ -33,7 +33,6 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
 
 import type {
   EventId,
@@ -51,21 +50,63 @@ import type { InvalidEvidence } from "../domain/failure.js";
 import { envelopeToCommitted, encodeEnvelope } from "./codec.js";
 import type { EventEnvelope } from "./codec.js";
 import {
-  decodeEnvelopeFromJsonLine,
-  fsyncPath,
+  appendCommittedLineToFile,
   internal,
   internalFrom,
   isENOENT,
-  quarantineTornTail,
-  splitOnTornTail,
   type InternalLedgerError,
 } from "./ledger-internals.js";
+import { readAndValidate } from "./ledger-read-validate.js";
+import {
+  performTornTailRecovery,
+  type RecoveryFaultHook,
+  type TornTailRecovery,
+} from "./ledger-recovery.js";
 
 export const LEDGER_FILENAME = "events.jsonl";
 export const TORN_TAIL_PREFIX = "events.jsonl.torn-tail.";
 
 export type LedgerOpenOptions = {
   readonly createIfMissing?: boolean;
+};
+
+/**
+ * Optional fault-injection hook used only by tests.
+ *
+ * When set, the hook is invoked BEFORE the durable commit boundary of
+ * the corresponding operation. Returning a non-OK result aborts the
+ * operation with that exact typed error and the authoritative ledger
+ * is left untouched. Production code MUST NOT set this.
+ *
+ * Hooks currently supported:
+ *  - beforeAppendWrite — fires inside `doAppend` after the in-memory
+ *    committed event is constructed but BEFORE the file handle is
+ *    opened for append.
+ *  - beforeQuarantineWrite — fires inside torn-tail recovery AFTER
+ *    torn-tail detection and BEFORE quarantine preservation.
+ */
+export type LedgerFaultHook =
+  | {
+      readonly kind: "beforeAppendWrite";
+      readonly payload: CommittedRunEvent;
+      readonly respond: (
+        r: Result<void, LedgerError>,
+      ) => Result<void, LedgerError>;
+    }
+  | {
+      readonly kind: "beforeQuarantineWrite";
+      readonly tornBytes: Buffer;
+      readonly respond: (
+        r: Result<void, LedgerError>,
+      ) => Result<void, LedgerError>;
+    };
+
+export type LedgerFaultOptions = {
+  /**
+   * A single-shot fault hook. The hook fires once and is then
+   * cleared. Subsequent appends proceed normally.
+   */
+  readonly fault?: LedgerFaultHook;
 };
 
 export type LedgerReopenResult = {
@@ -77,11 +118,7 @@ export type LedgerReopenResult = {
 
 export type LedgerError = InvalidEvidence | ReplayError | InternalLedgerError;
 
-export type TornTailRecovery = {
-  readonly quarantinedBytes: number;
-  readonly quarantinePath: string;
-  readonly sha256: string;
-};
+export type { TornTailRecovery } from "./ledger-recovery.js";
 
 export type OpenResult = {
   readonly ledger: JsonlLedger;
@@ -94,10 +131,30 @@ export class JsonlLedger {
   private initialized = false;
   /** Promise-chain mutex; never permanently poisoned. */
   private chain: Promise<unknown> = Promise.resolve();
+  /**
+   * Test-only single-shot fault hook. Cleared after firing once.
+   */
+  private faultHook: LedgerFaultHook | null = null;
 
-  constructor(directory: string, filename: string = LEDGER_FILENAME) {
+  constructor(
+    directory: string,
+    filename: string = LEDGER_FILENAME,
+    options: LedgerFaultOptions = {},
+  ) {
     this.dirPath = directory;
     this.filePath = path.join(directory, filename);
+    if (options.fault !== undefined) {
+      this.faultHook = options.fault;
+    }
+  }
+
+  /**
+   * Arm a single-shot fault hook. The next matching operation fires
+   * the hook and clears it. Subsequent operations proceed normally.
+   * Production code MUST NOT call this.
+   */
+  armFaultHook(hook: LedgerFaultHook): void {
+    this.faultHook = hook;
   }
 
   path(): string {
@@ -141,38 +198,31 @@ export class JsonlLedger {
       return err(internalFrom(e));
     }
 
+
     let recovery: TornTailRecovery | null = null;
-    try {
-      const raw = await fs.readFile(this.filePath);
-      const split = splitOnTornTail(raw);
-      if (split.tornBytes.length > 0) {
-        const sha = createHash("sha256")
-          .update(split.tornBytes)
-          .digest("hex");
-        const quarantinePath = await quarantineTornTail(
-          this.dirPath,
-          split.tornBytes,
-          sha,
-        );
-        if (
-          split.committedBytes.length + split.tornBytes.length !==
-          raw.length
-        ) {
-          return err(internal("torn-tail split arithmetic mismatch"));
+    {
+      // Probe for torn tail: read raw bytes and attempt recovery
+      // only if a non-empty unterminated suffix is present.
+      const probe = await fs.readFile(this.filePath).catch(() => null);
+      if (probe !== null && probe.length > 0 && probe[probe.length - 1] !== 0x0a) {
+        const preQuarantine: RecoveryFaultHook | null =
+          this.faultHook !== null && this.faultHook.kind === "beforeQuarantineWrite"
+            ? this.faultHook
+            : null;
+        const rec = await performTornTailRecovery({
+          filePath: this.filePath,
+          dirPath: this.dirPath,
+          faultHook: preQuarantine,
+        });
+        if (rec.ok === false) return err(rec.error);
+        recovery = rec.value;
+        if (preQuarantine !== null) {
+          this.faultHook = null;
         }
-        await fs.writeFile(this.filePath, split.committedBytes);
-        await fsyncPath(this.filePath);
-        recovery = {
-          quarantinedBytes: split.tornBytes.length,
-          quarantinePath,
-          sha256: sha,
-        };
       }
-    } catch (e: unknown) {
-      return err(internalFrom(e));
     }
 
-    const v = await this.readAndValidate();
+    const v = await readAndValidate(this.filePath);
     if (v.ok === false) return err(v.error);
 
     this.initialized = true;
@@ -203,7 +253,7 @@ export class JsonlLedger {
   }
 
   async readAll(): Promise<Result<ReadonlyArray<EventEnvelope>, LedgerError>> {
-    const r = await this.readAndValidate();
+    const r = await readAndValidate(this.filePath);
     if (r.ok === false) return err(r.error);
     return ok(r.value.envelopes);
   }
@@ -212,7 +262,7 @@ export class JsonlLedger {
     runId: RunId,
     missionId: MissionId,
   ): Promise<Result<LedgerReopenResult, LedgerError>> {
-    const r = await this.readAndValidate();
+    const r = await readAndValidate(this.filePath);
     if (r.ok === false) return err(r.error);
     const envelopes = r.value.envelopes;
     const events: CommittedRunEvent[] = [];
@@ -269,7 +319,7 @@ export class JsonlLedger {
     readonly observedAt: number;
     readonly event: RunEventPayload;
   }): Promise<Result<CommittedRunEvent, LedgerError>> {
-    const cur = await this.readAndValidate();
+    const cur = await readAndValidate(this.filePath);
     if (cur.ok === false) return err(cur.error);
     const nextSeq = cur.value.lastSeq + 1;
 
@@ -282,72 +332,30 @@ export class JsonlLedger {
       observedAt: input.observedAt,
     };
 
+    // (test seam) fire pre-append fault hook BEFORE the durable
+    // commit boundary. If the hook reports failure, the committed
+    // event is NOT written and no sequence is consumed because the
+    // mutex releases the lock without committing.
+    if (
+      this.faultHook !== null &&
+      this.faultHook.kind === "beforeAppendWrite"
+    ) {
+      const hook = this.faultHook;
+      this.faultHook = null;
+      const response = hook.respond(ok(undefined));
+      if (response.ok === false) {
+        // No sequence allocated; no committed record produced.
+        return err(response.error);
+      }
+    }
+
     const envelope = encodeEnvelope(committed);
     const line = JSON.stringify(envelope) + "\n";
 
-    let fh: import("node:fs/promises").FileHandle | null = null;
-    try {
-      fh = await fs.open(this.filePath, "a");
-      await fh.appendFile(line, "utf8");
-      await fh.sync();
-      return ok(committed);
-    } catch (e: unknown) {
-      return err(internalFrom(e));
-    } finally {
-      if (fh !== null) {
-        try {
-          await fh.close();
-        } catch {
-          // close failure is logged via internal on the outer error path
-        }
-      }
+    const io = await appendCommittedLineToFile(this.filePath, line);
+    if (io.ok === false) {
+      return err(internalFrom(io.error.message));
     }
-  }
-
-  private async readAndValidate(): Promise<
-    Result<
-      { readonly envelopes: ReadonlyArray<EventEnvelope>; readonly lastSeq: number },
-      LedgerError
-    >
-  > {
-    let text: string;
-    try {
-      text = await fs.readFile(this.filePath, "utf8");
-    } catch (e: unknown) {
-      if (isENOENT(e)) return ok({ envelopes: [], lastSeq: 0 });
-      return err(internalFrom(e));
-    }
-    if (text.length > 0 && !text.endsWith("\n")) {
-      return err({
-        kind: "invalid_evidence",
-        reason:
-          "Ledger ends with a non-empty unterminated suffix; open must be called to recover.",
-      });
-    }
-    const envelopes: EventEnvelope[] = [];
-    let lastSeq = 0;
-    const lines = text.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      if (raw === undefined || raw.length === 0) continue;
-      const parsed = decodeEnvelopeFromJsonLine(raw);
-      if (parsed.ok === false) return err(parsed.error);
-      const env = parsed.value;
-      if (env.sequence <= lastSeq) {
-        return err({
-          kind: "invalid_evidence",
-          reason: `Duplicate or out-of-order sequence at line ${i + 1}: got ${env.sequence}, expected > ${lastSeq}.`,
-        });
-      }
-      if (env.sequence !== lastSeq + 1) {
-        return err({
-          kind: "invalid_evidence",
-          reason: `Sequence gap at line ${i + 1}: got ${env.sequence}, expected ${lastSeq + 1}.`,
-        });
-      }
-      envelopes.push(env);
-      lastSeq = env.sequence;
-    }
-    return ok({ envelopes, lastSeq });
+    return ok(committed);
   }
 }

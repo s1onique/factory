@@ -416,8 +416,7 @@ test("T16 budget exhaustion persistence", async () => {
     await rmDir(dir);
   }
 });
-
-test("C12 concurrent append: sequences unique and contiguous", async () => {
+test("C12 concurrent sequence allocation: sequences unique and contiguous", async () => {
   const dir = await makeTmpDir();
   try {
     resetCounters();
@@ -436,9 +435,14 @@ test("C12 concurrent append: sequences unique and contiguous", async () => {
       asSeq(makeEvent("preparation_succeeded"), 3),
     );
     await appendPayload(ledger, 4, asSeq(makeEvent("attempt_started"), 4));
+    // Repeated attempt_started events keep the lifecycle legally in
+    // "running" but the resulting record stream is not a full
+    // canonical lifecycle. This test exercises ONLY the storage
+    // allocation / serialization concern. Replay is verified
+    // separately in C12-L against a legal lifecycle.
     const attemptId = "a1";
     const N = 32;
-    const promises: Array<Promise<{ ok: boolean }>> = [];
+    const promises: Array<Promise<{ ok: boolean; seq?: number }>> = [];
     for (let i = 0; i < N; i++) {
       const seq = i + 5;
       const payload = asSeq(
@@ -452,7 +456,7 @@ test("C12 concurrent append: sequences unique and contiguous", async () => {
           missionId: MISSION_ID,
           observedAt: seq,
           event: payload,
-        }) as Promise<{ ok: boolean }>,
+        }) as unknown as Promise<{ ok: boolean; seq?: number }>,
       );
     }
     const results = await Promise.all(promises);
@@ -472,12 +476,141 @@ test("C12 concurrent append: sequences unique and contiguous", async () => {
   }
 });
 
-test("C13 append remains usable after a failure", async () => {
+test("C12-R fresh ledger instance reopens the persisted bytes", async () => {
+  const dir = await makeTmpDir();
+  try {
+    resetCounters();
+    {
+      const w = new JsonlLedger(dir);
+      const o = await w.open();
+      assert.equal(o.ok, true);
+      await appendPayload(w, 1, asSeq(makeEvent("run_created"), 1));
+      await appendPayload(
+        w,
+        2,
+        asSeq(makeEvent("preparation_started"), 2),
+      );
+    }
+    {
+      // Discard the original writer; construct a fresh object over
+      // the same directory.
+      const r = new JsonlLedger(dir);
+      const o = await r.open();
+      assert.equal(o.ok, true);
+      const all = await r.readAll();
+      assert.equal(all.ok, true);
+      if (all.ok === true) {
+        assert.equal(all.value.length, 2);
+        assert.deepEqual(
+          all.value.map((e) => e.sequence),
+          [1, 2],
+        );
+      }
+    }
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("C12-P persisted bytes hash identically after reopen", async () => {
+  const dir = await makeTmpDir();
+  try {
+    resetCounters();
+    let snapshot: Buffer | null = null;
+    {
+      const w = new JsonlLedger(dir);
+      const o = await w.open();
+      assert.equal(o.ok, true);
+      await appendPayload(w, 1, asSeq(makeEvent("run_created"), 1));
+      await appendPayload(
+        w,
+        2,
+        asSeq(makeEvent("preparation_started"), 2),
+      );
+      await appendPayload(
+        w,
+        3,
+        asSeq(makeEvent("preparation_succeeded"), 3),
+      );
+      const fsPromises = await import("node:fs");
+      snapshot = await fsPromises.promises.readFile(new JsonlLedger(dir).path());
+    }
+    {
+      const r = new JsonlLedger(dir);
+      const o = await r.open();
+      assert.equal(o.ok, true);
+      const fsPromises = await import("node:fs");
+      const reopened = await fsPromises.promises.readFile(r.path());
+      assert.equal(reopened.length, snapshot.length);
+      assert.deepEqual(reopened, snapshot);
+    }
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("C12-L legal concurrent lifecycle replays after reopen", async () => {
+  // Commit a single canonical completion path through a fresh
+  // ledger, concurrently submitting the events so that serialization
+  // is exercised. The committed stream is replay-valid (a single
+  // canonical lifecycle), and a fresh-ledger replay must produce
+  // the same derived state.
   const dir = await makeTmpDir();
   try {
     resetCounters();
     const ledger = new JsonlLedger(dir);
-    await ledger.open();
+    const o = await ledger.open();
+    assert.equal(o.ok, true);
+
+    const events: RunEvent[] = [
+      asSeq(makeEvent("run_created"), 1),
+      asSeq(makeEvent("preparation_started"), 2),
+      asSeq(makeEvent("preparation_succeeded"), 3),
+      asSeq(makeEvent("attempt_started"), 4),
+      asSeq(makeEvent("agent_reported_completion"), 5),
+      asSeq(makeEvent("gating_started"), 6),
+      asSeq(makeEvent("gate_passed"), 7),
+      asSeq(makeEvent("review_started"), 8),
+      asSeq(makeEvent("review_passed"), 9),
+    ];
+    const results = await Promise.all(
+      events.map((e) =>
+        ledger.append({
+          eventId: makeEventId(`e-${e.seq}`),
+          runId: RUN_ID,
+          missionId: MISSION_ID,
+          observedAt: e.seq,
+          event: e,
+        }) as unknown as Promise<{ ok: boolean; seq?: number }>,
+      ),
+    );
+    for (const r of results) {
+      assert.equal(r.ok, true);
+    }
+
+    const reopened = new JsonlLedger(dir);
+    const ro = await reopened.open();
+    assert.equal(ro.ok, true);
+    const r1 = await reopened.replay(RUN_ID, MISSION_ID);
+    assert.equal(r1.ok, true);
+    if (r1.ok === true) {
+      assert.equal(r1.value.state.kind, "completed");
+      assert.equal(r1.value.eventsProcessed, 9);
+      assert.equal(r1.value.lastSeq, 9);
+    }
+  } finally {
+    await rmDir(dir);
+  }
+});
+
+test("C13 append remains usable after a real pre-write failure", async () => {
+  const dir = await makeTmpDir();
+  try {
+    resetCounters();
+    const ledger = new JsonlLedger(dir);
+    const o = await ledger.open();
+    assert.equal(o.ok, true);
+
     const r0 = await ledger.append({
       eventId: makeEventId("e-1"),
       runId: RUN_ID,
@@ -486,6 +619,27 @@ test("C13 append remains usable after a failure", async () => {
       event: makeEvent("run_created"),
     });
     assert.equal(r0.ok, true);
+    if (r0.ok === true) assert.equal(r0.value.seq, 1);
+
+    ledger.armFaultHook({
+      kind: "beforeAppendWrite",
+      payload: {
+        ...makeEvent("preparation_started"),
+        eventId: makeEventId("e-injected"),
+        runId: RUN_ID,
+        missionId: MISSION_ID,
+        seq: 0,
+        observedAt: 0,
+      },
+      respond: () => ({
+        ok: false,
+        error: {
+          kind: "internal_failure",
+          message: "injected failure for C13",
+        },
+      }),
+    });
+
     const r1 = await ledger.append({
       eventId: makeEventId("e-2"),
       runId: RUN_ID,
@@ -493,17 +647,35 @@ test("C13 append remains usable after a failure", async () => {
       observedAt: 2,
       event: makeEvent("preparation_started"),
     });
-    assert.equal(r1.ok, true);
+    assert.equal(r1.ok, false);
+    if (r1.ok === false) {
+      assert.equal(r1.error.kind, "internal_failure");
+      assert.equal(
+        (r1.error as { message: string }).message,
+        "injected failure for C13",
+      );
+    }
+
     const r2 = await ledger.append({
       eventId: makeEventId("e-3"),
       runId: RUN_ID,
       missionId: MISSION_ID,
       observedAt: 3,
-      event: makeEvent("preparation_succeeded"),
+      event: makeEvent("preparation_started"),
     });
     assert.equal(r2.ok, true);
     if (r2.ok === true) {
-      assert.equal(r2.value.seq, 3);
+      assert.equal(r2.value.seq, 2);
+    }
+
+    const all = await ledger.readAll();
+    assert.equal(all.ok, true);
+    if (all.ok === true) {
+      assert.equal(all.value.length, 2);
+      assert.deepEqual(
+        all.value.map((e) => e.sequence),
+        [1, 2],
+      );
     }
   } finally {
     await rmDir(dir);

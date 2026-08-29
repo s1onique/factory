@@ -11,12 +11,11 @@
 import type { InvalidEvidence } from "../domain/failure.js";
 import type { InvalidId } from "../domain/ids.js";
 import {
-  parseAttemptId,
   parseEventId,
   parseMissionId,
   parseRunId,
 } from "../domain/ids.js";
-import { andThen, err, ok, type Result } from "../domain/result.js";
+import { err, ok, type Result } from "../domain/result.js";
 import {
   SUPPORTED_SCHEMA_VERSIONS,
   type EventEnvelope,
@@ -109,9 +108,3 @@ export function decodeEnvelopeFromJson(
   }
   return decodeEnvelope(raw);
 }
-
-// Suppress unused-import warning for andThen (kept available for future
-// chaining helpers); `andThen` and `parseAttemptId` are used by other
-// sibling decoders.
-void andThen;
-void parseAttemptId;
