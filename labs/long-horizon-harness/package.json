@@ -13,6 +13,7 @@
     "test": "node --import tsx scripts/run-tests.mjs",
     "test:lab": "node --import tsx scripts/run-tests.mjs",
     "test:process": "node --import tsx --test --test-reporter=spec test/process/process-group.test.ts test/process/supervised-process.test.ts",
+    "qualify:process-live": "node --import tsx scripts/qualify-process-live.mjs",
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",
     "check:eof": "node --import tsx --test --test-reporter=spec test/ledger-evidence.test.ts",

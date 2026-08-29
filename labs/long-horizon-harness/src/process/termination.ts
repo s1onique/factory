@@ -1,26 +1,17 @@
 /**
  * Termination escalation engine.
  *
- * One state machine; two triggers (deadline, cancel). The first
- * terminal trigger wins; later triggers are recorded as ignored.
+ * One state machine; two triggers (deadline, cancel). First
+ * terminal trigger wins; later triggers are recorded but cannot
+ * replace the chosen cause.
  *
- *   running
- *     ├─ on deadline_reached      → terminal = "deadline"
- *     └─ on cancellation_requested → terminal = "cancelled"
+ * Idempotent: runEscalation runs exactly once per engine
+ * instance.
  *
- *   terminating:
- *     TERM sent to group
- *       ├─ group absent within termGrace
- *       │     → cleanup_verified
- *       └─ group still alive
- *             → KILL sent to group
- *             ├─ group absent within killGrace
- *             │     → cleanup_verified
- *             └─ group still alive
- *                   → cleanup_failed
- *
- * Idempotent: requesting TERM twice in a row only sends the
- * signal once.
+ * On EPERM or other errors attempting negative-pgid signalling,
+ * the engine surfaces permission_denied and the supervisor must
+ * fail closed (NOT silently degrade to immediate-child PID
+ * signalling).
  */
 
 import type {
@@ -37,10 +28,14 @@ export type TerminationEngine = {
   requestCleanup: (cause: "deadline" | "cancelled") => void;
   hasTerminalCause: () => boolean;
   terminalCause: () => TerminationCause | null;
-  runEscalation: (
-    pgid: number,
-    immediateChildPid?: number,
-  ) => Promise<EscalationEvidence>;
+  /**
+   * Mark that a non-deadline/cancelled path (e.g. child exited
+   * or spawn failed) has reached terminal state. Subsequent
+   * deadline checks will observe hasTerminalCause() === true
+   * and skip emission.
+   */
+  markSettled: () => void;
+  runEscalation: (pgid: number) => Promise<EscalationEvidence>;
 };
 
 function emptyEscalation(): EscalationEvidence {
@@ -75,30 +70,42 @@ export function createTerminationEngine(args: {
 
   const hasTerminalCause = (): boolean => terminal !== null;
   const terminalCause = (): TerminationCause | null => terminal;
+  const markSettled = (): void => {
+    if (terminal === null) {
+      terminal = "exited";
+    }
+  };
 
   const runEscalation = (
     pgid: number,
-    immediateChildPid?: number,
   ): Promise<EscalationEvidence> => {
     if (escalationPromise !== null) {
       return escalationPromise;
     }
-    escalationPromise = doEscalate(pgid, immediateChildPid);
+    escalationPromise = doEscalate(pgid);
     return escalationPromise;
   };
 
   async function doEscalate(
     pgid: number,
-    immediateChildPid?: number,
   ): Promise<EscalationEvidence> {
     evidence = { ...evidence, termRequested: true };
-    const termResult = args.signals.signalGroup(pgid, "SIGTERM", immediateChildPid);
+    const termResult = args.signals.signalGroup(pgid, "SIGTERM");
     args.emit("SIGTERM", termResult);
     evidence = {
       ...evidence,
       termSent: termResult.kind === "sent",
       termResult,
     };
+
+    if (termResult.kind === "permission_denied") {
+      // Fail closed: do not fall back to immediate child.
+      const finalProbe = args.signals.probeGroup(pgid);
+      evidence = { ...evidence, finalGroupProbe: finalProbe };
+      args.emitProbe(finalProbe);
+      return evidence;
+    }
+
     if (termResult.kind === "sent") {
       const waited = await waitForGroupGone(
         pgid,
@@ -121,7 +128,7 @@ export function createTerminationEngine(args: {
     }
 
     evidence = { ...evidence, killRequested: true };
-    const killResult = args.signals.signalGroup(pgid, "SIGKILL", immediateChildPid);
+    const killResult = args.signals.signalGroup(pgid, "SIGKILL");
     args.emit("SIGKILL", killResult);
     evidence = {
       ...evidence,
@@ -143,6 +150,7 @@ export function createTerminationEngine(args: {
     requestCleanup,
     hasTerminalCause,
     terminalCause,
+    markSettled,
     runEscalation,
   };
 }
@@ -152,6 +160,7 @@ async function waitForGroupGone(
   graceMs: number,
   clock: Clock,
   signals: SignalPort,
+  signal?: AbortSignal,
 ): Promise<GroupProbe> {
   if (graceMs <= 0) {
     return signals.probeGroup(pgid);
@@ -162,7 +171,14 @@ async function waitForGroupGone(
     if (probe.kind === "absent") {
       return probe;
     }
-    await clock.sleep(20);
+    if (probe.kind === "permission_denied") {
+      return probe;
+    }
+    const r = await clock.sleep(20, signal);
+    if (r.kind === "aborted") {
+      // Aborted mid-grace; record final probe and return.
+      return signals.probeGroup(pgid);
+    }
   }
   return signals.probeGroup(pgid);
 }

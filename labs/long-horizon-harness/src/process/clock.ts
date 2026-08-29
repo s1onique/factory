@@ -1,61 +1,59 @@
 /**
  * Clock / timer port implementations.
  *
- * Two clocks are exposed:
- *   - `nowMs`: wall-clock millisecond timestamp. Observation only;
- *     not used for deadline correctness.
- *   - `nowMonotonicMs`: monotonic millisecond timestamp (perf_hooks).
- *     Used for deadline arithmetic.
+ * Two clocks:
+ *   - nowMs: wall-clock millisecond timestamp. Observation only.
+ *   - nowMonotonicMs: monotonic millisecond (perf_hooks). Used for
+ *     deadline arithmetic.
  *
- * The same `Clock` type is shared by production and tests so a
- * fake/manual clock can be injected for pure sequencing tests
- * without touching `Date.now()` or real timers.
+ * sleep() honors AbortSignal by passing the signal to Node's
+ * timersPromises.setTimeout — the underlying timer is cancelled
+ * when the signal aborts, so the sleep returns promptly.
  */
 
 import { setTimeout as timersTimeout } from "node:timers/promises";
 import { performance } from "node:perf_hooks";
-import type { Clock } from "./process-ports.js";
+import type { Clock } from "./process-types.js";
 
 export function realClock(): Clock {
   return {
     nowMs: () => Date.now(),
     nowMonotonicMs: () => performance.now(),
     sleep: async (ms, signal) => {
-      if (signal === undefined) {
-        await timersTimeout(ms);
-        return { kind: "completed" };
-      }
-      // AbortSignal-aware sleep: race setTimeout against the signal.
-      let aborted = false;
-      const onAbort = (): void => {
-        aborted = true;
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      try {
+      if (signal !== undefined) {
         if (signal.aborted) {
           return { kind: "aborted" };
         }
-        await timersTimeout(ms);
-        if (aborted) {
-          return { kind: "aborted" };
+        try {
+          await timersTimeout(ms, undefined, { signal });
+          return { kind: "completed" };
+        } catch (e: unknown) {
+          // timersPromises throws an AbortError (DOMException with
+          // name === "AbortError", code "ABORT_ERR") when the
+          // signal aborts. Treat any thrown abort as aborted.
+          if (isAbortError(e)) {
+            return { kind: "aborted" };
+          }
+          throw e;
         }
-        return { kind: "completed" };
-      } finally {
-        signal.removeEventListener("abort", onAbort);
       }
+      await timersTimeout(ms);
+      return { kind: "completed" };
     },
   };
 }
 
+function isAbortError(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const obj = e as { name?: unknown; code?: unknown };
+  return obj.name === "AbortError" || obj.code === "ABORT_ERR";
+}
+
 /**
- * Manual fake clock. Test code calls `advance(ms)` to move time
- * forward deterministically. `sleep()` resolves immediately when
- * the requested delay has been advanced past; it never waits for
- * real time.
- *
- * NOTE: this fake is suitable for tests that only need to verify
- * pure sequencing and ordering. Tests that exercise real
- * OS-level deadlines MUST use `realClock()`.
+ * Manual fake clock. Pure-sequencing tests only.
+ * Honors AbortSignal by immediately returning "aborted" without
+ * sleeping when the signal is aborted. This is acceptable for
+ * sequencing tests because no real time elapses anyway.
  */
 export function manualClock(): Clock & {
   readonly advance: (ms: number) => void;
