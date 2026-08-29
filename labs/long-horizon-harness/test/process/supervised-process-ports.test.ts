@@ -120,6 +120,12 @@ test("F03 deadline -> TERM -> KILL escalation; outcome=deadline", async () => {
   const supervisor = r.value;
   const child = spawner.children[0]!;
   queueMicrotask(() => child.fireSpawn());
+  // Yield so the deadline/escalation runs, then fire close so
+  // Node's close boundary is observed and the supervisor can
+  // settle as deadline (not cleanup_failed).
+  await new Promise((res) => setImmediate(res));
+  await new Promise((res) => setImmediate(res));
+  if (!child.closed) child.fireClose(null, "SIGKILL");
   const result = await supervisor.await();
   assert.equal(result.outcome.kind, "deadline");
   if (result.outcome.kind === "deadline") {
@@ -296,12 +302,22 @@ test("F12 cancel wakes before long deadline", async () => {
   const supervisor = r.value;
   const child = spawner.children[0]!;
   queueMicrotask(() => child.fireSpawn());
+  // Cooperative TERM: remove group and schedule close so the
+  // supervisor observes Node's close boundary.
+  signals.signalGroup = (_pgid, signal) => {
+    if (signal === "SIGTERM") {
+      signals.aliveGroups.delete(1000);
+      setTimeout(() => child.fireClose(0, null), 10);
+      return { kind: "sent", signal: "SIGTERM" };
+    }
+    return { kind: "group_absent" };
+  };
   setTimeout(() => supervisor.cancel(), 20);
   const t0 = Date.now();
   const result = await supervisor.await();
   const elapsed = Date.now() - t0;
   assert.ok(elapsed < 2000, "cancel must wake within 2s");
-  assert.ok(result.outcome.kind === "cancelled", "outcome must be cancelled");
+  assert.equal(result.outcome.kind, "cancelled");
 });
 
 // ========================================================================
@@ -565,4 +581,37 @@ test("IO02 injected stderr stream failure appears in final result", async () => 
   const result = await supervisor.await();
   assert.ok(result.outcome.kind === "exited", "still classified exited");
   if (result.outcome.kind === "exited") assert.ok(result.outcome.stderrFailure !== null, "stderrFailure must be set");
+});
+
+// ========================================================================
+// CORRECTION03 tests
+// ========================================================================
+
+test("CL04 group absent + no close => cleanup_failed(close_timeout)", async () => {
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const originalSignal = signals.signalGroup.bind(signals);
+  signals.signalGroup = (pgid, signal) => {
+    const r = originalSignal(pgid, signal);
+    // Make KILL remove the group from the alive set so
+    // finalGroupProbe becomes absent.
+    if (signal === "SIGKILL") signals.aliveGroups.delete(pgid);
+    return r;
+  };
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  // Yield so deadline/escalation runs and the group becomes absent.
+  await new Promise((res) => setImmediate(res));
+  await new Promise((res) => setImmediate(res));
+  // CRUCIALLY: never call fireClose. The fake child emits no close.
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed");
+  if (result.outcome.kind === "cleanup_failed") {
+    assert.equal(result.outcome.failure.kind, "cleanup_timeout");
+    if (result.outcome.failure.kind === "cleanup_timeout") assert.equal(result.outcome.failure.phase, "close");
+  }
 });

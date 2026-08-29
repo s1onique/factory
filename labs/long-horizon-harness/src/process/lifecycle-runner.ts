@@ -252,11 +252,11 @@ async function cleanupPath(p: {
       escalation,
     };
   }
-  // Final probe absent (group ownership fully proven) AND we have a
-  // terminal cause: even if close didn't fire (the OS reaped the
-  // process but Node hasn't emitted 'close' yet), the supervisor
-  // HAS fulfilled cleanup duty. Settle as deadline/cancelled.
-  if (finalProbe.kind === "absent" && cause !== null) {
+  // Successful deadline / cancelled requires BOTH group absence AND
+  // an actual Node 'close' observation. Without the close event
+  // we cannot truthfully claim stdio closure. A group going
+  // absent before Node catches up is a distinct failure mode.
+  if (finalProbe.kind === "absent" && closeOrTimeout.kind === "close" && cause !== null) {
     if (cause === "cancelled") {
       return { processId: p.id, spec: p.spec, outcome: { kind: "cancelled", escalation, stdoutFailure: soF, stderrFailure: seF }, stdout: p.stdoutSink.captured(), stderr: p.stderrSink.captured(), startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(), escalation };
     }
@@ -264,7 +264,26 @@ async function cleanupPath(p: {
       return { processId: p.id, spec: p.spec, outcome: { kind: "deadline", escalation, stdoutFailure: soF, stderrFailure: seF }, stdout: p.stdoutSink.captured(), stderr: p.stderrSink.captured(), startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(), escalation };
     }
   }
-  // Final probe was NOT absent OR no terminal cause: real cleanup failure.
+  // Group absent but Node 'close' never arrived within the bounded
+  // close wait. This is a real failure: the OS reaped the process
+  // but Node did not observe the close boundary we depend on.
+  if (finalProbe.kind === "absent" && closeOrTimeout.kind === "close_timeout") {
+    return {
+      processId: p.id, spec: p.spec,
+      outcome: {
+        kind: "cleanup_failed",
+        failure: { kind: "cleanup_timeout", phase: "close", message: "group absent but Node close never arrived within bounded wait" },
+        escalation,
+        stdoutFailure: soF,
+        stderrFailure: seF,
+      },
+      stdout: p.stdoutSink.captured(), stderr: p.stderrSink.captured(),
+      startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(),
+      escalation,
+    };
+  }
+  // Final probe was NOT absent OR no terminal cause OR close failed
+  // (spawn_error after spawn): real cleanup failure.
   return {
     processId: p.id, spec: p.spec,
     outcome: { kind: "cleanup_failed", failure: classifyCleanupFailure(finalProbe), escalation, stdoutFailure: soF, stderrFailure: seF },
@@ -304,6 +323,13 @@ async function waitForCompletionOrBound(
   signal: AbortSignal,
   timeoutMs: number,
 ): Promise<ProcessCompletion | { kind: "close_timeout" }> {
+  if (signal.aborted) return { kind: "close_timeout" };
+  // Yield one macrotask so any in-flight close promise has a
+  // chance to settle before the bounded timer is even armed.
+  // Without this, manual-clock setups (which resolve sleep
+  // synchronously) would let the timer win the race even
+  // though close is about to fire.
+  await new Promise<void>((res) => setImmediate(res));
   if (signal.aborted) return { kind: "close_timeout" };
   const t = clock.sleep(timeoutMs, signal);
   const r = await Promise.race([completion, t.then(() => ({ kind: "close_timeout" as const }))]);

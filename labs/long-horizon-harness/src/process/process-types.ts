@@ -55,7 +55,7 @@ export type ProcessFailure =
   | { readonly kind: "invalid_process_spec"; readonly message: string }
   | { readonly kind: "spawn_failure"; readonly code?: string; readonly syscall?: string; readonly path?: string; readonly message: string }
   | { readonly kind: "signal_failure"; readonly signal: "SIGTERM" | "SIGKILL" | 0; readonly code?: string; readonly message: string }
-  | { readonly kind: "cleanup_timeout"; readonly phase: "term" | "kill"; readonly message: string }
+  | { readonly kind: "cleanup_timeout"; readonly phase: "term" | "kill" | "close"; readonly message: string }
   | { readonly kind: "stdio_failure"; readonly stream: "stdout" | "stderr"; readonly code?: string; readonly message: string }
   | { readonly kind: "internal_process_failure"; readonly message: string }
   | { readonly kind: "capability_unavailable"; readonly message: string };
