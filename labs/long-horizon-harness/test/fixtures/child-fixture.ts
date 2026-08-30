@@ -91,18 +91,49 @@ function numOpt(opts: Map<string, string>, k: string, def: number): number {
 
 /**
  * Wait for a child process to be running (PID assigned).
- * Resolves immediately after `child.pid` is populated and
- * the first spawn event has fired.
+ *
+ * CORRECTION08:
+ *   - 'spawn' event       -> resolve (success)
+ *   - 'error' event       -> reject (real spawn failure)
+ *   - timeout             -> reject (timed out waiting for PID)
+ * The previous version silently resolved on a 500ms timeout,
+ * which made it possible for an unhealthy spawn to masquerade
+ * as a successful spawn. That is exactly the failure mode we
+ * are now closing.
  */
 function waitForSpawn(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve, reject) => {
+    // If PID is already positive, spawn already succeeded.
     if (typeof child.pid === "number" && child.pid > 0) {
       setImmediate(resolve);
       return;
     }
-    child.once("spawn", () => setImmediate(resolve));
-    // Safety bound so we never hang if 'spawn' never fires.
-    setTimeout(resolve, 500).unref();
+    let settled = false;
+    const onSpawn = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      setImmediate(resolve);
+    };
+    const onError = (e: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(e);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.off("spawn", onSpawn);
+      child.off("error", onError);
+      reject(new Error("waitForSpawn: 'spawn' event did not fire within 500ms"));
+    }, 500);
+    // unref'd so a pathological wait cannot keep the fixture
+    // process alive indefinitely if the spawn event never
+    // arrives. We reject so the caller is informed.
+    timer.unref();
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
   });
 }
 
@@ -133,6 +164,11 @@ async function confirmAlive(pid: number): Promise<boolean> {
  *
  * Used by spawn-grandchild mode to learn the grandchild's PID
  * without any /proc or /bin/ps dependency.
+ *
+ * CORRECTION08: explicit JSON trust boundary. We parse into
+ * `unknown`, then validate shape, kind, and integer range
+ * before accepting the value as a PID. No structural cast
+ * from parsed bytes.
  */
 function readDescendantPid(child: ChildProcess): Promise<number | null> {
   return new Promise((resolve) => {
@@ -154,23 +190,19 @@ function readDescendantPid(child: ChildProcess): Promise<number | null> {
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
         if (line.length > 0) {
+          // Explicit trust boundary: unknown -> shape check.
+          let parsed: unknown = null;
           try {
-            const rec = JSON.parse(line) as {
-              kind?: string;
-              descendant_pid?: number;
-            };
-            if (
-              rec.kind === "descendant-ready" &&
-              typeof rec.descendant_pid === "number" &&
-              rec.descendant_pid > 1
-            ) {
-              clearTimeout(timer);
-              child.stdout?.off("data", onData);
-              resolve(rec.descendant_pid);
-              return;
-            }
+            parsed = JSON.parse(line);
           } catch {
             // Not JSON — keep reading.
+            parsed = null;
+          }
+          if (isDescendantReadyRecord(parsed)) {
+            clearTimeout(timer);
+            child.stdout?.off("data", onData);
+            resolve(parsed.descendant_pid);
+            return;
           }
         }
         idx = buf.indexOf("\n");
@@ -183,6 +215,14 @@ function readDescendantPid(child: ChildProcess): Promise<number | null> {
       resolve(null);
     });
   });
+}
+
+function isDescendantReadyRecord(v: unknown): v is { kind: "descendant-ready"; descendant_pid: number } {
+  if (typeof v !== "object" || v === null) return false;
+  const rec = v as Record<string, unknown>;
+  if (rec["kind"] !== "descendant-ready") return false;
+  const pid = rec["descendant_pid"];
+  return typeof pid === "number" && Number.isInteger(pid) && pid > 1;
 }
 
 async function main(): Promise<void> {

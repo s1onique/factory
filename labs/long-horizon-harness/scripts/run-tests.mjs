@@ -1,5 +1,11 @@
 // Run all .test.ts files under test/. Uses Node's fs.readdirSync
 // recursively so we don't depend on shell globstar.
+//
+// CORRECTION08: invoke node directly with --import tsx,
+// not the tsx CLI binary. The tsx CLI tries to spin up a
+// fork-mode IPC server (named pipe on macOS) which some
+// restricted sandboxes cannot bind. Using --import tsx
+// in-process avoids that IPC layer entirely.
 import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";
 import * as path from "node:path";
@@ -20,12 +26,14 @@ function walk(dir) {
 walk(testDir);
 files.sort();
 
-const tsx = path.join(root, "node_modules", ".bin", "tsx");
+// Use --import tsx so .ts files load in-process; we DO NOT
+// use --test-force-exit. A test runner that refuses to exit
+// is itself evidence; we keep that signal.
 const args = [
+  "--import", "tsx",
   "--test",
-  "--test-force-exit",
   "--test-reporter=spec",
   ...files,
 ];
-const child = spawn(tsx, args, { stdio: "inherit" });
+const child = spawn(process.execPath, args, { stdio: "inherit" });
 child.on("exit", (code) => process.exit(code ?? 1));

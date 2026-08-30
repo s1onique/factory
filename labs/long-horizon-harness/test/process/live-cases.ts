@@ -19,6 +19,7 @@ import {
   withLiveSupervisor,
   registerLiveFixturePgid,
   unregisterLiveFixturePgid,
+  tapStdoutUntil,
 } from "./helpers.js";
 
 import assert from "node:assert/strict";
@@ -30,6 +31,35 @@ import assert from "node:assert/strict";
  */
 const aEqual: (actual: unknown, expected: unknown, msg?: string) => void = assert.equal;
 const aOk: (value: unknown, msg?: string) => void = assert.ok;
+
+/**
+ * Parse one JSON line as `unknown` and validate that it
+ * matches the tree-ready shape (CORRECTION08 trust
+ * boundary). Returns null on any mismatch; never throws.
+ */
+function tryParseTreeReady(line: string): {
+  kind: "tree-ready"; parent_pid: number;
+  child_pid: number; grandchild_pid: number;
+} | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(line); }
+  catch { return null; }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const r = parsed as Record<string, unknown>;
+  if (r["kind"] !== "tree-ready") return null;
+  const pp = r["parent_pid"];
+  const cp = r["child_pid"];
+  const gp = r["grandchild_pid"];
+  if (typeof pp !== "number" || !Number.isInteger(pp) || pp <= 1) return null;
+  if (typeof cp !== "number" || !Number.isInteger(cp) || cp <= 1) return null;
+  if (typeof gp !== "number" || !Number.isInteger(gp) || gp <= 1) return null;
+  return {
+    kind: "tree-ready",
+    parent_pid: pp,
+    child_pid: cp,
+    grandchild_pid: gp,
+  };
+}
 
 export type LiveCaseRunner = (a: {
   readonly run: (spec: ProcessSpec) => Promise<ProcessResult>;
@@ -89,33 +119,59 @@ export const LIVE_CASES: readonly LiveCase[] = [
     id: "LIVE04",
     title: "cooperative TERM via cancel",
     run: async ({ startSupervised, signals, spawner, clock, eq, ok: _ok }) => {
-      // CORRECTION07: use a real SIGTERM handler (term-handler
-      // mode) so we exercise cooperative termination instead
-      // of relying on Node's default disposition. We wait up
-      // to 500ms for the fixture's readiness handshake so the
-      // SIGTERM cannot race handler installation.
+      // CORRECTION08: actually observe the fixture's
+      // readiness handshake BEFORE cancel(). We tap the
+      // spawner's stdout so we see the 'term-handler-armed'
+      // marker as soon as the fixture installs its SIGTERM
+      // handler. Only then do we cancel(). No fixed sleep.
+      //
+      // Mechanically:
+      //   spawn
+      //   -> stdout: term-handler-ready
+      //   -> stdout: term-handler-armed   <-- we await this
+      //   cancel()
+      //   -> TERM sent
+      //   -> stdout: term-handled
+      //   -> close
+      //   outcome: cancelled
       const spec = liveBasicSpec(["term-handler"], { stdoutLimitBytes: 4096 });
+      const tap = tapStdoutUntil(spawner, "term-handler-armed", 5000);
       await withLiveSupervisor(spec, async (sup) => {
-        // Allow plenty of time for the fixture's handler to be
-        // installed and the term-handler-armed marker to flush.
-        await new Promise((res) => setTimeout(res, 500));
+        // Bounded readiness handshake.
+        await tap.arrived;
         sup.cancel();
         const result = await sup.await();
         eq(result.outcome.kind, "cancelled");
         eq(result.escalation.termSent, true);
         eq(result.escalation.killSent, false);
         // term-handler exits 0 with 'term-handled' on stdout;
-        // the supervisor reports outcome.exited for a
-        // graceful exit-on-TERM.
-        eq(result.outcome.kind, "cancelled");
-        // Stdout must contain the cooperative-handler marker.
+        // prove the cooperative marker was captured.
         const stdout = result.stdout.buffer.toString("utf8");
+        if (!stdout.includes("term-handler-ready")) {
+          throw new Error(
+            `LIVE04: stdout missing term-handler-ready marker; got=${JSON.stringify(stdout)}`,
+          );
+        }
+        if (!stdout.includes("term-handler-armed")) {
+          throw new Error(
+            `LIVE04: stdout missing term-handler-armed marker; got=${JSON.stringify(stdout)}`,
+          );
+        }
         if (!stdout.includes("term-handled")) {
           throw new Error(
             `LIVE04: stdout missing term-handled marker; got=${JSON.stringify(stdout)}`,
           );
         }
-      }, { startSupervised, clock, signals, spawner });
+        // Ordering proof: ready < armed < handled.
+        const idxReady = stdout.indexOf("term-handler-ready");
+        const idxArmed = stdout.indexOf("term-handler-armed");
+        const idxHandled = stdout.indexOf("term-handled");
+        if (!(idxReady < idxArmed && idxArmed < idxHandled)) {
+          throw new Error(
+            `LIVE04: marker ordering broken; ready=${idxReady} armed=${idxArmed} handled=${idxHandled}`,
+          );
+        }
+      }, { startSupervised, clock, signals, spawner: tap.spawner });
     },
   },
   {
@@ -164,45 +220,72 @@ export const LIVE_CASES: readonly LiveCase[] = [
   },
   {
     id: "LIVE08",
-    title: "descendant tree cleanup",
-    run: async ({ run, eq, ok: _ok }) => {
-      // CORRECTION07: spawn-grandchild now emits a tree-ready
-      // JSON record with parent_pid / child_pid / grandchild_pid
-      // only AFTER both descendants are confirmed alive.
-      // give the supervisor 800ms to spawn and observe the
-      // tree, then escalate via the deadline. The fixture
-      // itself lives 30s, so this deadline is guaranteed to
-      // fire from the supervisor and not the fixture.
-      const r = await run(
-        liveBasicSpec(["spawn-grandchild", "--sleep", "30000"], {
-          deadlineMs: 800,
-          stdoutLimitBytes: 4096,
-        }),
+    title: "descendant tree cleanup (trigger=explicit_cancel_after_tree_ready)",
+    run: async ({ startSupervised, signals, spawner, clock, eq, ok: _ok }) => {
+      // CORRECTION08: LIVE08 no longer races tree construction
+      // against a tight deadline. It:
+      //   1. Spawns spawn-grandchild with a generous deadline
+      //      (30s, well above fixture startup but well below
+      //      what would actually expire during the test).
+      //   2. Waits for the explicit 'tree-ready' handshake on
+      //      stdout, proving parent/child/grandchild exist.
+      //   3. Then issues an explicit cancel().
+      //   4. Asserts outcome=cancelled, finalGroupProbe=absent.
+      //
+      // This separates the questions:
+      //   - "Did the tree exist?"  -> handled by FX04 + the
+      //      tree-ready handshake.
+      //   - "Can the supervisor clean up a confirmed owned
+      //      3-process tree?"  -> LIVE08.
+      //
+      // LIVE06 remains the authoritative deadline path.
+      const spec = liveBasicSpec(
+        ["spawn-grandchild", "--sleep", "30000"],
+        {
+          deadlineMs: 30000,
+          termGraceMs: 200,
+          killGraceMs: 500,
+          stdoutLimitBytes: 8192,
+        },
       );
-      eq(r.outcome.kind, "deadline");
-      eq(r.escalation.finalGroupProbe.kind, "absent");
-      // Stdout must contain the tree-ready evidence with
-      // positive pids for parent/child/grandchild.
-      const stdout = r.stdout.buffer.toString("utf8");
-      if (!stdout.includes("tree-ready")) {
-        throw new Error(
-          `LIVE08: stdout missing tree-ready marker; got=${JSON.stringify(stdout)}`,
-        );
-      }
-      const treeLine = stdout.split("\n").find((l) => l.includes("tree-ready"));
-      if (treeLine === undefined) {
-        throw new Error("LIVE08: tree-ready line not found in stdout");
-      }
-      const tree = JSON.parse(treeLine) as {
-        kind: string;
-        parent_pid: number;
-        child_pid: number;
-        grandchild_pid: number;
-      };
-      eq(tree.kind, "tree-ready");
-      if (tree.parent_pid <= 1 || tree.child_pid <= 1 || tree.grandchild_pid <= 1) {
-        throw new Error(`LIVE08: invalid tree pids: ${JSON.stringify(tree)}`);
-      }
+      const tap = tapStdoutUntil(spawner, "tree-ready", 10000);
+      await withLiveSupervisor(spec, async (sup) => {
+        // Bounded tree readiness handshake.
+        await tap.arrived;
+        sup.cancel();
+        const result = await sup.await();
+        eq(result.outcome.kind, "cancelled");
+        eq(result.escalation.finalGroupProbe.kind, "absent");
+        eq(result.escalation.termSent, true);
+        // Stdout must contain a tree-ready JSON record with
+        // positive pids for parent/child/grandchild. We use
+        // the explicit trust-boundary parser (unknown -> shape
+        // check) rather than a structural cast.
+        const stdout = result.stdout.buffer.toString("utf8");
+        const treeLine = stdout
+          .split("\n")
+          .find((l) => l.includes("tree-ready"));
+        if (treeLine === undefined) {
+          throw new Error(
+            `LIVE08: stdout missing tree-ready marker; got=${JSON.stringify(stdout)}`,
+          );
+        }
+        const tree = tryParseTreeReady(treeLine);
+        if (tree === null) {
+          throw new Error(
+            `LIVE08: tree-ready failed shape validation: ${JSON.stringify(treeLine)}`,
+          );
+        }
+        if (
+          tree.parent_pid <= 1 ||
+          tree.child_pid <= 1 ||
+          tree.grandchild_pid <= 1
+        ) {
+          throw new Error(
+            `LIVE08: invalid tree pids: ${JSON.stringify(tree)}`,
+          );
+        }
+      }, { startSupervised, clock, signals, spawner: tap.spawner });
     },
   },
   {

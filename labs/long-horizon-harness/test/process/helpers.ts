@@ -630,6 +630,92 @@ function resolveControl(opts: LiveRunOptions): ProcessGroupControl {
   return opts.groupControl ?? REAL_GROUP_CONTROL;
 }
 
+// ----------------------------------------------------------------------
+// tapStdoutUntil — wraps a SpawnPort so that stdout chunks
+// are observed BEFORE the supervisor attaches its own reader.
+// The returned promise resolves when `marker` is seen, or
+// rejects on spawn error / timeout / fixture exit.
+//
+// CORRECTION08: this is how LIVE04 and LIVE08 wait for an
+// actual readiness handshake before issuing cancel() /
+// before testing cleanup. No fixed sleeps.
+//
+// Why this works: ChildProcess.stdout is an EventEmitter.
+// Every listener registered for 'data' receives every
+// chunk. We attach ours synchronously inside the wrapped
+// spawn, BEFORE the wrapping function returns. The
+// supervisor's internal attachBoundedSink runs synchronously
+// shortly after spawn() returns, so we are guaranteed to be
+// attached before the supervisor's listener. There is no
+// way for a chunk to slip past us unless the libuv pipe
+// buffer overflows — and we use a generous timeout.
+// ----------------------------------------------------------------------
+
+export type TapStdoutResult = {
+  /** Pass this as `spawner` into withLiveSupervisor / runLive. */
+  readonly spawner: SpawnPort;
+  /** Resolves when `marker` appears in captured stdout. */
+  readonly arrived: Promise<void>;
+};
+
+export function tapStdoutUntil(
+  base: SpawnPort,
+  marker: string,
+  timeoutMs: number,
+): TapStdoutResult {
+  let resolveArrived: () => void = () => undefined;
+  let rejectArrived: (e: Error) => void = () => undefined;
+  const arrived = new Promise<void>((resolve, reject) => {
+    resolveArrived = resolve;
+    rejectArrived = reject;
+  });
+  // Make the arrival promise's timeout unref'd so it does
+  // not keep the test runner alive past its useful life.
+  const t = setTimeout(() => {
+    rejectArrived(new Error(
+      `tapStdoutUntil: marker '${marker}' not seen within ${timeoutMs}ms`,
+    ));
+  }, timeoutMs);
+  t.unref();
+  // Also reject on early uncaught rejection (the Promise
+  // itself doesn't auto-unref; we just rely on the test
+  // caller awaiting it).
+  const childToBuf = new WeakMap<object, string>();
+  const spawner: SpawnPort = {
+    spawn: (args) => {
+      const sc = base.spawn(args);
+      let buf = "";
+      childToBuf.set(sc as unknown as object, buf);
+      const onData = (chunk: unknown): void => {
+        const s = typeof chunk === "string"
+          ? chunk
+          : Buffer.isBuffer(chunk)
+            ? chunk.toString("utf8")
+            : String(chunk);
+        buf += s;
+        if (buf.includes(marker)) {
+          resolveArrived();
+        }
+      };
+      // Attach a 'data' listener to stdout BEFORE returning
+      // to the supervisor. The supervisor attaches its own
+      // listener right after, so we get the same chunks.
+      const stdout = (sc as unknown as { stdout: NodeJS.ReadableStream | null }).stdout;
+      if (stdout !== null) {
+        stdout.on("data", onData);
+      }
+      const stderr = (sc as unknown as { stderr: NodeJS.ReadableStream | null }).stderr;
+      if (stderr !== null) {
+        stderr.on("data", onData);
+      }
+      // If the child errors before spawning, reject.
+      sc.on("error", (e: Error) => rejectArrived(e));
+      return sc;
+    },
+  };
+  return { spawner, arrived };
+}
+
 /**
  * Best-effort cleanup for one owned PGID via the supplied
  * control. ONLY the final probe.kind === "absent" releases
