@@ -27,6 +27,7 @@ import {
   emitWithPersistence,
   PendingCommitsTracker,
 } from "./process-evidence-bridge-emit.js";
+import { requireCriticalCommit } from "./critical-commit.js";
 import type {
   EvidenceCommitObserver,
   ProcessEvidenceIdentity,
@@ -340,32 +341,41 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     // is configured, the bridge runs as a no-op and spawn
     // resolution is immediate — preserving FOUNDATION02 behavior.
     safeEmit({ kind: "process_spawned", processId: id, pid, processGroupId: pgid ?? pid });
-    const awaitOwnership = (): void => {
+    const awaitOwnership = async (): Promise<void> => {
       const p = ownershipCommit;
       if (p === null) {
+        // No sink configured — preserve FOUNDATION02 byte-identity.
         resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
         return;
       }
-      p.then(
-        () => {
-          resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
-        },
-        () => {
-          // Ownership commit failed — resolve as spawn_failed so
-          // the lifecycle runner surfaces this immediately and the
-          // supervisor begins bounded current-owner cleanup.
-          resolveSpawnResolution({
-            kind: "spawn_failed",
-            failure: {
-              kind: "internal_process_failure",
-              message:
-                "process_spawned ownership evidence could not be committed durably; aborting ownership",
-            },
-          });
-        },
+      // CORRECTION02 §1 OG01/OG02/OG03: branch on the DOMAIN result
+      // (`r.ok`), never on Promise rejection. A Promise fulfilled
+      // with `{ok:false}` is still fulfilled; the original code
+      // mistakenly treated fulfillment as success.
+      const outcome = await requireCriticalCommit(
+        p as Promise<import("../process/process-evidence-sink.js").ProcessEvidenceCommitResult>,
       );
+      if (outcome.kind === "ok") {
+        resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
+        return;
+      }
+      // CORRECTION02 §2: the OS spawn already succeeded. The
+      // current supervisor retains live authority over the PID/PGID
+      // and MUST perform bounded TERM->KILL cleanup.
+      resolveSpawnResolution({
+        kind: "ownership_persistence_failed",
+        pid,
+        pgid: pgid ?? pid,
+        failure: {
+          kind: "internal_process_failure",
+          message:
+            outcome.stage === "internal_malfunction"
+              ? `process_spawned commit threw: ${outcome.message}`
+              : `process_spawned commit failed: ${outcome.message}`,
+        },
+      });
     };
-    awaitOwnership();
+    void awaitOwnership();
   });
   child.on("error", (e) => {
     if (spawnEventSeen) return;
@@ -455,6 +465,54 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
             },
             innerSink: () => {},
           });
+          const settlement = emitWithPersistence({
+            processId: id,
+            evidenceSink: evidenceBridge.sink,
+            identity: evidenceBridge.identity,
+            tracker: evidenceBridge.tracker,
+            ...(evidenceBridge.observer !== undefined
+              ? { observer: evidenceBridge.observer }
+              : {}),
+            event: {
+              kind: "process_result_committed",
+              processId: id,
+              result: r,
+            },
+            innerSink: () => {},
+          });
+          if (settlement !== null) {
+            const outcome = await requireCriticalCommit(settlement);
+            if (outcome.kind !== "ok") {
+              const message = outcome.stage === "internal_malfunction"
+                ? "process_result_committed commit threw: " + outcome.message
+                : "process_result_committed commit failed: " + outcome.message;
+              const emptyEscalation = {
+                termRequested: false,
+                termSent: false,
+                termResult: null,
+                killRequested: false,
+                killSent: false,
+                killResult: null,
+                finalGroupProbe: { kind: "absent" as const },
+              };
+              return {
+                processId: id,
+                spec: args.spec,
+                outcome: {
+                  kind: "cleanup_failed",
+                  failure: { kind: "internal_process_failure", message },
+                  escalation: emptyEscalation,
+                  stdoutFailure: null,
+                  stderrFailure: null,
+                },
+                stdout: r.stdout,
+                stderr: r.stderr,
+                startedAtMs: r.startedAtMs,
+                finishedAtMs: r.finishedAtMs,
+                escalation: emptyEscalation,
+              };
+            }
+          }
           await evidenceBridge.tracker.waitAll();
         }
         return r;

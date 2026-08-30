@@ -138,6 +138,22 @@ export async function runLifecycle(input: LifecycleInput): Promise<ProcessResult
         escalation: freshEscalation(),
       };
     }
+    if (res.kind === "ownership_persistence_failed") {
+      // CORRECTION02 §2: the OS spawn already succeeded. The
+      // current supervisor MUST run bounded TERM->KILL cleanup
+      // against the live group, prove absence, observe close, and
+      // return evidence_persistence_failure. Reuse the
+      // {@link cleanupPath} helper so the bounded-close semantics
+      // and timeout machinery are identical to the ordinary
+      // deadline / cancelled paths.
+      setSealed();
+      return cleanupPath({
+        id, spec, engine, safeEmit, setSealed, child,
+        spawnResolution, processCompletion, stdoutSink, stderrSink,
+        startedAtMs, clock, closeWaitController, closeWaitTimeoutMs,
+        pgid: res.pgid,
+      });
+    }
     // Spawned. If termination has already become authoritative,
     // escalate against the freshly known pgid.
     if (engine.hasTerminalCause()) {

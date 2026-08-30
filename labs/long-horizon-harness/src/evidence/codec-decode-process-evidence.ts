@@ -177,7 +177,32 @@ export function decodePersistedProcessEvidence(
           ),
         ),
       );
-    case "process_close_observed":
+    case "process_close_observed": {
+      const closeCode = v["exit_code"];
+      const closeSignal = v["signal"];
+      // CORRECTION02 §9 (A13): on a genuine post-spawn close,
+      // exactly one of exit_code / signal MUST be non-null.
+      // Node guarantees code XOR signal on the 'close' event
+      // for successful spawns. Spawn-failure close records
+      // are not produced (the lifecycle emits process_spawn_failed
+      // instead).
+      if (closeCode === null && closeSignal === null) {
+        return err({
+          kind: "invalid_evidence",
+          reason: "process_close_observed exit_code AND signal cannot both be null",
+        });
+      }
+      if (
+        typeof closeCode === "number" &&
+        closeCode !== null &&
+        typeof closeSignal === "string" &&
+        closeSignal !== null
+      ) {
+        return err({
+          kind: "invalid_evidence",
+          reason: "process_close_observed exit_code AND signal cannot both be non-null",
+        });
+      }
       return andThen(decodeAttemptIdField(v), (attempt_id) =>
         andThen(decodeProcessIdField(v), (process_id) =>
           andThen(decodeOptionalIntOrNull(v, "exit_code"), (exit_code) =>
@@ -193,6 +218,7 @@ export function decodePersistedProcessEvidence(
           ),
         ),
       );
+    }
     case "process_output_summary":
       return andThen(decodeAttemptIdField(v), (attempt_id) =>
         andThen(decodeProcessIdField(v), (process_id) =>

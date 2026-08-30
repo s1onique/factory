@@ -6,6 +6,7 @@ import type {
   PersistedProcessEvidencePayload,
 } from "../evidence/codec-types.js";
 import type { ProcessId } from "../process/process-types.js";
+import type { AttemptId } from "../domain/ids.js";
 import type {
   EvidenceStream,
   ExecutionRecoveryState,
@@ -18,6 +19,7 @@ export function projectExecution(
 ): RecoveryResult<ExecutionRecoveryState> {
   let state: ExecutionRecoveryState = { kind: "not_started" };
   let boundPid: ProcessId | null = null;
+  let boundAId: AttemptId | null = null;
   let lastPid: number | null = null;
   let lastPgid: number | null = null;
   let closedSeen = false;
@@ -30,6 +32,20 @@ export function projectExecution(
       boundPid = pid;
     } else if (boundPid !== pid) {
       return errMixed(pid);
+    }
+    // CORRECTION02 §6 (A08): every process-evidence record
+    // carries an attempt_id. The projector binds on the first
+    // record's attempt_id and rejects any mismatch. Two records
+    // that share a process_id but differ in attempt_id belong
+    // to different attempts and MUST NOT be reconciled together.
+    if (boundAId === null) {
+      boundAId = pid === pid ? payloadAttemptId(payload) : null;
+      // ^ always assigned; payloadAttemptId returns AttemptId|null
+    } else {
+      const aid = payloadAttemptId(payload);
+      if (aid !== null && aid !== boundAId) {
+        return errMixedAttempt(aid, pid);
+      }
     }
 
     const r = apply(state, payload, {
@@ -80,6 +96,39 @@ function payloadProcessId(
 
 function errMixed(pid: ProcessId): RecoveryResult<ExecutionRecoveryState> {
   return { ok: false, error: { kind: "mixed_process_identity", processId: String(pid) } };
+}
+
+function errMixedAttempt(
+  aid: AttemptId,
+  pid: ProcessId,
+): RecoveryResult<ExecutionRecoveryState> {
+  return {
+    ok: false,
+    error: {
+      kind: "mixed_attempt_identity",
+      attemptId: String(aid),
+      processId: String(pid),
+    },
+  };
+}
+
+function payloadAttemptId(
+  p: PersistedProcessEvidencePayload,
+): AttemptId | null {
+  switch (p.kind) {
+    case "process_spawn_requested":
+    case "process_spawned":
+    case "process_spawn_failed":
+    case "process_deadline_reached":
+    case "process_cancel_requested":
+    case "process_signal_attempted":
+    case "process_signal_result":
+    case "process_group_probe":
+    case "process_close_observed":
+    case "process_output_summary":
+    case "process_result_committed":
+      return p.attempt_id;
+  }
 }
 
 function errInconsistent(reason: string): RecoveryResult<never> {

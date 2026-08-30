@@ -182,3 +182,68 @@ test("RPL14 impossible result history: result_committed(deadline) without deadli
     assert.fail("expected settled with deadline");
   }
 });
+
+test("ATT01 Attempt A + Process P then Attempt B + Process P -> reject mixed_attempt_identity", () => {
+  const r = projectExecution([
+    {
+      payload: { kind: "process_spawn_requested", attempt_id: makeAttemptId("a-A"), process_id: PID },
+      seq: 1, observedAt: 1000,
+    },
+    {
+      payload: {
+        kind: "process_spawned",
+        attempt_id: makeAttemptId("a-A"),
+        process_id: PID,
+        pid: 7,
+        pgid: 7,
+      },
+      seq: 2, observedAt: 1001,
+    },
+    {
+      payload: { kind: "process_spawn_requested", attempt_id: makeAttemptId("a-B"), process_id: PID },
+      seq: 3, observedAt: 1002,
+    },
+  ]);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.error.kind, "mixed_attempt_identity");
+});
+
+test("ATT02 Attempt A + P then Attempt A + Q -> reject mixed_process_identity", () => {
+  const r = projectExecution([
+    {
+      payload: { kind: "process_spawn_requested", attempt_id: makeAttemptId("a-A"), process_id: makeProcessId("p-1") },
+      seq: 1, observedAt: 1000,
+    },
+    {
+      payload: { kind: "process_spawn_requested", attempt_id: makeAttemptId("a-A"), process_id: makeProcessId("p-2") },
+      seq: 2, observedAt: 1001,
+    },
+  ]);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.error.kind, "mixed_process_identity");
+});
+
+test("ATT03 identical AttemptId+ProcessId stream -> accept", () => {
+  const r = projectExecution([
+    {
+      payload: { kind: "process_spawn_requested", attempt_id: makeAttemptId("a-A"), process_id: PID },
+      seq: 1, observedAt: 1000,
+    },
+    {
+      payload: {
+        kind: "process_spawned",
+        attempt_id: makeAttemptId("a-A"),
+        process_id: PID,
+        pid: 7,
+        pgid: 7,
+      },
+      seq: 2, observedAt: 1001,
+    },
+    {
+      payload: { kind: "process_deadline_reached", attempt_id: makeAttemptId("a-A"), process_id: PID },
+      seq: 3, observedAt: 1002,
+    },
+  ]);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.kind, "in_flight_at_crash");
+});

@@ -80,7 +80,6 @@ function persistOne(args: {
         observedAt: Date.now(),
         payload: args.payload,
       });
-  args.tracker.add(p);
   p.then(
     (r) => {
       if (r.ok === false) {
@@ -91,9 +90,33 @@ function persistOne(args: {
         }
       }
     },
-    () => {},
+    () => {
+      // CORRECTION02 OG03: internal sink malfunction. The returned
+      // promise already rejects; we suppress the fire-and-forget
+      // observer-side unhandled rejection here.
+    },
   );
-  return p;
+  // CORRECTION02 OG03: attach a defensive catch on the
+  // returned promise so callers that immediately discard it
+  // (before requireCriticalCommit observes the rejection)
+  // do not produce unhandled-rejection crashes. Critical
+  // callers ALWAYS inspect the outcome via requireCriticalCommit.
+  // CORRECTION02 OG03: attach a defensive catch on the
+  // returned promise so callers that immediately discard it
+  // (before requireCriticalCommit observes the rejection)
+  // do not produce unhandled-rejection crashes. Critical
+  // callers ALWAYS inspect the outcome via requireCriticalCommit.
+  // The returned promise resolves with a synthetic ok:false
+  // marker so it is never rejected. Callers wanting the raw
+  // rejection MUST go through requireCriticalCommit.
+  const safe: Promise<ProcessEvidenceCommitResult> = p.catch(() => {
+    return {
+      ok: false,
+      error: { kind: "ledger_write_failure", message: "internal sink malfunction" },
+    };
+  });
+  args.tracker.add(safe);
+  return safe;
 }
 
 /**
@@ -326,7 +349,10 @@ export function appendSyntheticEvidence(args: {
           obs.onOwnershipDurableCommitFailed(payload, r);
         }
       },
-      () => {},
+      () => {
+        // CORRECTION02 OG03: swallow unhandled rejection; the
+        // returned promise already surfaces the failure.
+      },
     );
   }
 }

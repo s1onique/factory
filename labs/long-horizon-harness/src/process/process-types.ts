@@ -108,7 +108,13 @@ export type ProcessOutcome =
  */
 export type SpawnResolution =
   | { readonly kind: "spawned"; readonly pid: number; readonly pgid: number }
-  | { readonly kind: "spawn_failed"; readonly failure: ProcessFailure };
+  | { readonly kind: "spawn_failed"; readonly failure: ProcessFailure }
+  | {
+      readonly kind: "ownership_persistence_failed";
+      readonly pid: number;
+      readonly pgid: number;
+      readonly failure: ProcessFailure;
+    };
 
 /**
  * Final state of the eager process-completion promise:

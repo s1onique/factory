@@ -10,6 +10,7 @@
  */
 
 import type { ProcessId } from "../process/process-types.js";
+
 import type {
   PersistedGroupProbe,
   PersistedProcessResult,
@@ -121,6 +122,11 @@ export type RecoveryDecision =
 export type RecoveryError =
   | { readonly kind: "invalid_evidence"; readonly reason: string }
   | { readonly kind: "mixed_process_identity"; readonly processId: string }
+  | {
+      readonly kind: "mixed_attempt_identity";
+      readonly attemptId: string;
+      readonly processId: string;
+    }
   | { readonly kind: "inconsistent_history"; readonly reason: string };
 
 export type RecoveryResult<T> =
