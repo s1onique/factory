@@ -24,9 +24,10 @@ import {
   runLive,
   liveFixtureRegistrySize,
   snapshotLiveFixturePgids,
-  emergencyKillAllRegisteredPgids,
+  emergencyKillAllRegisteredPgidsWithControl,
   unregisterLiveFixturePgid,
   realProbeNegPgid,
+  REAL_GROUP_CONTROL,
 } from "./helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_PROCESS_LIVE === "1";
@@ -176,12 +177,17 @@ after(async () => {
   // negative-PGID probe. Only ESRCH releases the entry.
   // Any of: alive / denied / unsupported / unknown keeps
   // the registry non-zero and FAILS strict qualification.
-  emergencyKillAllRegisteredPgids();
+  //
+  // CORRECTION06: emergency sweep is now done through
+  // REAL_GROUP_CONTROL (the only control allowed to issue
+  // real OS signals).
+  emergencyKillAllRegisteredPgidsWithControl(REAL_GROUP_CONTROL);
   // Allow OS reaping.
   await new Promise<void>((res) => setTimeout(res, 250));
   const snapshot = snapshotLiveFixturePgids();
   if (snapshot.length === 0) return;
-  // Probe every residue; only ESRCH removes it.
+  // Probe every residue via REAL_GROUP_CONTROL; only
+  // ESRCH removes an entry.
   for (const pgid of snapshot) {
     const probe = realProbeNegPgid(pgid);
     if (probe.kind === "absent") {
