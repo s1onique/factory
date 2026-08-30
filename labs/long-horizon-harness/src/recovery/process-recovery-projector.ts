@@ -9,6 +9,7 @@ import type { ProcessId } from "../process/process-types.js";
 import type {
   EvidenceStream,
   ExecutionRecoveryState,
+  RecoveredExecutionPhase,
   RecoveryResult,
 } from "./recovery-types.js";
 
@@ -50,7 +51,8 @@ export function projectExecution(
   if (
     state.kind === "result_unknown_after_cleanup" ||
     state.kind === "spawn_outcome_unknown" ||
-    state.kind === "in_flight_at_crash"
+    state.kind === "in_flight_at_crash" ||
+    state.kind === "spawn_failure_observed"
   ) {
     return okState(state);
   }
@@ -153,13 +155,15 @@ function apply(
       if (state.kind !== "spawn_outcome_unknown") {
         return errInconsistent(`process_spawn_failed while state=${state.kind}`);
       }
+      // CORRECTION01 §15: ONLY process_result_committed produces
+      // settled. Spawn-failure observation moves to a distinct
+      // "spawn_failure_observed" state; the actual durable
+      // settlement requires a later process_result_committed record.
       return okResult({
         state: {
-          kind: "settled",
+          kind: "spawn_failure_observed",
           processId: p.process_id,
-          result: { outcome_kind: "spawn_failed", failure: p.failure },
-          pid: null,
-          pgid: null,
+          failure: p.failure,
         },
         lastPid: null,
         lastPgid: null,
@@ -209,8 +213,19 @@ function apply(
       if (state.kind !== "in_flight_at_crash") {
         return errInconsistent(`process_signal_result while state=${state.kind}`);
       }
-      const phase =
-        p.signal === "SIGTERM" ? "term_sent" : "kill_sent";
+      // CORRECTION01 §16: only `result_kind === "sent"` may promote
+      // the recovery phase to `*_sent`. group_absent / permission_denied
+      // / error results leave the phase at the corresponding
+      // `*_requested` so we do NOT invent post-crash signal
+      // delivery facts.
+      const phase: RecoveredExecutionPhase =
+        p.result.result_kind === "sent"
+          ? p.signal === "SIGTERM"
+            ? "term_sent"
+            : "kill_sent"
+          : p.signal === "SIGTERM"
+            ? "term_requested"
+            : "kill_requested";
       return okResult({
         state: { ...state, phase },
         lastPid: ctx.lastPid,
@@ -273,7 +288,26 @@ function apply(
       });
     }
     case "process_result_committed": {
-      if (state.kind === "spawn_outcome_unknown") {
+      // CORRECTION01 §15 + §19: result_committed is the ONLY
+      // settlement boundary. The committed result must be
+      // compatible with the durable history.
+      if (
+        state.kind !== "in_flight_at_crash" &&
+        state.kind !== "spawn_outcome_unknown" &&
+        state.kind !== "spawn_failure_observed"
+      ) {
+        return errInconsistent(
+          `process_result_committed while state=${state.kind}`,
+        );
+      }
+      // spawn_failed result requires a preceding
+      // process_spawn_failed observation.
+      if (p.result.outcome_kind === "spawn_failed") {
+        if (state.kind !== "spawn_failure_observed") {
+          return errInconsistent(
+            "spawn_failed result requires spawn_failure_observed state",
+          );
+        }
         return okResult({
           state: {
             kind: "settled",
@@ -288,8 +322,13 @@ function apply(
           groupAbsentSeen: ctx.groupAbsentSeen,
         });
       }
+      // exited / signaled / deadline / cancelled / cleanup_failed
+      // require an in_flight_at_crash state (i.e. a spawned
+      // observation).
       if (state.kind !== "in_flight_at_crash") {
-        return errInconsistent(`process_result_committed while state=${state.kind}`);
+        return errInconsistent(
+          `${p.result.outcome_kind} result requires in_flight_at_crash state`,
+        );
       }
       return okResult({
         state: {

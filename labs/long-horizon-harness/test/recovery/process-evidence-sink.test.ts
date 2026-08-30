@@ -9,7 +9,12 @@ import {
   NoopProcessEvidenceSink,
 } from "../../src/process/process-evidence-sink.js";
 import { makeProcessId } from "../../src/process/process-types.js";
-import { makeEventId, makeRunId, makeMissionId } from "../../src/domain/ids.js";
+import {
+  makeEventId,
+  makeRunId,
+  makeMissionId,
+  makeAttemptId,
+} from "../../src/domain/ids.js";
 
 async function tmpDir(): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), "labsink-"));
@@ -23,24 +28,14 @@ test("LedgerBackedProcessEvidenceSink appends process-evidence envelope", async 
     assert.equal(opened.ok, true);
     if (!opened.ok) return;
     const sink = new LedgerBackedProcessEvidenceSink(ledger);
-    const raw = await ledger.appendProcessEvidence({
+    const r = await sink.commitCritical({
       eventId: makeEventId("e-1"),
       runId: makeRunId("r-1"),
       missionId: makeMissionId("m-1"),
       observedAt: 1000,
       payload: {
         kind: "process_spawn_requested",
-        process_id: makeProcessId("p-x"),
-      },
-    });
-    assert.equal(raw.ok, true, JSON.stringify(raw));
-    const r = await sink.append({
-      eventId: makeEventId("e-1"),
-      runId: makeRunId("r-1"),
-      missionId: makeMissionId("m-1"),
-      observedAt: 1000,
-      payload: {
-        kind: "process_spawn_requested",
+        attempt_id: makeAttemptId("a-1"),
         process_id: makeProcessId("p-x"),
       },
     });
@@ -50,7 +45,6 @@ test("LedgerBackedProcessEvidenceSink appends process-evidence envelope", async 
     if (all.ok) {
       const ev = all.value[0];
       assert.ok(ev !== undefined);
-      // v2 envelope discriminator: `kind` is required.
       assert.ok(
         "kind" in ev,
         "expected v2 envelope with kind discriminator",
@@ -61,6 +55,9 @@ test("LedgerBackedProcessEvidenceSink appends process-evidence envelope", async 
           ev.process_evidence.kind,
           "process_spawn_requested",
         );
+        if (ev.process_evidence.kind === "process_spawn_requested") {
+          assert.equal(ev.process_evidence.attempt_id, "a-1");
+        }
       }
     }
   } finally {
@@ -70,17 +67,16 @@ test("LedgerBackedProcessEvidenceSink appends process-evidence envelope", async 
 
 test("NoopProcessEvidenceSink returns ok", async () => {
   const sink = new NoopProcessEvidenceSink();
-  const r = await sink.append({
+  const r = await sink.commitCritical({
     eventId: makeEventId("e-1"),
     runId: makeRunId("r-1"),
     missionId: makeMissionId("m-1"),
     observedAt: 1000,
     payload: {
       kind: "process_spawn_requested",
+      attempt_id: makeAttemptId("a-1"),
       process_id: makeProcessId("p-x"),
     },
   });
   assert.equal(r.ok, true);
 });
-
-/* placeholder */

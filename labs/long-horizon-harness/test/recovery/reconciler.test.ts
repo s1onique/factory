@@ -106,6 +106,46 @@ test("REC08 result_unknown_after_cleanup still gets probe", () => {
     processId: PID, pid: 100, pgid: 100,
     reason: "group_absent_close_no_result",
   };
+test("REC07 reused-PGID simulation never creates authority", () => {
+  const state: ExecutionRecoveryState = {
+    kind: "in_flight_at_crash",
+    processId: PID, pid: 999, pgid: 1234, phase: "kill_sent",
+  };
+  const d = reconcile(state, stubProbe(1234, "alive"));
+  assert.equal(d.kind, "historical_group_observed_alive");
+  if (d.kind === "historical_group_observed_alive") {
+    // CORRECTION01 §22: historicalPid must reflect the
+    // persisted value, not -1. It is not authority; it is
+    // historical evidence.
+    assert.equal(d.historicalPid, 999);
+  }
+});
+
+test("REC09 reconciler returns actual persisted PID, NOT -1", () => {
+  const state: ExecutionRecoveryState = {
+    kind: "in_flight_at_crash",
+    processId: PID, pid: 7777, pgid: 7777, phase: "running",
+  };
+  const d = reconcile(state, stubProbe(7777, "absent"));
+  assert.equal(d.kind, "historical_group_absent");
+  if (d.kind === "historical_group_absent") {
+    assert.equal(d.historicalPid, 7777);
+    assert.notEqual(d.historicalPid, -1);
+  }
+});
+
+test("REC10 spawn_failure_observed returns no_action pending durable result", () => {
+  const state: ExecutionRecoveryState = {
+    kind: "spawn_failure_observed",
+    processId: PID,
+    failure: { kind: "spawn_failure", message: "no entry" },
+  };
+  const d = reconcile(state, stubProbe(0, "alive"));
+  assert.equal(d.kind, "no_action");
+  if (d.kind === "no_action") {
+    assert.equal(d.reason, "spawn_failure_observed_durable_pending");
+  }
+});
   const d = reconcile(state, stubProbe(100, "alive"));
   assert.equal(d.kind, "historical_group_observed_alive");
 });

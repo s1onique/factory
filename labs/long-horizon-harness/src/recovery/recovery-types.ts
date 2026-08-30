@@ -33,6 +33,11 @@ export type ExecutionRecoveryState =
       readonly phase: RecoveredExecutionPhase;
     }
   | {
+      readonly kind: "spawn_failure_observed";
+      readonly processId: ProcessId;
+      readonly failure: import("../evidence/codec-types.js").PersistedProcessFailure;
+    }
+  | {
       readonly kind: "result_unknown_after_cleanup";
       readonly processId: ProcessId;
       readonly pid: number | null;
@@ -77,7 +82,8 @@ export type RecoveryDecision =
       readonly reason:
         | "no_execution_observed"
         | "already_settled"
-        | "spawn_outcome_unknown_cannot_probe";
+        | "spawn_outcome_unknown_cannot_probe"
+        | "spawn_failure_observed_durable_pending";
       readonly state: ExecutionRecoveryState;
     }
   | {
@@ -87,23 +93,26 @@ export type RecoveryDecision =
   | {
       readonly kind: "historical_group_observed_alive";
       readonly processId: ProcessId;
-      readonly historicalPid: number;
+      readonly historicalPid: number | null;
       readonly historicalPgid: number;
     }
   | {
       readonly kind: "historical_group_absent";
       readonly processId: ProcessId;
+      readonly historicalPid: number | null;
       readonly historicalPgid: number;
     }
   | {
       readonly kind: "historical_group_probe_denied";
       readonly processId: ProcessId;
+      readonly historicalPid: number | null;
       readonly historicalPgid: number;
       readonly code?: string;
     }
   | {
       readonly kind: "historical_group_probe_error";
       readonly processId: ProcessId;
+      readonly historicalPid: number | null;
       readonly historicalPgid: number;
       readonly message: string;
       readonly code?: string;

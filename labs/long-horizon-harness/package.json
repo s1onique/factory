@@ -15,7 +15,7 @@
     "test:process": "node --import tsx --test --test-reporter=spec test/process/process-group.test.ts test/process/supervised-process.test.ts",
     "qualify:process-live": "FACTORY_STRICT_PROCESS_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/process/process-live-qualification.test.ts",
     "test:fixture-contract": "node --import tsx --test --test-reporter=spec test/process/fixture-contract.test.ts",
-    "test:recovery": "node --import tsx --test --test-reporter=spec test/recovery/recovery-types.test.ts test/recovery/reconciler.test.ts test/recovery/reconciler-readonly-check.test.ts test/recovery/process-evidence-sink.test.ts",
+    "test:recovery": "node --import tsx --test --test-reporter=spec test/recovery/recovery-types.test.ts test/recovery/reconciler.test.ts test/recovery/reconciler-readonly-check.test.ts test/recovery/process-evidence-sink.test.ts test/recovery/cp-crash.test.ts",
     "qualify:recovery-live": "FACTORY_STRICT_RECOVERY_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/recovery/cp-crash.test.ts",
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",

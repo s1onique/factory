@@ -26,7 +26,10 @@ import { makeProcessId } from "./process-types.js";
 import {
   emitWithPersistence,
   PendingCommitsTracker,
-  type EvidenceCommitObserver,
+} from "./process-evidence-bridge-emit.js";
+import type {
+  EvidenceCommitObserver,
+  ProcessEvidenceIdentity,
 } from "./process-evidence-bridge.js";
 import type {
   ProcessEvidenceSink,
@@ -74,11 +77,7 @@ export type CreateSupervisorArgs = {
    */
   readonly evidenceSink?: ProcessEvidenceSink;
   readonly evidenceObserver?: EvidenceCommitObserver;
-  readonly evidenceIdentity?: {
-    readonly runId: string;
-    readonly missionId: string;
-    readonly eventIdFactory: () => string;
-  };
+  readonly evidenceIdentity?: ProcessEvidenceIdentity;
 };
 
 export function defaultIdFactory(): ProcessId {
@@ -187,12 +186,10 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     if (sealed) return;
     sink(e);
     if (evidenceBridge !== null) {
-      emitWithPersistence({
+      const critical = emitWithPersistence({
         processId: id,
         evidenceSink: evidenceBridge.sink,
-        eventIdFactory: evidenceBridge.identity.eventIdFactory,
-        runId: evidenceBridge.identity.runId,
-        missionId: evidenceBridge.identity.missionId,
+        identity: evidenceBridge.identity,
         tracker: evidenceBridge.tracker,
         ...(evidenceBridge.observer !== undefined
           ? { observer: evidenceBridge.observer }
@@ -200,6 +197,12 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
         event: e,
         innerSink: () => {},
       });
+      // Capture the critical-boundary commit promise so the spawn
+      // handler can BLOCK the spawn resolution until the durable
+      // ownership record has fsync'd (CORRECTION01 §6/§7).
+      if (critical !== null && e.kind === "process_spawned") {
+        ownershipCommit = critical;
+      }
     }
   };
 
@@ -301,6 +304,21 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
   });
 
   let spawnEventSeen = false;
+  // Latest observed close fields. The supervisor's
+  // `process_close_observed` persisted evidence must reflect the
+  // ACTUAL Node close observation (code XOR signal), not fabricated
+  // null/null. See CORRECTION01 §11/§12.
+  let lastCloseCode: number | null = null;
+  let lastCloseSignal: NodeJS.Signals | null = null;
+  let closeObserved = false;
+  // The ownership-boundary commit promise for the latest
+  // `process_spawned` evidence. The bridge fills this when it
+  // routes the event through `commitCritical`. The lifecycle runner
+  // awaits this before letting sustained RUNNING proceed (CORRECTION01
+  // §6/§7). When no sink is configured the value stays `null` and
+  // FOUNDATION02 behavior is preserved.
+  let ownershipCommit: Promise<unknown> | null = null;
+
   child.on("spawn", () => {
     spawnEventSeen = true;
     const pid = child.pid;
@@ -314,8 +332,40 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     }
     cachedPid = pid;
     cachedPgid = pgid;
+    // FOUNDATION03 §6/§7: the durable ownership boundary MUST be
+    // fsync'd before sustained execution may proceed. We emit the
+    // `process_spawned` RuntimeEvent first so callers' sinks
+    // observe it, then BLOCK the spawn resolution on the critical
+    // commit promise the bridge must have captured. When no sink
+    // is configured, the bridge runs as a no-op and spawn
+    // resolution is immediate — preserving FOUNDATION02 behavior.
     safeEmit({ kind: "process_spawned", processId: id, pid, processGroupId: pgid ?? pid });
-    resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
+    const awaitOwnership = (): void => {
+      const p = ownershipCommit;
+      if (p === null) {
+        resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
+        return;
+      }
+      p.then(
+        () => {
+          resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
+        },
+        () => {
+          // Ownership commit failed — resolve as spawn_failed so
+          // the lifecycle runner surfaces this immediately and the
+          // supervisor begins bounded current-owner cleanup.
+          resolveSpawnResolution({
+            kind: "spawn_failed",
+            failure: {
+              kind: "internal_process_failure",
+              message:
+                "process_spawned ownership evidence could not be committed durably; aborting ownership",
+            },
+          });
+        },
+      );
+    };
+    awaitOwnership();
   });
   child.on("error", (e) => {
     if (spawnEventSeen) return;
@@ -328,6 +378,9 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     safeEmit({ kind: "process_exit_observed", processId: id, exitCode: code, signal });
   });
   child.on("close", (code, signal) => {
+    lastCloseCode = code;
+    lastCloseSignal = signal;
+    closeObserved = true;
     settleCompletionOnce({ kind: "close", code, signal });
   });
 
@@ -374,9 +427,7 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
           emitWithPersistence({
             processId: id,
             evidenceSink: evidenceBridge.sink,
-            eventIdFactory: evidenceBridge.identity.eventIdFactory,
-            runId: evidenceBridge.identity.runId,
-            missionId: evidenceBridge.identity.missionId,
+            identity: evidenceBridge.identity,
             tracker: evidenceBridge.tracker,
             ...(evidenceBridge.observer !== undefined
               ? { observer: evidenceBridge.observer }
@@ -384,17 +435,15 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
             event: {
               kind: "process_close_observed",
               processId: id,
-              exitCode: null,
-              signal: null,
+              exitCode: closeObserved ? lastCloseCode : null,
+              signal: closeObserved ? lastCloseSignal : null,
             },
             innerSink: () => {},
           });
           emitWithPersistence({
             processId: id,
             evidenceSink: evidenceBridge.sink,
-            eventIdFactory: evidenceBridge.identity.eventIdFactory,
-            runId: evidenceBridge.identity.runId,
-            missionId: evidenceBridge.identity.missionId,
+            identity: evidenceBridge.identity,
             tracker: evidenceBridge.tracker,
             ...(evidenceBridge.observer !== undefined
               ? { observer: evidenceBridge.observer }

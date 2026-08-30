@@ -114,6 +114,28 @@ export type PersistedFailure =
   | { readonly kind: "invalid_transition"; readonly from: string; readonly event: string; readonly message: string }
   | { readonly kind: "internal_failure"; readonly message: string };
 
+/**
+ * Identity carried by every process-evidence record (FOUNDATION03 §10/§54).
+ *
+ * Every variant of {@link PersistedProcessEvidencePayload} carries this
+ * identity explicitly. `attempt_id` is MANDATORY: multi-attempt
+ * reconciliation is impossible without it.
+ */
+export type PersistedProcessEvidenceIdentity = {
+  readonly attempt_id: AttemptId;
+  readonly process_id: ProcessId;
+};
+
+export type PersistedEscalationEvidence = {
+  readonly term_requested: boolean;
+  readonly term_sent: boolean;
+  readonly term_result: PersistedSignalAttemptResult | null;
+  readonly kill_requested: boolean;
+  readonly kill_sent: boolean;
+  readonly kill_result: PersistedSignalAttemptResult | null;
+  readonly final_group_probe: PersistedGroupProbe;
+};
+
 export type PersistedBudgetObservation = {
   readonly kind: BudgetKind;
   readonly limit: number;
@@ -140,50 +162,70 @@ export type PersistedBudgetObservation = {
  * historical evidence, not authority.
  */
 export type PersistedProcessEvidencePayload =
-  | { readonly kind: "process_spawn_requested"; readonly process_id: ProcessId }
+  | {
+      readonly kind: "process_spawn_requested";
+      readonly attempt_id: AttemptId;
+      readonly process_id: ProcessId;
+    }
   | {
       readonly kind: "process_spawned";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly pid: number;
       readonly pgid: number;
     }
   | {
       readonly kind: "process_spawn_failed";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly failure: PersistedProcessFailure;
     }
-  | { readonly kind: "process_deadline_reached"; readonly process_id: ProcessId }
-  | { readonly kind: "process_cancel_requested"; readonly process_id: ProcessId }
+  | {
+      readonly kind: "process_deadline_reached";
+      readonly attempt_id: AttemptId;
+      readonly process_id: ProcessId;
+    }
+  | {
+      readonly kind: "process_cancel_requested";
+      readonly attempt_id: AttemptId;
+      readonly process_id: ProcessId;
+    }
   | {
       readonly kind: "process_signal_attempted";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly signal: "SIGTERM" | "SIGKILL";
     }
   | {
       readonly kind: "process_signal_result";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly signal: "SIGTERM" | "SIGKILL";
       readonly result: PersistedSignalAttemptResult;
     }
   | {
       readonly kind: "process_group_probe";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly probe: PersistedGroupProbe;
     }
   | {
       readonly kind: "process_close_observed";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly exit_code: number | null;
       readonly signal: string | null;
     }
   | {
       readonly kind: "process_output_summary";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly stdout: PersistedOutputSummary;
       readonly stderr: PersistedOutputSummary;
     }
   | {
       readonly kind: "process_result_committed";
+      readonly attempt_id: AttemptId;
       readonly process_id: ProcessId;
       readonly result: PersistedProcessResult;
     };
@@ -265,13 +307,3 @@ export type PersistedProcessResult =
       readonly failure: PersistedProcessFailure;
       readonly escalation: PersistedEscalationEvidence;
     };
-
-export type PersistedEscalationEvidence = {
-  readonly term_requested: boolean;
-  readonly term_sent: boolean;
-  readonly term_result: PersistedSignalAttemptResult | null;
-  readonly kill_requested: boolean;
-  readonly kill_sent: boolean;
-  readonly kill_result: PersistedSignalAttemptResult | null;
-  readonly final_group_probe: PersistedGroupProbe;
-};

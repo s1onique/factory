@@ -21,6 +21,34 @@
  * or signal methods. It is a typed append/replay boundary only.
  */
 
+/**
+ * The {@link ProcessEvidenceSink} is the narrow boundary through which
+ * the FOUNDATION02 process supervisor emits candidate-neutral
+ * process-runtime evidence to the durable ledger.
+ *
+ * Two tiers of commit exist (CORRECTION01 §8):
+ *
+ *   - `commitCritical(...)` blocks the caller until the durability
+ *     boundary is acknowledged. Required for the durable ownership
+ *     boundary (notably `process_spawned`).
+ *   - `commitObservation(...)` returns immediately; durability is
+ *     observed asynchronously. Used for non-critical evidence such as
+ *     `process_close_observed`, `process_output_summary`, and
+ *     `process_result_committed`.
+ *
+ * The {@link LedgerBackedProcessEvidenceSink} wraps a
+ * {@link JsonlLedger} and reuses its append/sync/torn-tail primitive.
+ * A {@link NoopProcessEvidenceSink} is provided for tests that don't
+ * care about persistence.
+ *
+ * Critical-commit failures are FOUNDATION03 §66 / §67 failures: the
+ * current-run supervisor MUST observe `result.ok === false` for every
+ * `commitCritical` and bound-cleanup its live process.
+ *
+ * The sink MUST NOT itself own a Clock, fs, child_process, timers,
+ * or signal methods. It is a typed append/replay boundary only.
+ */
+
 import type { Result } from "../domain/result.js";
 import type {
   EventId,
@@ -66,10 +94,27 @@ export type ProcessEvidenceSinkError =
  */
 export interface ProcessEvidenceSink {
   /**
-   * Append one process-evidence payload. Returns `ok=true` only
-   * after the durable commit boundary has acknowledged the write.
+   * Critical append — the caller MUST await the returned promise
+   * and observe `result.ok`. The fsync boundary is honoured before
+     * the returned promise resolves. Failure at this boundary
+   * (NOTABLY for `process_spawned`) is a FOUNDATION03 §67
+   * ownership-persistence failure.
    */
-  append(input: {
+  commitCritical(input: {
+    readonly eventId: EventId;
+    readonly runId: RunId;
+    readonly missionId: MissionId;
+    readonly observedAt: number;
+    readonly payload: PersistedProcessEvidencePayload;
+  }): Promise<ProcessEvidenceCommitResult>;
+
+  /**
+   * Non-critical observation append — durability is recorded
+   * asynchronously; the returned promise resolves after the
+   * ledger commit fsyncs but the caller does NOT need to await it
+   * for sustained execution to proceed.
+   */
+  commitObservation(input: {
     readonly eventId: EventId;
     readonly runId: RunId;
     readonly missionId: MissionId;
@@ -84,7 +129,18 @@ export interface ProcessEvidenceSink {
  */
 export class NoopProcessEvidenceSink implements ProcessEvidenceSink {
   private next = 1;
-  async append(
+  async commitCritical(
+    _input: {
+      readonly eventId: EventId;
+      readonly runId: RunId;
+      readonly missionId: MissionId;
+      readonly observedAt: number;
+      readonly payload: PersistedProcessEvidencePayload;
+    },
+  ): Promise<ProcessEvidenceCommitResult> {
+    return { ok: true, seq: this.next++ };
+  }
+  async commitObservation(
     _input: {
       readonly eventId: EventId;
       readonly runId: RunId;
@@ -108,7 +164,29 @@ export class NoopProcessEvidenceSink implements ProcessEvidenceSink {
  */
 export class LedgerBackedProcessEvidenceSink implements ProcessEvidenceSink {
   constructor(private readonly ledger: JsonlLedger) {}
-  async append(input: {
+  async commitCritical(input: {
+    readonly eventId: EventId;
+    readonly runId: RunId;
+    readonly missionId: MissionId;
+    readonly observedAt: number;
+    readonly payload: PersistedProcessEvidencePayload;
+  }): Promise<ProcessEvidenceCommitResult> {
+    return this.commitNow(input);
+  }
+  async commitObservation(input: {
+    readonly eventId: EventId;
+    readonly runId: RunId;
+    readonly missionId: MissionId;
+    readonly observedAt: number;
+    readonly payload: PersistedProcessEvidencePayload;
+  }): Promise<ProcessEvidenceCommitResult> {
+    // For non-critical evidence the caller may not await, but the
+    // underlying ledger already serialises through the same mutex
+    // and fsync semantics. We still return the awaited promise so
+    // tests that DO await observe the durability boundary.
+    return this.commitNow(input);
+  }
+  private async commitNow(input: {
     readonly eventId: EventId;
     readonly runId: RunId;
     readonly missionId: MissionId;
