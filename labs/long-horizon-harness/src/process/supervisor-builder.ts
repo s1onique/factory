@@ -55,7 +55,34 @@ export type Supervisor = {
   readonly handle: () => ProcessHandle;
   readonly cancel: () => void;
   readonly await: () => Promise<ProcessResult>;
+  /**
+   * CORRECTION04 §29: typed outer result. Available whenever the
+   * supervisor was constructed with an evidenceSink. When no
+   * evidenceSink is configured, awaitOuter rejects (the typed
+   * outer result is only meaningful when durability is in scope).
+   */
+  readonly awaitOuter: () => Promise<OuterSupervisorResult>;
 };
+
+/**
+ * CORRECTION04 §29/§41: a typed outer result that distinguishes
+ * the execution outcome from the durability outcome. The
+ * original execution ProcessResult is preserved; the durability
+ * verdict is added as a sibling cause. NEVER collapses a clean
+ * exit + settlement fsync failure into a fake cleanup_failed.
+ */
+export type OuterSupervisorResult =
+  | { kind: "durably_settled"; process: ProcessResult }
+  | {
+      kind: "settlement_not_durable";
+      process: ProcessResult;
+      failure: { kind: "evidence_persistence_failure"; stage: "settlement"; message: string };
+    }
+  | {
+      kind: "ownership_not_durable";
+      process: ProcessResult;
+      failure: { kind: "evidence_persistence_failure"; stage: "ownership"; message: string };
+    };
 
 export type CreateSupervisorArgs = {
   readonly spec: ProcessSpec;
@@ -163,6 +190,7 @@ export function invalidSpecSupervisorResult(
       }
       return Promise.resolve(result);
     },
+    awaitOuter: () => Promise.resolve({ kind: "durably_settled", process: result }),
   };
 }
 export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
@@ -236,6 +264,7 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
       handle: () => ({ processId: id, pid: null, processGroupId: null }),
       cancel: () => {},
       await: () => Promise.resolve(result),
+      awaitOuter: () => Promise.resolve({ kind: "durably_settled", process: result } satisfies OuterSupervisorResult),
     };
   }
 
@@ -434,7 +463,18 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
       if (cached !== null) return cached;
       cached = (async (): Promise<ProcessResult> => {
         const r = await lifecyclePromise;
-        if (evidenceBridge !== null) {
+        // CORRECTION04 §32: when the OS spawn succeeded but
+        // ownership durability failed, the durable history
+        // correctly contains ONLY process_spawn_requested. The
+        // supervisor's wrappedAwait MUST NOT emit close_observed
+        // or result_committed for this case — those records
+        // would imply ownership that never happened and would
+        // confuse the recovery projector.
+        const isOwnershipFailure =
+          r.outcome.kind === "cleanup_failed" &&
+          r.outcome.failure.kind === "evidence_persistence_failure" &&
+          r.outcome.failure.stage === "ownership";
+        if (evidenceBridge !== null && !isOwnershipFailure) {
           await evidenceBridge.tracker.waitAll();
           emitWithPersistence({
             processId: id,
@@ -449,21 +489,6 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
               processId: id,
               exitCode: closeObserved ? lastCloseCode : null,
               signal: closeObserved ? lastCloseSignal : null,
-            },
-            innerSink: () => {},
-          });
-          emitWithPersistence({
-            processId: id,
-            evidenceSink: evidenceBridge.sink,
-            identity: evidenceBridge.identity,
-            tracker: evidenceBridge.tracker,
-            ...(evidenceBridge.observer !== undefined
-              ? { observer: evidenceBridge.observer }
-              : {}),
-            event: {
-              kind: "process_result_committed",
-              processId: id,
-              result: r,
             },
             innerSink: () => {},
           });
@@ -536,5 +561,19 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     };
   })();
 
-  return { handle, cancel, await: wrappedAwait };
+  // CORRECTION04
+  const awaitOuter = async () => {
+    if (evidenceBridge === null) {
+      throw new Error("awaitOuter requires an evidenceSink");
+    }
+    const r = await wrappedAwait();
+    if (r.outcome.kind === "cleanup_failed" && r.outcome.failure.kind === "evidence_persistence_failure") {
+      if (r.outcome.failure.stage === "ownership") {
+        return { kind: "ownership_not_durable", process: r, failure: { kind: "evidence_persistence_failure" as const, stage: "ownership" as const, message: r.outcome.failure.message } } as OuterSupervisorResult;
+      }
+      return { kind: "settlement_not_durable", process: r, failure: { kind: "evidence_persistence_failure" as const, stage: "settlement" as const, message: r.outcome.failure.message } } as OuterSupervisorResult;
+    }
+    return { kind: "durably_settled", process: r } as OuterSupervisorResult;
+  };
+  return { handle, cancel, await: wrappedAwait, awaitOuter };
 }

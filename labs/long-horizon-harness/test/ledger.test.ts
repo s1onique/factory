@@ -627,7 +627,8 @@ test("C13 append remains usable after a real pre-write failure", async () => {
 
     ledger.armFaultHook({
       kind: "beforeAppendWrite",
-      respond: () => ({
+      payload: { type: "run_created" },
+      respond: (_candidate, _r) => ({
         ok: false,
         error: {
           kind: "internal_failure",

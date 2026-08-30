@@ -99,7 +99,9 @@ export type LedgerOpenOptions = {
 export type LedgerFaultHook =
   | {
       readonly kind: "beforeAppendWrite";
+      readonly payload: RunEventPayload | PersistedProcessEvidencePayload;
       readonly respond: (
+        candidate: RunEventPayload | PersistedProcessEvidencePayload,
         r: Result<void, LedgerError>,
       ) => Result<void, LedgerError>;
     }
@@ -392,7 +394,8 @@ export class JsonlLedger {
     ) {
       const hook = this.faultHook;
       this.faultHook = null;
-      const response = hook.respond(ok(undefined));
+      if (hook.kind !== "beforeAppendWrite") throw new Error("invariant");
+      const response = hook.respond(input.event, ok(undefined));
       if (response.ok === false) {
         // No sequence allocated; no committed record produced.
         return err(response.error);
@@ -437,9 +440,15 @@ export class JsonlLedger {
       this.faultHook.kind === "beforeAppendWrite"
     ) {
       const hook = this.faultHook;
-      this.faultHook = null;
-      const response = hook.respond(ok(undefined));
+      // The hook remains armed across multiple invocations.
+      // Tests that want to fire exactly once on a specific
+      // candidate kind return ok when the candidate does not
+      // match; once matched and a non-ok response is returned
+      // the hook is cleared.
+      if (hook.kind !== "beforeAppendWrite") throw new Error("invariant");
+      const response = hook.respond(committed.payload, ok(undefined));
       if (response.ok === false) {
+        this.faultHook = null;
         return err(response.error);
       }
     }

@@ -69,3 +69,49 @@ test("settlement-failure: process_result_committed returns {ok:false} -> evidenc
     assert.equal(e.killSent, false);
   }
 });
+
+test("settlement-failure: awaitOuter returns settlement_not_durable (CORRECTION04 §48)", async () => {
+  let criticalCalls = 0;
+  const sink: ProcessEvidenceSink = {
+    commitCritical: (): Promise<ProcessEvidenceCommitResult> => {
+      criticalCalls++;
+      if (criticalCalls === 1) return Promise.resolve({ ok: true, seq: 1 });
+      return Promise.resolve({ ok: false, error: { kind: "ledger_write_failure", message: "settlement fail" } });
+    },
+    commitObservation: (): Promise<ProcessEvidenceCommitResult> => Promise.resolve({ ok: true, seq: 99 }),
+  };
+  const handle = buildSupervisor({
+    spec: SPEC,
+    clock: realClock(),
+    signals: nodeSignalPort(),
+    spawner: nodeSpawnPort(),
+    sink: () => {},
+    evidenceSink: sink,
+    evidenceIdentity: {
+      runId: makeRunId("r-sf-outer"),
+      missionId: makeMissionId("m-sf-outer"),
+      attemptId: makeAttemptId("a-sf-outer"),
+      eventIdFactory: () => makeEventId("e-sf-outer"),
+    },
+  });
+  const r = await handle.awaitOuter();
+  assert.equal(r.kind, "settlement_not_durable");
+  if (r.kind === "settlement_not_durable") {
+    assert.equal(r.failure.kind, "evidence_persistence_failure");
+    if (r.failure.kind === "evidence_persistence_failure") {
+      assert.equal(r.failure.stage, "settlement");
+    }
+    // CORRECTION04 §48: PROCESS_CLEANUP_ATTEMPTED=false. The
+    // runtime did NOT run TERM/KILL/probe; the escalation is
+    // genuinely empty. The typed outer result is
+    // settlement_not_durable rather than cleanup_failed.
+    assert.equal(r.process.escalation.termRequested, false);
+    assert.equal(r.process.escalation.termSent, false);
+    assert.equal(r.process.escalation.killRequested, false);
+    assert.equal(r.process.escalation.killSent, false);
+    if (r.process.outcome.kind === "cleanup_failed") {
+      // The cleanup_failed cause must be evidence_persistence_failure.
+      assert.equal(r.process.outcome.failure.kind, "evidence_persistence_failure");
+    }
+  }
+});
