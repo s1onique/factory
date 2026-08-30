@@ -40,7 +40,7 @@ const clock = realClock();
 // promise (no second probe).
 const capabilityP = PROCESS_GROUP_CAPABILITY_PROMISE;
 
-const opts = { startSupervised, clock, signals, spawner };
+const opts = { startSupervised: async (a: Parameters<typeof startSupervised>[0]) => startSupervised(a), clock, signals, spawner };
 
 // runLive is the only path LIVE01..LIVE14 use to execute a
 async function runSpec(spec: import("../../src/process/process-types.js").ProcessSpec) {
@@ -48,7 +48,7 @@ async function runSpec(spec: import("../../src/process/process-types.js").Proces
 }
 
 function caseArgs() {
-  return { run: runSpec, signals, spawner, clock, startSupervised, withLiveSupervisor: opts, eq: assert.equal, ok: assert.ok };
+  return { run: runSpec, signals, spawner, clock, startSupervised: opts.startSupervised, withLiveSupervisor: opts, eq: assert.equal, ok: assert.ok };
 }
 
 

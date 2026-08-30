@@ -31,10 +31,10 @@ test("settlement-failure: process_result_committed returns {ok:false} -> evidenc
   const sink: ProcessEvidenceSink = {
     commitCritical: (): Promise<ProcessEvidenceCommitResult> => {
       criticalCalls++;
-      // First call: process_spawned — succeed.
-      if (criticalCalls === 1) return Promise.resolve({ ok: true, seq: 1 });
-      // All subsequent commitCritical calls fail (both
-      // process_result_committed emissions).
+      // CORRECTION07 §2: 1st critical = process_spawn_requested.
+      // 1st: spawn_requested (ok)  2nd: process_spawned (ok)  3rd: result_committed (fail)
+      if (criticalCalls <= 2) return Promise.resolve({ ok: true, seq: criticalCalls });
+      // Subsequent commitCritical calls fail (process_result_committed).
       return Promise.resolve({ ok: false, error: { kind: "ledger_write_failure", message: "settlement fail" } });
     },
     commitObservation: (): Promise<ProcessEvidenceCommitResult> => Promise.resolve({ ok: true, seq: 99 }),
@@ -75,7 +75,9 @@ test("settlement-failure: awaitOuter returns settlement_not_durable (CORRECTION0
   const sink: ProcessEvidenceSink = {
     commitCritical: (): Promise<ProcessEvidenceCommitResult> => {
       criticalCalls++;
-      if (criticalCalls === 1) return Promise.resolve({ ok: true, seq: 1 });
+      // CORRECTION07 §2: 1st critical = process_spawn_requested.
+      // 1st: spawn_requested (ok)  2nd: process_spawned (ok)  3rd: result_committed (fail)
+      if (criticalCalls <= 2) return Promise.resolve({ ok: true, seq: criticalCalls });
       return Promise.resolve({ ok: false, error: { kind: "ledger_write_failure", message: "settlement fail" } });
     },
     commitObservation: (): Promise<ProcessEvidenceCommitResult> => Promise.resolve({ ok: true, seq: 99 }),

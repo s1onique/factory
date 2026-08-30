@@ -60,7 +60,7 @@ export type ProcessFailure =
   | { readonly kind: "internal_process_failure"; readonly message: string }
   | {
       readonly kind: "evidence_persistence_failure";
-      readonly stage: "ownership" | "settlement";
+      readonly stage: "ownership" | "settlement" | "spawn_request";
       readonly message: string;
     }
   | { readonly kind: "capability_unavailable"; readonly message: string };

@@ -610,7 +610,7 @@ import type {
 
 
 export type LiveRunOptions = {
-  readonly startSupervised: (a: CreateSupervisorArgs) => Result<Supervisor, ProcessFailure>;
+  readonly startSupervised: (a: CreateSupervisorArgs) => Promise<Result<Supervisor, ProcessFailure>>;
   readonly clock: Clock;
   readonly signals: SignalPort;
   readonly spawner: SpawnPort;
@@ -782,7 +782,7 @@ export async function runLive(
     }
   };
 
-  const r = opts.startSupervised({
+  const r = await opts.startSupervised({
     spec,
     clock: opts.clock,
     signals: opts.signals,
@@ -831,7 +831,7 @@ export async function withLiveSupervisor<T>(
       ownedPgids.add(pgid);
     }
   };
-  const r = opts.startSupervised({
+  const r = await opts.startSupervised({
     spec,
     clock: opts.clock,
     signals: opts.signals,

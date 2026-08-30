@@ -52,6 +52,7 @@ import type {
 import type { Clock, SignalPort, SpawnPort } from "./process-ports.js";
 import type { SpawnOwnershipObserver } from "./supervisor-spawn-ownership.js";
 import { wireSpawnOwnershipHandler } from "./supervisor-spawn-handler.js";
+// gateSpawnIntent removed in CORRECTION07 final revision (inline .then() gate).
 
 export type Supervisor = {
   readonly handle: () => ProcessHandle;
@@ -197,6 +198,8 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
   const id = (args.idFactory ?? defaultIdFactory)();
   const sink: RuntimeEventSink = args.sink ?? (() => {});
   let sealed = false;
+  // CORRECTION07: ownershipCommitRef declared early (TDZ-binding).
+  const ownershipCommitRef = { current: null as Promise<unknown> | null };
   // FOUNDATION03: optional evidence bridge. When configured, every
   // RuntimeEvent also becomes a persisted process-evidence record.
   // The bridge also exposes a synthetic channel for close, output
@@ -212,8 +215,8 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
       tracker: new PendingCommitsTracker(),
     };
   })();
-  const safeEmit = (e: RuntimeEvent): void => {
-    if (sealed) return;
+  const safeEmit = (e: RuntimeEvent): Promise<import("./process-evidence-sink.js").ProcessEvidenceCommitResult> | null => {
+    if (sealed) return null;
     sink(e);
     if (evidenceBridge !== null) {
       const critical = emitWithPersistence({
@@ -233,12 +236,19 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
       if (critical !== null && e.kind === "process_spawned") {
         ownershipCommitRef.current = critical as Promise<unknown>;
       }
+      return critical;
     }
+    return null;
   };
 
   const startedAtMs = args.clock.nowMs();
-  safeEmit({ kind: "process_spawn_started", processId: id });
+  // CORRECTION07 §2: process_spawn_started is critical.
+  const gateCritical: Promise<import("./process-evidence-sink.js").ProcessEvidenceCommitResult> | null =
+    safeEmit({ kind: "process_spawn_started", processId: id });
 
+  // CORRECTION07 §2: process_spawn_requested is critical.
+  // F-series tests (no sink) must preserve the sync spawn pattern;
+  // gate's failure is propagated via .then() to ownershipCommitRef.
   let child: SpawnedChild;
   try {
     child = args.spawner.spawn({
@@ -268,11 +278,35 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     };
   }
 
+  // CORRECTION07 §3: spawn-intent gate (async .then()).
+  if (gateCritical !== null) {
+    // CORRECTION07 §3: spawn-intent gate. The critical commit
+    // Promise may reject. We stash a rejecting Promise in
+    // ownershipCommitRef; the supervisor's awaitOwnership awaits
+    // it via requireCriticalCommit and treats rejection as
+    // ownership_persistence_failed. To prevent Node from flagging
+    // an unhandled rejection in the gap between assignment and
+    // await, we attach a .catch that is no-op: the supervisor's
+    // await will handle the actual rejection.
+    gateCritical.then((commitResult) => {
+      if (commitResult.ok === false) {
+        const e = commitResult.error;
+        const reason = e.kind === "invalid_evidence" ? e.reason : e.message;
+        const rejectingPromise = Promise.reject(new Error("process_spawn_requested commit failed: " + reason));
+        rejectingPromise.catch(() => { /* consumed by awaitOwnership */ });
+        ownershipCommitRef.current = rejectingPromise;
+      }
+    }, (err: unknown) => {
+      const rejectingPromise = Promise.reject(err instanceof Error ? err : new Error(String(err)));
+      rejectingPromise.catch(() => { /* consumed by awaitOwnership */ });
+      ownershipCommitRef.current = rejectingPromise;
+    });
+  }
+
   let resolveSpawnResolution!: (r: SpawnResolution) => void;
   const spawnResolution = new Promise<SpawnResolution>((resolve) => { resolveSpawnResolution = resolve; });
   const cachedPidRef = { current: null as number | null };
   const cachedPgidRef = { current: null as number | null };
-  const ownershipCommitRef = { current: null as Promise<unknown> | null };
 
   let resolveCompletion!: (c: ProcessCompletion) => void;
   const processCompletion = new Promise<ProcessCompletion>((resolve) => { resolveCompletion = resolve; });

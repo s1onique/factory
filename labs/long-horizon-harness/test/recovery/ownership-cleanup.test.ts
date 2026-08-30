@@ -13,12 +13,19 @@ interface FaultSink extends ProcessEvidenceSink {
 }
 
 function faultInjectingSink(): FaultSink {
+  // CORRECTION07 §2: process_spawn_requested is a critical boundary.
+  // 1st critical call: spawn_requested (must succeed)
+  // 2nd critical call: process_spawned (fault-injected failure)
   let firstCritical = true;
   let counter = 0;
   return {
     criticalCalls: () => counter,
     commitCritical: (): Promise<ProcessEvidenceCommitResult> => {
       counter++;
+      if (counter === 1) {
+        // 1st: process_spawn_requested - succeed
+        return Promise.resolve({ ok: true, seq: counter });
+      }
       if (firstCritical) {
         firstCritical = false;
         return Promise.resolve({ ok: false, error: { kind: "ledger_write_failure", message: "fault-injected" } });
@@ -87,7 +94,12 @@ test("OG03 internal sink malfunction also fails closed", async () => {
   const sink: ProcessEvidenceSink = {
     commitCritical: (): Promise<ProcessEvidenceCommitResult> => {
       criticalCalls++;
+      // CORRECTION07 §2: 1st critical is spawn_requested, must succeed.
+      // 2nd critical is process_spawned, faults to test ownership malfunction.
       if (criticalCalls === 1) {
+        return Promise.resolve({ ok: true, seq: criticalCalls });
+      }
+      if (criticalCalls === 2) {
         return Promise.reject(new Error("internal sink malfunction"));
       }
       return Promise.resolve({ ok: true, seq: criticalCalls });

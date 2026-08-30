@@ -129,15 +129,22 @@ function persistOne(args: {
 }
 
 /**
- * Critical-boundary classification (CORRECTION01 §6/§8). Critical
- * commits MUST block sustained execution; observation commits may
+ * Critical-boundary classification (CORRECTION01 §6/§8, CORRECTION07 §2).
+ * Critical commits MUST block sustained execution; observation commits may
  * be observed asynchronously.
+ *
+ * CORRECTION07: process_spawn_requested is now a critical boundary.
+ * The durability ACK for the spawn intent MUST precede the OS spawn().
+ * Without this guarantee, an early crash can leave a real OS process
+ * with no spawn_requested record (not_started becomes a lie).
  */
 function isCriticalBoundary(
   p: PersistedProcessEvidencePayload,
 ): boolean {
   return (
-    p.kind === "process_spawned" || p.kind === "process_result_committed"
+    p.kind === "process_spawn_requested" ||
+    p.kind === "process_spawned" ||
+    p.kind === "process_result_committed"
   );
 }
 

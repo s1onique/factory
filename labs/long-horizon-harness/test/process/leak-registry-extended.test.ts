@@ -91,7 +91,7 @@ test("LEAK01 protected live helper cleans after callback failure", async () => {
   // FakeProcessGroupControl so no real OS signal call can
   // ever be made (CORRECTION06).
   const fakeControl = new FakeProcessGroupControl();
-  const fakeStart = ((a: CreateSupervisorArgs) => {
+  const fakeStart = (async (a: CreateSupervisorArgs) => {
     // Emit process_spawned synchronously via the sink.
     a.sink?.({ kind: "process_spawned", processId: makeProcessId("fake"), pid: 99001, processGroupId: 99001 });
     // Emit cleanup_verified synchronously to prove the helper
@@ -113,7 +113,7 @@ test("LEAK01 protected live helper cleans after callback failure", async () => {
         }),
       },
     };
-  }) as unknown as typeof opts.startSupervised;
+  }) as unknown as (a: Parameters<typeof opts.startSupervised>[0]) => Promise<Awaited<ReturnType<typeof opts.startSupervised>>>;
   const fakeOpts = { ...opts, startSupervised: fakeStart, groupControl: fakeControl };
   // We bypass `dummySpec` to avoid actually spawning anything.
   const syntheticSpec: ProcessSpec = {
@@ -206,7 +206,7 @@ test("LEAK05 process_spawned synchronously enters registry", async () => {
   const fakeControl = new FakeProcessGroupControl({
     sequence: [{ probe: { kind: "absent", code: "ESRCH" } }],
   });
-  const fakeStart = ((a: CreateSupervisorArgs) => {
+  const fakeStart = (async (a: CreateSupervisorArgs) => {
     a.sink?.({ kind: "process_spawned", processId: makeProcessId("sync"), pid: 88001, processGroupId: 88001 });
     a.sink?.({ kind: "cleanup_verified", processId: makeProcessId("sync") });
     return {
@@ -225,7 +225,7 @@ test("LEAK05 process_spawned synchronously enters registry", async () => {
         }),
       },
     };
-  }) as unknown as typeof opts.startSupervised;
+  }) as unknown as (a: Parameters<typeof opts.startSupervised>[0]) => Promise<Awaited<ReturnType<typeof opts.startSupervised>>>;
   const fakeOpts = { ...opts, startSupervised: fakeStart, groupControl: fakeControl };
   const syntheticSpec: ProcessSpec = {
     executable: "noop", args: [], cwd: "/tmp", env: {},
@@ -248,7 +248,7 @@ test("LEAK06 runLive helper registers before body continuation", async () => {
   const fakeControl = new FakeProcessGroupControl({
     sequence: [{ probe: { kind: "absent", code: "ESRCH" } }],
   });
-  const fakeStart = ((a: CreateSupervisorArgs) => {
+  const fakeStart = (async (a: CreateSupervisorArgs) => {
     a.sink?.({ kind: "process_spawned", processId: makeProcessId("x"), pid: 88002, processGroupId: 88002 });
     registrySizeAtSink = liveFixtureRegistrySize();
     a.sink?.({ kind: "cleanup_verified", processId: makeProcessId("x") });
@@ -268,7 +268,7 @@ test("LEAK06 runLive helper registers before body continuation", async () => {
         }),
       },
     };
-  }) as unknown as typeof opts.startSupervised;
+  }) as unknown as (a: Parameters<typeof opts.startSupervised>[0]) => Promise<Awaited<ReturnType<typeof opts.startSupervised>>>;
   const fakeOpts = { ...opts, startSupervised: fakeStart, groupControl: fakeControl };
   const syntheticSpec: ProcessSpec = {
     executable: "noop", args: [], cwd: "/tmp", env: {},
@@ -288,7 +288,7 @@ test('LEAK07 failed body leaves PGID available to after-suite cleanup', async ()
   };
   let awaited = false;
   const fakeControl = new FakeProcessGroupControl();
-  const fakeStart = ((a: CreateSupervisorArgs) => {
+  const fakeStart = (async (a: CreateSupervisorArgs) => {
     a.sink && a.sink({ kind: 'process_spawned', processId: makeProcessId('wedge'), pid: 88003, processGroupId: 88003 });
     return {
       ok: true as const,
@@ -298,7 +298,7 @@ test('LEAK07 failed body leaves PGID available to after-suite cleanup', async ()
         await: () => { awaited = true; return new Promise<unknown>(() => {}); },
       },
     };
-  }) as unknown as typeof opts.startSupervised;
+  }) as unknown as (a: Parameters<typeof opts.startSupervised>[0]) => Promise<Awaited<ReturnType<typeof opts.startSupervised>>>;
   const fakeOpts = Object.assign({}, opts, { startSupervised: fakeStart, groupControl: fakeControl });
   await Promise.race([
     runLive(syntheticSpec, fakeOpts).catch(() => undefined),
@@ -356,7 +356,7 @@ async function runLiveWithFakeSpawnAndControl(
   pgid: number,
   control: ProcessGroupControl,
 ): Promise<void> {
-  const fakeStart = ((a: CreateSupervisorArgs) => {
+  const fakeStart = (async (a: CreateSupervisorArgs) => {
     a.sink?.({ kind: "process_spawned", processId: makeProcessId("cleanup"), pid: pgid, processGroupId: pgid });
     a.sink?.({ kind: "cleanup_verified", processId: makeProcessId("cleanup") });
     return {
@@ -375,7 +375,7 @@ async function runLiveWithFakeSpawnAndControl(
         }),
       },
     };
-  }) as unknown as typeof opts.startSupervised;
+  }) as unknown as (a: Parameters<typeof opts.startSupervised>[0]) => Promise<Awaited<ReturnType<typeof opts.startSupervised>>>;
   const fakeOpts = {
     ...opts,
     startSupervised: fakeStart,

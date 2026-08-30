@@ -66,7 +66,7 @@ export type LiveCaseRunner = (a: {
   readonly signals: SignalPort;
   readonly spawner: SpawnPort;
   readonly clock: Clock;
-  readonly startSupervised: (args: CreateSupervisorArgs) => Result<Supervisor, ProcessFailure>;
+  readonly startSupervised: (args: CreateSupervisorArgs) => Promise<Result<Supervisor, ProcessFailure>>;
   readonly eq: typeof aEqual;
   readonly ok: typeof aOk;
 }) => Promise<void>;
