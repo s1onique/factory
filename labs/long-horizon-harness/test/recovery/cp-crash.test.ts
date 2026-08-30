@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
 
 const STRICT = process.env.FACTORY_STRICT_RECOVERY_LIVE === "1";
+// CORRECTION06 §35: record the qualification subject commit.
+emitStdout({ kind: "QUALIFICATION_SUBJECT_COMMIT", value: process.env.QUALIFICATION_SUBJECT_COMMIT ?? "<unset>" });
 const RECOVERY_LIVE_REQUIRED = 9;
 
 interface MatrixState { required: number; executed: number; passed: number; failed: number; skipped: number; residue: number; }
@@ -17,7 +19,12 @@ const matrix: MatrixState = { required: RECOVERY_LIVE_REQUIRED, executed: 0, pas
 
 function emitStdout(rec: unknown) { process.stdout.write(JSON.stringify(rec) + "\n"); }
 function isIntegerGt1(v: unknown) { return typeof v === "number" && Number.isInteger(v) && v > 1; }
-function parseBarrierLine(line: string): any | null {
+type BarrierRecord = { kind: "barrier"; point: string; test_owned_pgid?: number; supervisor_pid?: number; outcome_kind?: string };
+type OwnershipFailureRecord = { kind: "ownership_failure_observed"; point: string; observedPgid: number; observedPid: number; outerKind: string; supervisorPid: number };
+type RestartRecord = { kind: "restart_result"; state: string; processId?: string; decision?: string; signals?: number; kernelProbes?: number; error?: string | null; restart_pid: number };
+
+
+function parseBarrierLine(line: string): BarrierRecord | null {
   let raw: unknown;
   try { raw = JSON.parse(line); } catch { return null; }
   if (typeof raw !== "object" || raw === null) return null;
@@ -27,8 +34,8 @@ function parseBarrierLine(line: string): any | null {
   // CORRECTION05 §23: malformed control evidence fails the test.
   // If a JSON object has kind=barrier but required field types are
   // wrong, the helper is broken — must not be silently ignored.
-  const out: any = { kind: "barrier" };
-  if (typeof r.point === "string") out.point = r.point; else throw new Error("malformed barrier: point must be string");
+  if (typeof r.point !== "string") throw new Error("malformed barrier: point must be string");
+  const out: BarrierRecord = { kind: "barrier", point: r.point };
   if ("supervisor_pid" in r && r.supervisor_pid !== undefined && typeof r.supervisor_pid !== "number") throw new Error("malformed barrier: supervisor_pid must be number when present");
   if (typeof r.supervisor_pid === "number") out.supervisor_pid = r.supervisor_pid;
   if (typeof r.test_owned_pgid === "number") out.test_owned_pgid = r.test_owned_pgid;
@@ -36,42 +43,38 @@ function parseBarrierLine(line: string): any | null {
   return out;
 }
 
-function parseOwnershipFailureLine(line: string): any | null {
+function parseOwnershipFailureLine(line: string): OwnershipFailureRecord | null {
   let raw: unknown;
   try { raw = JSON.parse(line); } catch { return null; }
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
   if (r.kind !== "ownership_failure_observed") return null;
-  const out: any = { kind: "ownership_failure_observed" };
-  if (typeof r.point === "string") out.point = r.point;
-  if (typeof r.observedPgid === "number") out.observedPgid = r.observedPgid;
-  if (typeof r.observedPid === "number") out.observedPid = r.observedPid;
-  if (typeof r.outerKind === "string") out.outerKind = r.outerKind;
-  if (typeof r.supervisorPid === "number") out.supervisorPid = r.supervisorPid;
+  if (typeof r.point !== "string" || typeof r.observedPgid !== "number" || typeof r.observedPid !== "number" || typeof r.outerKind !== "string" || typeof r.supervisorPid !== "number") throw new Error("malformed ownership_failure_observed");
+  const out: OwnershipFailureRecord = { kind: "ownership_failure_observed", point: r.point, observedPgid: r.observedPgid, observedPid: r.observedPid, outerKind: r.outerKind, supervisorPid: r.supervisorPid };
   return out;
 }
 
-function parseRestartLine(line: string): any | null {
+function parseRestartLine(line: string): RestartRecord | null {
   let raw: unknown;
   try { raw = JSON.parse(line); } catch { return null; }
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
   if (r.kind !== "restart_result") return null;
-  const out: any = { kind: "restart_result" };
-  if (typeof r.state === "string") out.state = r.state;
+  if (typeof r.state !== "string" || typeof r.restart_pid !== "number") throw new Error("malformed restart_result");
+  const out: RestartRecord = { kind: "restart_result", state: r.state, restart_pid: r.restart_pid };
   if (typeof r.processId === "string") out.processId = r.processId;
   if (typeof r.decision === "string") out.decision = r.decision;
   if (typeof r.signals === "number") out.signals = r.signals;
   if (typeof r.kernelProbes === "number") out.kernelProbes = r.kernelProbes;
   if (r.error === null || typeof r.error === "string") out.error = r.error;
-  if (typeof r.restart_pid === "number") out.restart_pid = r.restart_pid;
   return out;
 }
 
 async function tmpDir(): Promise<string> { return await fs.mkdtemp(join(process.cwd(), ".tmp-home", "cpcrash-")); }
 
-async function runCrashSupervisor(opts: { runDir: string; attemptId: string; processId: string; crashPoint: "CP03" | "CP04" | "CP06" | "CP07" | "CP10" }) {
-  return await new Promise<any>((resolve, reject) => {
+interface CrashOutcome { exitCode: number | null; signal: NodeJS.Signals | null; barrier: BarrierRecord | null; ownership: OwnershipFailureRecord | null; stderr: string; stdout: string; }
+async function runCrashSupervisor(opts: { runDir: string; attemptId: string; processId: string; crashPoint: "CP03" | "CP04" | "CP06" | "CP07" | "CP10" }): Promise<CrashOutcome> {
+  return await new Promise<CrashOutcome>((resolve, reject) => {
     const child = spawn(process.execPath, [
       "--import", "tsx",
       join(process.cwd(), "test", "recovery", "_crash_supervisor.ts"),
@@ -85,7 +88,7 @@ async function runCrashSupervisor(opts: { runDir: string; attemptId: string; pro
     child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
     child.on("error", reject);
     child.on("exit", (code, signal) => {
-      let barrier: any = null, ownership: any = null;
+      let barrier: BarrierRecord | null = null, ownership: OwnershipFailureRecord | null = null;
       for (const line of stdout.split("\n")) {
         if (line.length === 0) continue;
         const b = parseBarrierLine(line);
@@ -98,8 +101,9 @@ async function runCrashSupervisor(opts: { runDir: string; attemptId: string; pro
   });
 }
 
-async function runRestartHelper(runDir: string) {
-  return await new Promise<any>((resolve, reject) => {
+interface RestartOutcome { exitCode: number | null; signal: NodeJS.Signals | null; report: RestartRecord | null; stderr: string; stdout: string; }
+async function runRestartHelper(runDir: string): Promise<RestartOutcome> {
+  return await new Promise<RestartOutcome>((resolve, reject) => {
     const child = spawn(process.execPath, [
       "--import", "tsx",
       join(process.cwd(), "test", "recovery", "_recovery_restart.ts"),
@@ -110,7 +114,7 @@ async function runRestartHelper(runDir: string) {
     child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
     child.on("error", reject);
     child.on("exit", (code, signal) => {
-      let report: any = null;
+      let report: RestartRecord | null = null;
       for (const line of stdout.split("\n")) {
         if (line.length === 0) continue;
         const r = parseRestartLine(line);
@@ -121,21 +125,27 @@ async function runRestartHelper(runDir: string) {
   });
 }
 
-async function readLedgerProcessEnvelopes(runDir: string): Promise<{ has: (kind: string, attemptId: string, processId: string) => Promise<boolean> }> {
+type LedgerDecision = { spawn_requested: boolean; spawned: boolean; result: boolean };
+type LedgerInspectResult = { ok: true; decision: LedgerDecision } | { ok: false; error: string };
+async function inspectLedger(runDir: string, attemptId: string, processId: string): Promise<LedgerInspectResult> {
+  // CORRECTION06 §14/§15: ledger I/O failures must fail closed.
+  // An unreadable ledger is NOT a valid CP03/CP04 state.
   const ledger = new JsonlLedger(runDir);
   const openR = await ledger.open({ createIfMissing: false });
-  if (!openR.ok) return { has: async () => false };
+  if (!openR.ok) return { ok: false, error: "ledger_open_failed:" + JSON.stringify(openR.error) };
   const r = await ledger.readAll();
-  if (!r.ok) return { has: async () => false };
+  if (!r.ok) return { ok: false, error: "ledger_read_failed:" + JSON.stringify(r.error) };
   const envs = r.value;
-  return { has: async (kind, attemptId, processId) => {
-    for (const env of envs) {
-      if (env.schema_version === 2 && env.kind === "process_evidence" && env.process_evidence.kind === kind && env.process_evidence.attempt_id === attemptId && env.process_evidence.process_id === processId) {
-        return true;
-      }
+  let spawn_requested = false, spawned = false, result = false;
+  for (const env of envs) {
+    if (env.schema_version === 2 && env.kind === "process_evidence" && env.process_evidence.attempt_id === attemptId && env.process_evidence.process_id === processId) {
+      const k = env.process_evidence.kind;
+      if (k === "process_spawn_requested") spawn_requested = true;
+      if (k === "process_spawned") spawned = true;
+      if (k === "process_result_committed") result = true;
     }
-    return false;
-  } };
+  }
+  return { ok: true, decision: { spawn_requested, spawned, result } };
 }
 
 interface PgidRegistry { register: (pgid: number) => void; cleanup: () => Promise<{ residue: number; details: ReadonlyArray<{ pgid: number; state: string; code: string | null }> }>; }
@@ -182,13 +192,10 @@ function note(r: { executed: boolean; passed: boolean; skipped: boolean; reason?
   process.stdout.write(JSON.stringify({ noteCallCount: noteCallCount, executed: matrix.executed, passed: matrix.passed, failed: matrix.failed, skipped: matrix.skipped, residue: matrix.residue, lastPassed: r.passed, lastSkipped: r.skipped, lastReason: r.reason || null }) + "\n");
 }
 
-async function recordLedgerDecision(runDir: string, attemptId: string, processId: string) {
-  const lh = await readLedgerProcessEnvelopes(runDir);
-  return {
-    spawn_requested: await lh.has("process_spawn_requested", attemptId, processId),
-    spawned: await lh.has("process_spawned", attemptId, processId),
-    result: await lh.has("process_result_committed", attemptId, processId),
-  };
+async function recordLedgerDecision(runDir: string, attemptId: string, processId: string): Promise<LedgerDecision | { error: string }> {
+  const r = await inspectLedger(runDir, attemptId, processId);
+  if (!r.ok) return { error: r.error };
+  return r.decision;
 }
 
 function probePid(pid: number): { state: "absent" | "alive" | "denied" | "error"; code: string | null } {
@@ -215,22 +222,28 @@ test("REC-LIVE01 supervisor abrupt death + detached child survives", async () =>
     const pidProbe = probePid(oldPid);
     if (pidProbe.state !== "absent") { note({ executed: true, passed: false, skipped: false, reason: "old supervisor still present: " + JSON.stringify(pidProbe) }); return; }
     const pgidProbe = probePgid(pgid);
-    if (pgidProbe.state !== "alive" && pgidProbe.state !== "denied") { note({ executed: true, passed: false, skipped: false, reason: "detached group NOT alive: " + JSON.stringify(pgidProbe) }); return; }
+    // CORRECTION06 §7: alive = survived; denied = BLOCKED_BY_ENVIRONMENT (NOT survival proof).
+    if (pgidProbe.state === "denied") {
+      matrix.skipped++;
+      process.stdout.write("[note-skipped-blocked-by-env] REC-LIVE01 sandbox cannot probe -pgid\n");
+      return;
+    }
+    if (pgidProbe.state !== "alive") { note({ executed: true, passed: false, skipped: false, reason: "detached group NOT alive: " + JSON.stringify(pgidProbe) }); return; }
     note({ executed: true, passed: true, skipped: false });
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test("REC-LIVE02 durable process_spawned -> in_flight_at_crash on restart", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl02", processId: "p-rl02", crashPoint: "CP04" }); if (r.barrier !== null && r.barrier.test_owned_pgid !== undefined) registry.register(r.barrier.test_owned_pgid); if (r.exitCode !== 137) { note({ executed: true, passed: false, skipped: false, reason: "expected CP04 abrupt crash exit 137" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl02", "p-rl02"); if (!ledger.spawn_requested) { note({ executed: true, passed: false, skipped: false, reason: "missing spawn_requested" }); return; } if (!ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "missing process_spawned" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper exited non-zero: " + rr.stderr }); return; } if (rr.report === null) { note({ executed: true, passed: false, skipped: false, reason: "no restart_result" }); return; } if (rr.report.state !== "in_flight_at_crash") { note({ executed: true, passed: false, skipped: false, reason: "expected in_flight_at_crash, got " + rr.report.state }); return; } if ((rr.report.signals ?? -1) !== 0) { note({ executed: true, passed: false, skipped: false, reason: "expected signals=0" }); return; } const kp = rr.report.kernelProbes ?? -1; if (kp < 1) { note({ executed: true, passed: false, skipped: false, reason: "expected kernelProbes>=1" }); return; } if (rr.report.decision !== "historical_group_observed_alive" && rr.report.decision !== "historical_group_probe_denied") { note({ executed: true, passed: false, skipped: false, reason: "expected alive or denied, got " + rr.report.decision }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
+test("REC-LIVE02 durable process_spawned -> in_flight_at_crash on restart", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl02", processId: "p-rl02", crashPoint: "CP04" }); if (r.barrier !== null && r.barrier.test_owned_pgid !== undefined) registry.register(r.barrier.test_owned_pgid); if (r.exitCode !== 137) { note({ executed: true, passed: false, skipped: false, reason: "expected CP04 abrupt crash exit 137" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl02", "p-rl02"); if ("error" in ledger) { note({ executed: true, passed: false, skipped: false, reason: ledger.error }); return; } if (!ledger.spawn_requested) { note({ executed: true, passed: false, skipped: false, reason: "missing spawn_requested" }); return; } if (!ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "missing process_spawned" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper exited non-zero: " + rr.stderr }); return; } if (rr.report === null) { note({ executed: true, passed: false, skipped: false, reason: "no restart_result" }); return; } if (rr.report.state !== "in_flight_at_crash") { note({ executed: true, passed: false, skipped: false, reason: "expected in_flight_at_crash, got " + rr.report.state }); return; } if ((rr.report.signals ?? -1) !== 0) { note({ executed: true, passed: false, skipped: false, reason: "expected signals=0" }); return; } const kp = rr.report.kernelProbes ?? -1; if (kp < 1) { note({ executed: true, passed: false, skipped: false, reason: "expected kernelProbes>=1" }); return; } if (rr.report.decision === "historical_group_probe_denied") { matrix.skipped++; process.stdout.write("[note-skipped-blocked-by-env] REC-LIVE02 historical probe denied\n"); return; } if (rr.report.decision !== "historical_group_observed_alive") { note({ executed: true, passed: false, skipped: false, reason: "expected historical_group_observed_alive, got " + rr.report.decision }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 
 test("REC-LIVE03 restart is a different OS process", async () => { const dir = await tmpDir(); try { const sup = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl03", processId: "p-rl03", crashPoint: "CP04" }); if (sup.barrier !== null && sup.barrier.test_owned_pgid !== undefined) registry.register(sup.barrier.test_owned_pgid); if (sup.exitCode !== 137) { note({ executed: true, passed: false, skipped: false, reason: "expected CP04 abrupt crash exit 137" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null) { note({ executed: true, passed: false, skipped: false, reason: "no restart_result" }); return; } if (!isIntegerGt1(rr.report.restart_pid)) { note({ executed: true, passed: false, skipped: false, reason: "restart_pid missing or invalid" }); return; } const supPid = sup.barrier ? sup.barrier.supervisor_pid : undefined; const restartPid = rr.report.restart_pid; const outerPid = process.pid; if (typeof supPid === "number" && supPid === restartPid) { note({ executed: true, passed: false, skipped: false, reason: "supervisor and restart share PID" }); return; } if (restartPid === outerPid) { note({ executed: true, passed: false, skipped: false, reason: "restart_pid equals outer orchestrator PID" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 
-test("REC-LIVE04 CP03 irreducible spawn gap -> spawn_outcome_unknown", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl04", processId: "p-rl04", crashPoint: "CP03" }); if (r.barrier !== null && r.barrier.test_owned_pgid !== undefined) registry.register(r.barrier.test_owned_pgid); if (r.exitCode !== 137) { note({ executed: true, passed: false, skipped: false, reason: "expected CP03 abrupt crash exit 137" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl04", "p-rl04"); if (!ledger.spawn_requested) { note({ executed: true, passed: false, skipped: false, reason: "missing spawn_requested" }); return; } if (ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "process_spawned should NOT be present" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "spawn_outcome_unknown") { note({ executed: true, passed: false, skipped: false, reason: "expected spawn_outcome_unknown" }); return; } if ((rr.report.signals ?? -1) !== 0) { note({ executed: true, passed: false, skipped: false, reason: "signals must be 0" }); return; } if ((rr.report.kernelProbes ?? -1) !== 0) { note({ executed: true, passed: false, skipped: false, reason: "kernelProbes must be 0" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
+test("REC-LIVE04 CP03 irreducible spawn gap -> spawn_outcome_unknown", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl04", processId: "p-rl04", crashPoint: "CP03" }); if (r.barrier !== null && r.barrier.test_owned_pgid !== undefined) registry.register(r.barrier.test_owned_pgid); if (r.exitCode !== 137) { note({ executed: true, passed: false, skipped: false, reason: "expected CP03 abrupt crash exit 137" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl04", "p-rl04"); if ("error" in ledger) { note({ executed: true, passed: false, skipped: false, reason: ledger.error }); return; } if (!ledger.spawn_requested) { note({ executed: true, passed: false, skipped: false, reason: "missing spawn_requested" }); return; } if (ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "process_spawned should NOT be present" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "spawn_outcome_unknown") { note({ executed: true, passed: false, skipped: false, reason: "expected spawn_outcome_unknown" }); return; } if ((rr.report.signals ?? -1) !== 0) { note({ executed: true, passed: false, skipped: false, reason: "signals must be 0" }); return; } if ((rr.report.kernelProbes ?? -1) !== 0) { note({ executed: true, passed: false, skipped: false, reason: "kernelProbes must be 0" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 
-test("REC-LIVE05 settled exact replay from REAL completion", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl05", processId: "p-rl05", crashPoint: "CP10" }); if (r.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "CP10 clean exit expected" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl05", "p-rl05"); if (!ledger.result) { note({ executed: true, passed: false, skipped: false, reason: "missing process_result_committed" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null) { note({ executed: true, passed: false, skipped: false, reason: "no restart_result" }); return; } if (rr.report.state !== "settled") { note({ executed: true, passed: false, skipped: false, reason: "expected settled, got " + rr.report.state }); return; } if (rr.report.decision !== "settled_exact_result") { note({ executed: true, passed: false, skipped: false, reason: "expected settled_exact_result" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
+test("REC-LIVE05 settled exact replay from REAL completion", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl05", processId: "p-rl05", crashPoint: "CP10" }); if (r.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "CP10 clean exit expected" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl05", "p-rl05"); if ("error" in ledger) { note({ executed: true, passed: false, skipped: false, reason: ledger.error }); return; } if (!ledger.result) { note({ executed: true, passed: false, skipped: false, reason: "missing process_result_committed" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null) { note({ executed: true, passed: false, skipped: false, reason: "no restart_result" }); return; } if (rr.report.state !== "settled") { note({ executed: true, passed: false, skipped: false, reason: "expected settled, got " + rr.report.state }); return; } if (rr.report.decision !== "settled_exact_result") { note({ executed: true, passed: false, skipped: false, reason: "expected settled_exact_result" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 
-test("REC-LIVE06 ownership commit ok:false -> current-owner cleanup", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl06", processId: "p-rl06", crashPoint: "CP06" }); if (r.ownership !== null && r.ownership.observedPgid !== undefined && r.ownership.observedPgid > 1) registry.register(r.ownership.observedPgid); if (r.ownership === null) { note({ executed: true, passed: false, skipped: false, reason: "missing ownership_failure_observed control record" }); return; } if (typeof r.ownership.observedPgid !== "number" || r.ownership.observedPgid <= 1) { note({ executed: true, passed: false, skipped: false, reason: "ownership_failure_observed has no real PGID" }); return; } if (r.ownership.outerKind !== "ownership_not_durable") { note({ executed: true, passed: false, skipped: false, reason: "expected outerKind=ownership_not_durable" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl06", "p-rl06"); if (!ledger.spawn_requested) { note({ executed: true, passed: false, skipped: false, reason: "missing spawn_requested" }); return; } if (ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "process_spawned should NOT be durable" }); return; } const pgidProbe = probePgid(r.ownership.observedPgid); if (pgidProbe.state === "error") { note({ executed: true, passed: false, skipped: false, reason: "PGID probe indeterminate: " + JSON.stringify(pgidProbe) }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "spawn_outcome_unknown") { note({ executed: true, passed: false, skipped: false, reason: "expected spawn_outcome_unknown" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
+test("REC-LIVE06 ownership commit ok:false -> current-owner cleanup", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl06", processId: "p-rl06", crashPoint: "CP06" }); if (r.ownership !== null && r.ownership.observedPgid !== undefined && r.ownership.observedPgid > 1) registry.register(r.ownership.observedPgid); if (r.ownership === null) { note({ executed: true, passed: false, skipped: false, reason: "missing ownership_failure_observed control record" }); return; } if (typeof r.ownership.observedPgid !== "number" || r.ownership.observedPgid <= 1) { note({ executed: true, passed: false, skipped: false, reason: "ownership_failure_observed has no real PGID" }); return; } if (r.ownership.outerKind !== "ownership_not_durable") { note({ executed: true, passed: false, skipped: false, reason: "expected outerKind=ownership_not_durable" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl06", "p-rl06"); if ("error" in ledger) { note({ executed: true, passed: false, skipped: false, reason: ledger.error }); return; } if (!ledger.spawn_requested) { note({ executed: true, passed: false, skipped: false, reason: "missing spawn_requested" }); return; } if (ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "process_spawned should NOT be durable" }); return; } const pgidProbe = probePgid(r.ownership.observedPgid); if (pgidProbe.state === "denied") { matrix.skipped++; process.stdout.write("[note-skipped-blocked-by-env] REC-LIVE06 sandbox cannot probe -pgid\n"); return; } if (pgidProbe.state !== "absent") { note({ executed: true, passed: false, skipped: false, reason: "supervisor cleanup did NOT produce ESRCH: " + JSON.stringify(pgidProbe) }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "spawn_outcome_unknown") { note({ executed: true, passed: false, skipped: false, reason: "expected spawn_outcome_unknown" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 
-test("REC-LIVE07 ownership critical Promise rejection -> current-owner cleanup", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl07", processId: "p-rl07", crashPoint: "CP07" }); if (r.ownership !== null && r.ownership.observedPgid !== undefined && r.ownership.observedPgid > 1) registry.register(r.ownership.observedPgid); if (r.ownership === null) { note({ executed: true, passed: false, skipped: false, reason: "missing ownership_failure_observed" }); return; } if (typeof r.ownership.observedPgid !== "number" || r.ownership.observedPgid <= 1) { note({ executed: true, passed: false, skipped: false, reason: "no real PGID" }); return; } if (r.ownership.outerKind !== "ownership_not_durable") { note({ executed: true, passed: false, skipped: false, reason: "expected outerKind=ownership_not_durable" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl07", "p-rl07"); if (ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "process_spawned should NOT be durable" }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "spawn_outcome_unknown") { note({ executed: true, passed: false, skipped: false, reason: "expected spawn_outcome_unknown" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
+test("REC-LIVE07 ownership critical Promise rejection -> current-owner cleanup", async () => { const dir = await tmpDir(); try { const r = await runCrashSupervisor({ runDir: dir, attemptId: "a-rl07", processId: "p-rl07", crashPoint: "CP07" }); if (r.ownership !== null && r.ownership.observedPgid !== undefined && r.ownership.observedPgid > 1) registry.register(r.ownership.observedPgid); if (r.ownership === null) { note({ executed: true, passed: false, skipped: false, reason: "missing ownership_failure_observed" }); return; } if (typeof r.ownership.observedPgid !== "number" || r.ownership.observedPgid <= 1) { note({ executed: true, passed: false, skipped: false, reason: "no real PGID" }); return; } if (r.ownership.outerKind !== "ownership_not_durable") { note({ executed: true, passed: false, skipped: false, reason: "expected outerKind=ownership_not_durable" }); return; } const ledger = await recordLedgerDecision(dir, "a-rl07", "p-rl07"); if ("error" in ledger) { note({ executed: true, passed: false, skipped: false, reason: ledger.error }); return; } if (ledger.spawned) { note({ executed: true, passed: false, skipped: false, reason: "process_spawned should NOT be durable" }); return; } const pgidProbe7 = probePgid(r.ownership.observedPgid); if (pgidProbe7.state === "denied") { matrix.skipped++; process.stdout.write("[note-skipped-blocked-by-env] REC-LIVE07 sandbox cannot probe -pgid\n"); return; } if (pgidProbe7.state !== "absent") { note({ executed: true, passed: false, skipped: false, reason: "supervisor cleanup did NOT produce ESRCH: " + JSON.stringify(pgidProbe7) }); return; } const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "spawn_outcome_unknown") { note({ executed: true, passed: false, skipped: false, reason: "expected spawn_outcome_unknown" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 
 test("REC-LIVE08 restart receives runDir only / no ambient memory", async () => { const dir = await tmpDir(); try { await runCrashSupervisor({ runDir: dir, attemptId: "a-rl08", processId: "p-rl08", crashPoint: "CP10" }); const rr = await runRestartHelper(dir); if (rr.exitCode !== 0) { note({ executed: true, passed: false, skipped: false, reason: "restart helper failed: " + rr.stderr }); return; } if (rr.report === null || rr.report.state !== "settled") { note({ executed: true, passed: false, skipped: false, reason: "restart must succeed with --run-dir only" }); return; } note({ executed: true, passed: true, skipped: false }); } finally { await fs.rm(dir, { recursive: true, force: true }); } });
 

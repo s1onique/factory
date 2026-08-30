@@ -30,7 +30,6 @@
  */
 
 import type {
-  EscalationEvidence,
   ProcessCompletion,
   ProcessFailure,
   ProcessId,
@@ -41,6 +40,8 @@ import type {
 } from "./process-types.js";
 import type { Clock, SpawnedChild } from "./process-ports.js";
 import type { CreateSupervisorArgs } from "./supervisor-builder.js";
+import { classifyCleanupFailure } from "./lifecycle-classify.js";
+import { buildNormalOutcome, freshEscalation, type SinkLike } from "./lifecycle-outcome.js";
 
 export type LifecycleInput = {
   args: CreateSupervisorArgs;
@@ -61,17 +62,6 @@ export type LifecycleInput = {
   closeWaitTimeoutMs: number;
 };
 
-function freshEscalation(): EscalationEvidence {
-  return {
-    termRequested: false,
-    termSent: false,
-    termResult: null,
-    killRequested: false,
-    killSent: false,
-    killResult: null,
-    finalGroupProbe: { kind: "absent" },
-  };
-}
 export async function runLifecycle(input: LifecycleInput): Promise<ProcessResult> {
   const { args, id, child, spawnResolution, processCompletion, stdoutSink, stderrSink, engine, safeEmit, startedAtMs, setSealed, resolveTermination, terminationChannel, deadlineController, closeWaitController, closeWaitTimeoutMs } = input;
   const clock: Clock = args.clock;
@@ -216,30 +206,6 @@ export async function runLifecycle(input: LifecycleInput): Promise<ProcessResult
   });
 }
 
-type SinkLike = { readonly captured: () => ProcessResult["stdout"]; readonly stdioFailure: () => ProcessFailure | null };
-
-function buildNormalOutcome(p: {
-  id: ProcessId; spec: ProcessSpec; stdoutSink: SinkLike; stderrSink: SinkLike; startedAtMs: number; clock: Clock;
-  close: { kind: "close"; code: number | null; signal: NodeJS.Signals | null };
-}): ProcessResult {
-  const soF = p.stdoutSink.stdioFailure();
-  const seF = p.stderrSink.stdioFailure();
-  let outcome: ProcessResult["outcome"];
-  if (p.close.signal !== null) {
-    outcome = { kind: "signaled", signal: p.close.signal, exitCode: p.close.code, stdoutFailure: soF, stderrFailure: seF };
-  } else if (p.close.code !== null) {
-    outcome = { kind: "exited", exitCode: p.close.code, stdoutFailure: soF, stderrFailure: seF };
-  } else {
-    outcome = { kind: "signaled", signal: null, exitCode: null, stdoutFailure: soF, stderrFailure: seF };
-  }
-  return {
-    processId: p.id, spec: p.spec, outcome,
-    stdout: p.stdoutSink.captured(),
-    stderr: p.stderrSink.captured(),
-    startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(),
-    escalation: freshEscalation(),
-  };
-}
 
 async function cleanupPath(p: {
   id: ProcessId; spec: ProcessSpec; engine: ReturnType<typeof import("./termination.js").createTerminationEngine>; safeEmit: (e: RuntimeEvent) => void; setSealed: () => void; child: SpawnedChild; spawnResolution: Promise<SpawnResolution>; processCompletion: Promise<ProcessCompletion>; stdoutSink: SinkLike; stderrSink: SinkLike; startedAtMs: number; clock: Clock; closeWaitController: AbortController; closeWaitTimeoutMs: number; pgid: number;
@@ -371,42 +337,4 @@ async function waitForCompletionOrBound(
     return { kind: "close_timeout" };
   }
   return r;
-}
-
-function classifyCleanupFailure(evidence: EscalationEvidence, phase: "term" | "kill"): ProcessFailure {
-  // CORRECTION10: EPERM / permission_denied taxonomy.
-  //   - signalGroup(TERM|KILL) returned EPERM (the actual
-  //     signal operation was denied)
-  //        -> capability_unavailable, fail closed.
-  //   - final probe is permission_denied AND the relevant
-  //     signal operation was sent
-  //        -> indeterminate non-absence observation; the
-  //           bounded convergence loop never saw ESRCH.
-  //           This is NOT capability_unavailable (we DID
-  //           exercise authority over the group); it is a
-  //           cleanup timeout.
-  //   - final probe is permission_denied AND no signal was
-  //     even attempted (preflight / probe-only path)
-  //        -> capability_unavailable.
-  if (evidence.finalGroupProbe.kind === "permission_denied") {
-    const signalOpDenied =
-      (evidence.termResult !== null && evidence.termResult.kind === "permission_denied") ||
-      (evidence.killResult !== null && evidence.killResult.kind === "permission_denied");
-    if (signalOpDenied) {
-      return { kind: "capability_unavailable", message: "process-group signalling permission denied" };
-    }
-    // Post-successful-signal EPERM that never converged.
-    return {
-      kind: "cleanup_timeout",
-      phase,
-      message: "group probe returned EPERM after successful signal; ESRCH never observed within bounded grace",
-    };
-  }
-  if (evidence.finalGroupProbe.kind === "probe_error") {
-    return { kind: "cleanup_timeout", phase: "kill", message: `group probe error: ${evidence.finalGroupProbe.kind}` };
-  }
-  if (evidence.finalGroupProbe.kind === "alive") {
-    return { kind: "cleanup_timeout", phase: "kill", message: "group still alive after escalation" };
-  }
-  return { kind: "internal_process_failure", message: `unknown probe result: ${evidence.finalGroupProbe.kind}` };
 }

@@ -80,24 +80,15 @@ function makeIdentity(a: Args): ProcessEvidenceIdentity {
 }
 
 async function cp03(args: Args, ledger: JsonlLedger): Promise<void> {
-  // CORRECTION05 §21/§22: CP03 must exercise the REAL production
-  // supervisor seam. The supervisor + evidence bridge drive
-  // process_spawn_requested through the ledger, then attempt the
-  // OS spawn, then try to commit process_spawned. A fault hook
-  // armed on the ledger fails ONLY the process_spawned critical
-  // commit, so the durable history records spawn_requested but
-  // NOT process_spawned — exactly the irreducible gap.
+  // CORRECTION06 §2/§4/§6: CP03 must crash INSIDE the actual
+  // OS-spawn → process_spawned-commit gap. The crash helper
+  // drives the real production supervisor + evidence sink; the
+  // SpawnOwnershipObserver seam fires AFTER OS spawn succeeds
+  // but BEFORE process_spawned critical commit settles. The
+  // observer emits the barrier with the real pid+pgid and exits
+  // the supervisor process with code 137 BEFORE any compensation
+  // (TERM/KILL/cleanup) can run.
   const identity = makeIdentity(args);
-  ledger.armFaultHook({
-    kind: "beforeAppendWrite",
-    payload: { kind: "process_spawned", attempt_id: makeAttemptId(args.attemptId), process_id: makeProcessId(args.processId), pid: 1, pgid: 1 },
-    respond: (candidate, _r) => {
-      if ("kind" in candidate && candidate.kind === "process_spawned") {
-        return { ok: false, error: { kind: "internal_failure", message: "cp03 fault-injected: barrier BEFORE process_spawned commit" } };
-      }
-      return { ok: true, value: undefined };
-    },
-  });
   const exec = args.exec === "true" ? "/bin/sh" : args.exec;
   const execArgs = args.exec === "true" ? ["-c", "sleep 300"] : args.execArgs;
   const spec = {
@@ -120,18 +111,39 @@ async function cp03(args: Args, ledger: JsonlLedger): Promise<void> {
     evidenceSink: new LedgerBackedProcessEvidenceSink(ledger),
     evidenceIdentity: identity,
     idFactory: () => makeProcessId(args.processId),
+    spawnOwnershipObserver: {
+      afterOsSpawnBeforeOwnershipCommit(observation): Promise<void> {
+        // Emit barrier with REAL pid+pgid (never -1).
+        emit({
+          kind: "barrier",
+          point: "CP03",
+          test_owned_pgid: observation.pgid,
+          supervisor_pid: process.pid,
+          spawn_event_pid: observation.pid,
+        });
+        // CORRECTION06 §4: crash BEFORE process_spawned critical
+        // commit / compensation. The supervisor's in-flight
+        // process_spawn_started ledger write drains asynchronously;
+        // we wait a bounded 200ms so the write fsyncs, THEN we
+        // exit. The supervisor code path is still blocked on this
+        // observer (the await in runSpawnOwnershipObserver) so NO
+        // compensation runs before exit.
+        return new Promise<void>((res) => {
+          setTimeout(() => {
+            process.exit(137);
+            res();
+          }, 200);
+        });
+      },
+    },
   });
-  const outer = await supervisor.awaitOuter();
-  // For CP03, the supervisor took the ownership-failure branch.
-  // The detached child may still be alive at OS level.
-  emit({
-    kind: "barrier",
-    point: "CP03",
-    test_owned_pgid: outer.observedPgid ?? -1,
-    supervisor_pid: process.pid,
-  });
-  // Abrupt crash now (after supervisor completed).
-  process.exit(137);
+  // Drive the supervisor lifecycle. The observer fires BEFORE
+  // this returns; the helper exits via process.exit(137).
+  // If the observer somehow never fires (a regression), the
+  // outer await still lets the test detect the failure cleanly.
+  await supervisor.awaitOuter();
+  // Should never reach here — observer exits the process.
+  process.exit(0);
 }
 
 async function waitForSpawnedInLedger(ledger: JsonlLedger, attemptId: string, processId: string, timeoutMs: number): Promise<boolean> {

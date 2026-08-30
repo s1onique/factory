@@ -50,6 +50,8 @@ import type {
   SpawnedChild,
 } from "./process-types.js";
 import type { Clock, SignalPort, SpawnPort } from "./process-ports.js";
+import type { SpawnOwnershipObserver } from "./supervisor-spawn-ownership.js";
+import { wireSpawnOwnershipHandler } from "./supervisor-spawn-handler.js";
 
 export type Supervisor = {
   readonly handle: () => ProcessHandle;
@@ -96,6 +98,13 @@ export type CreateSupervisorArgs = {
   readonly evidenceSink?: ProcessEvidenceSink;
   readonly evidenceObserver?: EvidenceCommitObserver;
   readonly evidenceIdentity?: ProcessEvidenceIdentity;
+  /**
+   * CORRECTION06 §3: generic observer seam. Fires once after the OS
+   * spawn has produced a real pid+pgid and BEFORE process_spawned
+   * critical commit can settle. Used by CP03 to crash inside the
+   * gap; production code may pass any passive observer.
+   */
+  readonly spawnOwnershipObserver?: SpawnOwnershipObserver;
 };
 
 export function defaultIdFactory(): ProcessId {
@@ -222,7 +231,7 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
       // handler can BLOCK the spawn resolution until the durable
       // ownership record has fsync'd (CORRECTION01 §6/§7).
       if (critical !== null && e.kind === "process_spawned") {
-        ownershipCommit = critical;
+        ownershipCommitRef.current = critical as Promise<unknown>;
       }
     }
   };
@@ -261,8 +270,9 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
 
   let resolveSpawnResolution!: (r: SpawnResolution) => void;
   const spawnResolution = new Promise<SpawnResolution>((resolve) => { resolveSpawnResolution = resolve; });
-  let cachedPid: number | null = null;
-  let cachedPgid: number | null = null;
+  const cachedPidRef = { current: null as number | null };
+  const cachedPgidRef = { current: null as number | null };
+  const ownershipCommitRef = { current: null as Promise<unknown> | null };
 
   let resolveCompletion!: (c: ProcessCompletion) => void;
   const processCompletion = new Promise<ProcessCompletion>((resolve) => { resolveCompletion = resolve; });
@@ -339,66 +349,8 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
   // awaits this before letting sustained RUNNING proceed (CORRECTION01
   // §6/§7). When no sink is configured the value stays `null` and
   // FOUNDATION02 behavior is preserved.
-  let ownershipCommit: Promise<unknown> | null = null;
 
-  child.on("spawn", () => {
-    spawnEventSeen = true;
-    const pid = child.pid;
-    const pgid = child.pgid !== null && child.pgid !== undefined ? child.pgid : (pid !== null && pid !== undefined ? pid : null);
-    if (pid === null || pid === undefined) {
-      resolveSpawnResolution({
-        kind: "spawn_failed",
-        failure: { kind: "internal_process_failure", message: "spawn event fired but pid is null" },
-      });
-      return;
-    }
-    cachedPid = pid;
-    cachedPgid = pgid;
-    // FOUNDATION03 §6/§7: the durable ownership boundary MUST be
-    // fsync'd before sustained execution may proceed. We emit the
-    // `process_spawned` RuntimeEvent first so callers' sinks
-    // observe it, then BLOCK the spawn resolution on the critical
-    // commit promise the bridge must have captured. When no sink
-    // is configured, the bridge runs as a no-op and spawn
-    // resolution is immediate — preserving FOUNDATION02 behavior.
-    safeEmit({ kind: "process_spawned", processId: id, pid, processGroupId: pgid ?? pid });
-    const awaitOwnership = async (): Promise<void> => {
-      const p = ownershipCommit;
-      if (p === null) {
-        // No sink configured — preserve FOUNDATION02 byte-identity.
-        resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
-        return;
-      }
-      // CORRECTION02 §1 OG01/OG02/OG03: branch on the DOMAIN result
-      // (`r.ok`), never on Promise rejection. A Promise fulfilled
-      // with `{ok:false}` is still fulfilled; the original code
-      // mistakenly treated fulfillment as success.
-      const outcome = await requireCriticalCommit(
-        p as Promise<import("../process/process-evidence-sink.js").ProcessEvidenceCommitResult>,
-      );
-      if (outcome.kind === "ok") {
-        resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
-        return;
-      }
-      // CORRECTION02 §2: the OS spawn already succeeded. The
-      // current supervisor retains live authority over the PID/PGID
-      // and MUST perform bounded TERM->KILL cleanup.
-      resolveSpawnResolution({
-        kind: "ownership_persistence_failed",
-        pid,
-        pgid: pgid ?? pid,
-        failure: {
-          kind: "evidence_persistence_failure",
-          stage: "ownership",
-          message:
-            outcome.stage === "internal_malfunction"
-              ? `process_spawned commit threw: ${outcome.message}`
-              : `process_spawned commit failed: ${outcome.message}`,
-        },
-      });
-    };
-    void awaitOwnership();
-  });
+  wireSpawnOwnershipHandler({ id, child, safeEmit, cachedPidRef, cachedPgidRef, resolveSpawnResolution, ownershipCommitRef, spawnOwnershipObserver: args.spawnOwnershipObserver, setSpawnEventSeen: (v) => { spawnEventSeen = v; } });
   child.on("error", (e) => {
     if (spawnEventSeen) return;
     const failure = buildSpawnFailure(e);
@@ -435,8 +387,8 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
 
   const handle = (): ProcessHandle => ({
     processId: id,
-    pid: cachedPid,
-    processGroupId: cachedPgid,
+    pid: cachedPidRef.current,
+    processGroupId: cachedPgidRef.current,
   });
 
   // FOUNDATION03: wrap the lifecycle promise to emit the
@@ -567,11 +519,11 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     const execution = await awaitExecution();
     if (verdict.outcome.kind === "cleanup_failed" && verdict.outcome.failure.kind === "evidence_persistence_failure") {
       if (verdict.outcome.failure.stage === "ownership") {
-        return { kind: "ownership_not_durable", process: execution, failure: { kind: "evidence_persistence_failure" as const, stage: "ownership" as const, message: verdict.outcome.failure.message }, observedPgid: cachedPgid, observedPid: cachedPid } as OuterSupervisorResult;
+        return { kind: "ownership_not_durable", process: execution, failure: { kind: "evidence_persistence_failure" as const, stage: "ownership" as const, message: verdict.outcome.failure.message }, observedPgid: cachedPgidRef.current, observedPid: cachedPidRef.current } as OuterSupervisorResult;
       }
-      return { kind: "settlement_not_durable", process: execution, failure: { kind: "evidence_persistence_failure" as const, stage: "settlement" as const, message: verdict.outcome.failure.message }, observedPgid: cachedPgid, observedPid: cachedPid } as OuterSupervisorResult;
+      return { kind: "settlement_not_durable", process: execution, failure: { kind: "evidence_persistence_failure" as const, stage: "settlement" as const, message: verdict.outcome.failure.message }, observedPgid: cachedPgidRef.current, observedPid: cachedPidRef.current } as OuterSupervisorResult;
     }
-    return { kind: "durably_settled", process: execution, observedPgid: cachedPgid, observedPid: cachedPid } as OuterSupervisorResult;
+    return { kind: "durably_settled", process: execution, observedPgid: cachedPgidRef.current, observedPid: cachedPidRef.current } as OuterSupervisorResult;
   };
   return { handle, cancel, await: wrappedAwait, awaitOuter };
 }
