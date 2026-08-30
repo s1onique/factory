@@ -21,6 +21,11 @@ walk(testDir);
 files.sort();
 
 const tsx = path.join(root, "node_modules", ".bin", "tsx");
-const args = ["--test", "--test-reporter=spec", ...files];
+const args = [
+  "--test",
+  "--test-force-exit",
+  "--test-reporter=spec",
+  ...files,
+];
 const child = spawn(tsx, args, { stdio: "inherit" });
 child.on("exit", (code) => process.exit(code ?? 1));

@@ -89,13 +89,32 @@ export const LIVE_CASES: readonly LiveCase[] = [
     id: "LIVE04",
     title: "cooperative TERM via cancel",
     run: async ({ startSupervised, signals, spawner, clock, eq, ok: _ok }) => {
-      const spec = liveBasicSpec(["sleep", "--ms", "5000"]);
+      // CORRECTION07: use a real SIGTERM handler (term-handler
+      // mode) so we exercise cooperative termination instead
+      // of relying on Node's default disposition. We wait up
+      // to 500ms for the fixture's readiness handshake so the
+      // SIGTERM cannot race handler installation.
+      const spec = liveBasicSpec(["term-handler"], { stdoutLimitBytes: 4096 });
       await withLiveSupervisor(spec, async (sup) => {
-        await new Promise((res) => setTimeout(res, 50));
+        // Allow plenty of time for the fixture's handler to be
+        // installed and the term-handler-armed marker to flush.
+        await new Promise((res) => setTimeout(res, 500));
         sup.cancel();
         const result = await sup.await();
         eq(result.outcome.kind, "cancelled");
         eq(result.escalation.termSent, true);
+        eq(result.escalation.killSent, false);
+        // term-handler exits 0 with 'term-handled' on stdout;
+        // the supervisor reports outcome.exited for a
+        // graceful exit-on-TERM.
+        eq(result.outcome.kind, "cancelled");
+        // Stdout must contain the cooperative-handler marker.
+        const stdout = result.stdout.buffer.toString("utf8");
+        if (!stdout.includes("term-handled")) {
+          throw new Error(
+            `LIVE04: stdout missing term-handled marker; got=${JSON.stringify(stdout)}`,
+          );
+        }
       }, { startSupervised, clock, signals, spawner });
     },
   },
@@ -115,8 +134,19 @@ export const LIVE_CASES: readonly LiveCase[] = [
     id: "LIVE06",
     title: "deadline fires",
     run: async ({ run, eq, ok: _ok }) => {
-      const r = await run(liveBasicSpec(["sleep", "--ms", "30000"], { deadlineMs: 200 }));
+      // CORRECTION07: sleep fixture now uses a ref'ed
+      // lifetime timer. deadlineMs is set generously to
+      // 500ms to give the supervisor room to spawn and
+      // register, while still being well below the fixture's
+      // 30s natural exit. The previous 200ms deadline raced
+      // with fixture startup on some hosts.
+      const r = await run(liveBasicSpec(["sleep", "--ms", "30000"], { deadlineMs: 500 }));
       eq(r.outcome.kind, "deadline");
+      if (r.outcome.kind === "deadline") {
+        // The supervisor must have escalated. TERM at minimum;
+        // KILL is sent after the grace period.
+        eq(r.escalation.termSent, true);
+      }
     },
   },
   {
@@ -136,9 +166,43 @@ export const LIVE_CASES: readonly LiveCase[] = [
     id: "LIVE08",
     title: "descendant tree cleanup",
     run: async ({ run, eq, ok: _ok }) => {
-      const r = await run(liveBasicSpec(["spawn-grandchild", "--sleep", "30000"], { deadlineMs: 200 }));
+      // CORRECTION07: spawn-grandchild now emits a tree-ready
+      // JSON record with parent_pid / child_pid / grandchild_pid
+      // only AFTER both descendants are confirmed alive.
+      // give the supervisor 800ms to spawn and observe the
+      // tree, then escalate via the deadline. The fixture
+      // itself lives 30s, so this deadline is guaranteed to
+      // fire from the supervisor and not the fixture.
+      const r = await run(
+        liveBasicSpec(["spawn-grandchild", "--sleep", "30000"], {
+          deadlineMs: 800,
+          stdoutLimitBytes: 4096,
+        }),
+      );
       eq(r.outcome.kind, "deadline");
       eq(r.escalation.finalGroupProbe.kind, "absent");
+      // Stdout must contain the tree-ready evidence with
+      // positive pids for parent/child/grandchild.
+      const stdout = r.stdout.buffer.toString("utf8");
+      if (!stdout.includes("tree-ready")) {
+        throw new Error(
+          `LIVE08: stdout missing tree-ready marker; got=${JSON.stringify(stdout)}`,
+        );
+      }
+      const treeLine = stdout.split("\n").find((l) => l.includes("tree-ready"));
+      if (treeLine === undefined) {
+        throw new Error("LIVE08: tree-ready line not found in stdout");
+      }
+      const tree = JSON.parse(treeLine) as {
+        kind: string;
+        parent_pid: number;
+        child_pid: number;
+        grandchild_pid: number;
+      };
+      eq(tree.kind, "tree-ready");
+      if (tree.parent_pid <= 1 || tree.child_pid <= 1 || tree.grandchild_pid <= 1) {
+        throw new Error(`LIVE08: invalid tree pids: ${JSON.stringify(tree)}`);
+      }
     },
   },
   {

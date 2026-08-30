@@ -14,6 +14,7 @@
     "test:lab": "node --import tsx scripts/run-tests.mjs",
     "test:process": "node --import tsx --test --test-reporter=spec test/process/process-group.test.ts test/process/supervised-process.test.ts",
     "qualify:process-live": "FACTORY_STRICT_PROCESS_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/process/process-live-qualification.test.ts",
+    "test:fixture-contract": "node --import tsx --test --test-force-exit --test-reporter=spec test/process/fixture-contract.test.ts",
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",
     "check:eof": "node --import tsx --test --test-reporter=spec test/ledger-evidence.test.ts",
