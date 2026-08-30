@@ -232,7 +232,11 @@ async function cleanupPath(p: {
   if (finalProbe.kind === "absent") {
     p.safeEmit({ kind: "cleanup_verified", processId: p.id });
   } else {
-    p.safeEmit({ kind: "cleanup_failed", processId: p.id, failure: classifyCleanupFailure(finalProbe) });
+    // CORRECTION10: phase reflects the LAST signal that was
+    // actually attempted. If KILL was attempted, this is a
+    // KILL grace outcome; otherwise it is a TERM-only path.
+    const phase = escalation.killRequested ? "kill" : "term";
+    p.safeEmit({ kind: "cleanup_failed", processId: p.id, failure: classifyCleanupFailure(escalation, phase) });
   }
   // Await the ORIGINAL process-completion promise so we never miss
   // a close that fired during escalation.
@@ -284,9 +288,10 @@ async function cleanupPath(p: {
   }
   // Final probe was NOT absent OR no terminal cause OR close failed
   // (spawn_error after spawn): real cleanup failure.
+  const phase = escalation.killRequested ? "kill" : "term";
   return {
     processId: p.id, spec: p.spec,
-    outcome: { kind: "cleanup_failed", failure: classifyCleanupFailure(finalProbe), escalation, stdoutFailure: soF, stderrFailure: seF },
+    outcome: { kind: "cleanup_failed", failure: classifyCleanupFailure(escalation, phase), escalation, stdoutFailure: soF, stderrFailure: seF },
     stdout: p.stdoutSink.captured(), stderr: p.stderrSink.captured(),
     startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(),
     escalation,
@@ -339,15 +344,40 @@ async function waitForCompletionOrBound(
   return r;
 }
 
-function classifyCleanupFailure(probe: EscalationEvidence["finalGroupProbe"]): ProcessFailure {
-  if (probe.kind === "permission_denied") {
-    return { kind: "capability_unavailable", message: "process-group signalling permission denied" };
+function classifyCleanupFailure(evidence: EscalationEvidence, phase: "term" | "kill"): ProcessFailure {
+  // CORRECTION10: EPERM / permission_denied taxonomy.
+  //   - signalGroup(TERM|KILL) returned EPERM (the actual
+  //     signal operation was denied)
+  //        -> capability_unavailable, fail closed.
+  //   - final probe is permission_denied AND the relevant
+  //     signal operation was sent
+  //        -> indeterminate non-absence observation; the
+  //           bounded convergence loop never saw ESRCH.
+  //           This is NOT capability_unavailable (we DID
+  //           exercise authority over the group); it is a
+  //           cleanup timeout.
+  //   - final probe is permission_denied AND no signal was
+  //     even attempted (preflight / probe-only path)
+  //        -> capability_unavailable.
+  if (evidence.finalGroupProbe.kind === "permission_denied") {
+    const signalOpDenied =
+      (evidence.termResult !== null && evidence.termResult.kind === "permission_denied") ||
+      (evidence.killResult !== null && evidence.killResult.kind === "permission_denied");
+    if (signalOpDenied) {
+      return { kind: "capability_unavailable", message: "process-group signalling permission denied" };
+    }
+    // Post-successful-signal EPERM that never converged.
+    return {
+      kind: "cleanup_timeout",
+      phase,
+      message: "group probe returned EPERM after successful signal; ESRCH never observed within bounded grace",
+    };
   }
-  if (probe.kind === "probe_error") {
-    return { kind: "cleanup_timeout", phase: "kill", message: `group probe error: ${probe.kind}` };
+  if (evidence.finalGroupProbe.kind === "probe_error") {
+    return { kind: "cleanup_timeout", phase: "kill", message: `group probe error: ${evidence.finalGroupProbe.kind}` };
   }
-  if (probe.kind === "alive") {
+  if (evidence.finalGroupProbe.kind === "alive") {
     return { kind: "cleanup_timeout", phase: "kill", message: "group still alive after escalation" };
   }
-  return { kind: "internal_process_failure", message: `unknown probe result: ${probe.kind}` };
+  return { kind: "internal_process_failure", message: `unknown probe result: ${evidence.finalGroupProbe.kind}` };
 }

@@ -753,3 +753,276 @@ test("KR02 child reap does NOT substitute for group absence (descendant survives
   assert.equal(result.escalation.killSent, true);
   assert.equal(result.escalation.finalGroupProbe.kind, "alive");
 });
+
+// ========================================================================
+// CORRECTION10 — Darwin post-signal EPERM convergence
+// ========================================================================
+//
+// Darwin's kill(2) documents that process-group signalling may
+// return EPERM if any member of the group could not be
+// signalled. During the death/reap window after a successful
+// SIGKILL, the SIGKILL'd child can therefore produce EPERM
+// from a null-signal probe rather than ESRCH, even though the
+// group has effectively been cleaned up.
+//
+// CORRECTION10 splits EPERM into two semantic cases:
+//   1. signalGroup() returns EPERM (the actual signal op was
+//      denied) -> capability_unavailable, fail closed.
+//   2. probeGroup() returns EPERM after a successful signal ->
+//      indeterminate non-absence observation; continue bounded
+//      polling; only ESRCH closes ownership.
+//
+// Pre-authority probes (preflight / preflight-style paths)
+// remain fail-closed at EPERM.
+
+test("KR04 transient EPERM after KILL converges to ESRCH", async () => {
+  // Model Darwin post-SIGKILL EPERM window:
+  //   TERM sent, group stays EPERM (ignore-term)
+  //   TERM grace expires (group still EPERM-ambiguous)
+  //   KILL sent (success), probe returns EPERM for several
+  //     iterations (the Darwin zombie window)
+  //   Child close fires at t=90ms (reap boundary)
+  //   Next probe returns absent (group fully cleaned up)
+  //
+  // Expected: outcome=deadline, termSent=true, killSent=true,
+  // finalGroupProbe.kind=absent, NOT capability_unavailable.
+  //
+  // Before CORRECTION10: outcome=cleanup_failed
+  //   (capability_unavailable) because probe-EPERM after
+  //   successful signal was treated as terminal.
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  signals.signalGroup = (pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid });
+    return { kind: "sent", signal };
+  };
+  // Probe returns EPERM until close fires; after close,
+  // returns absent.
+  let clockBeforeClose = true;
+  signals.probeGroup = (pgid) => {
+    if (clockBeforeClose) return { kind: "permission_denied", code: "EPERM" };
+    return signals.aliveGroups.has(pgid) ? { kind: "alive" } : { kind: "absent" };
+  };
+
+  const r = startSupervised({
+    spec: {
+      ...basicSpec(),
+      deadlineMs: 50,
+      termGraceMs: 20,
+      killGraceMs: 200,
+    },
+    clock: realClock(),
+    signals,
+    spawner,
+  });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  const origFireCloseBound = child.fireClose.bind(child);
+  child.fireClose = (code, sig) => {
+    clockBeforeClose = false;
+    signals.aliveGroups.delete(1000);
+    return origFireCloseBound(code, sig);
+  };
+
+  queueMicrotask(() => child.fireSpawn());
+  setTimeout(() => {
+    if (!child.closed) child.fireClose(null, "SIGKILL");
+  }, 90);
+
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "deadline",
+    `expected deadline, got kind=${result.outcome.kind}; ` +
+    `escalation=${JSON.stringify(result.escalation)}`);
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+  assert.equal(result.escalation.finalGroupProbe.kind, "absent",
+    `Darwin convergence: finalGroupProbe=${JSON.stringify(result.escalation.finalGroupProbe)}`);
+});
+
+test("KR05 permanent EPERM after KILL: cleanup_timeout, NOT capability_unavailable", async () => {
+  // Counter-test: if EPERM persists forever (the group is
+  // unsignalable AND never becomes absent), the supervisor
+  // MUST report cleanup_failed, but with phase=kill, kind=
+  // cleanup_timeout. NOT capability_unavailable, because
+  // capability was NOT denied — the signal operations
+  // returned `sent`. The fact that absence could not be
+  // proven within bounded grace is a timeout.
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  signals.signalGroup = (pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid });
+    return { kind: "sent", signal };
+  };
+  signals.probeGroup = (_pgid) => ({ kind: "permission_denied", code: "EPERM" });
+
+  const r = startSupervised({
+    spec: {
+      ...basicSpec(),
+      deadlineMs: 50,
+      termGraceMs: 20,
+      killGraceMs: 100,
+    },
+    clock: realClock(),
+    signals,
+    spawner,
+  });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  // Fire close ~130ms in (which is into KILL grace, which
+  // starts at t=70ms after deadline+termGrace). Probes
+  // remain EPERM forever; KILL grace times out.
+  setTimeout(() => {
+    if (!child.closed) child.fireClose(null, "SIGKILL");
+  }, 130);
+
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed",
+    `expected cleanup_failed, got kind=${result.outcome.kind}; ` +
+    `escalation=${JSON.stringify(result.escalation)}`);
+  if (result.outcome.kind === "cleanup_failed") {
+    // CORRECTION10 distinguishes:
+    //   capability_unavailable  = signalGroup() returned EPERM
+    //   cleanup_timeout(phase)  = signalGroup() returned `sent`
+    //                              but post-signal probe never
+    //                              converged to ESRCH
+    assert.equal(result.outcome.failure.kind, "cleanup_timeout",
+      `EPERM-after-sent-signal must be cleanup_timeout, not capability_unavailable; got ${JSON.stringify(result.outcome.failure)}`);
+    if (result.outcome.failure.kind === "cleanup_timeout") {
+      assert.equal(result.outcome.failure.phase, "kill");
+    }
+  }
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+  assert.equal(result.escalation.finalGroupProbe.kind, "permission_denied");
+});
+
+test("KR06 actual KILL signalGroup() EPERM: capability_unavailable, terminal", async () => {
+  // The actual KILL signalGroup() operation returns EPERM.
+  // This is the pre-authority / signal-operation form of
+  // permission_denied. CORRECTION10 keeps this terminal:
+  // cleanup_failed(capability_unavailable). The post-signal
+  // EPERM tolerance MUST NOT make us look capable when we
+  // never were.
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  signals.signalGroup = (pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid });
+    if (signal === "SIGKILL") {
+      return { kind: "permission_denied", code: "EPERM" };
+    }
+    return { kind: "sent", signal };
+  };
+
+  const r = startSupervised({
+    spec: { ...basicSpec(), deadlineMs: 50, termGraceMs: 30, killGraceMs: 100 },
+    clock: manualClock(),
+    signals,
+    spawner,
+  });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  await new Promise((res) => setImmediate(res));
+  await new Promise((res) => setImmediate(res));
+  if (!child.closed) child.fireClose(null, "SIGKILL");
+
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed",
+    `expected cleanup_failed, got ${result.outcome.kind}; escalation=${JSON.stringify(result.escalation)}`);
+  if (result.outcome.kind === "cleanup_failed") {
+    assert.equal(result.outcome.failure.kind, "capability_unavailable",
+      `KILL signalGroup EPERM must remain capability_unavailable; got ${JSON.stringify(result.outcome.failure)}`);
+  }
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, false);
+  assert.equal(result.escalation.finalGroupProbe.kind, "permission_denied");
+});
+
+test("KR07 pre-authority probe EPERM: capability_unavailable, terminal", async () => {
+  // Models a sandbox / preflight capability probe that
+  // returns EPERM BEFORE any signalGroup() call has been
+  // attempted. Pre-authority: fail closed.
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  signals.signalGroup = (_pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid: 1000 });
+    return { kind: "permission_denied", code: "EPERM" };
+  };
+  signals.probeGroup = (_pgid) => ({ kind: "permission_denied", code: "EPERM" });
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({ spec: { ...basicSpec(), deadlineMs: 50 }, clock: manualClock(), signals, spawner });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed");
+  if (result.outcome.kind === "cleanup_failed") {
+    assert.equal(result.outcome.failure.kind, "capability_unavailable");
+  }
+});
+
+test("KR08 surviving descendant + transient EPERM: cleanup_failed, NOT false-success", async () => {
+  // KILL sent successfully. Child close fires. Group
+  // probe sequence: EPERM, EPERM, alive, alive, alive, ...
+  // (a descendant still exists in the group).
+  // The supervisor MUST report cleanup_failed(phase=kill)
+  // because a real surviving descendant keeps the group
+  // alive. Close does not trump group evidence.
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  signals.signalGroup = (pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid });
+    return { kind: "sent", signal };
+  };
+  let clockBeforeClose = true;
+  signals.probeGroup = (pgid) => {
+    if (clockBeforeClose) return { kind: "permission_denied", code: "EPERM" };
+    return signals.aliveGroups.has(pgid) ? { kind: "alive" } : { kind: "absent" };
+  };
+
+  const r = startSupervised({
+    spec: { ...basicSpec(), deadlineMs: 50, termGraceMs: 20, killGraceMs: 150 },
+    clock: realClock(),
+    signals,
+    spawner,
+  });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  const origFireCloseBound = child.fireClose.bind(child);
+  child.fireClose = (code, sig) => {
+    clockBeforeClose = false;
+    // Note: signals.aliveGroups is NOT cleared, simulating
+    // a real surviving descendant.
+    return origFireCloseBound(code, sig);
+  };
+
+  queueMicrotask(() => child.fireSpawn());
+  setTimeout(() => {
+    if (!child.closed) child.fireClose(null, "SIGKILL");
+  }, 90);
+
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed",
+    `expected cleanup_failed, got kind=${result.outcome.kind}; ` +
+    `escalation=${JSON.stringify(result.escalation)}`);
+  if (result.outcome.kind === "cleanup_failed") {
+    assert.equal(result.outcome.failure.kind, "cleanup_timeout",
+      `surviving descendant must not become false-success; got ${JSON.stringify(result.outcome.failure)}`);
+    if (result.outcome.failure.kind === "cleanup_timeout") {
+      assert.equal(result.outcome.failure.phase, "kill");
+    }
+  }
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+  assert.equal(result.escalation.finalGroupProbe.kind, "alive");
+});

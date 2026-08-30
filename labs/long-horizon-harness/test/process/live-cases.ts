@@ -178,15 +178,30 @@ export const LIVE_CASES: readonly LiveCase[] = [
     id: "LIVE05",
     title: "ignore TERM -> real KILL",
     run: async ({ run, eq, ok: _ok }) => {
-      // CORRECTION09: a real POSIX host may exhibit a
-      // zombie/reap race on the SIGKILL path. After SIGKILL
-      // is sent, the direct child becomes a zombie until
-      // Node reaps it; during that window a signal-zero
-      // group probe can still appear "alive". The
-      // supervisor's KILL grace must NOT report
-      // cleanup_failed on this transient visibility. It
-      // MUST await the direct-child close (which removes
-      // the zombie) and re-probe the group only after that.
+      // CORRECTION09 + CORRECTION10:
+      //
+      //   CORRECTION09: a real POSIX host may exhibit a
+      //   zombie/reap race on the SIGKILL path. After
+      //   SIGKILL is sent, the direct child becomes a
+      //   zombie until Node reaps it; during that window
+      //   a signal-zero group probe can still appear
+      //   "alive". The supervisor's KILL grace MUST NOT
+      //   report cleanup_failed on this transient
+      //   visibility. It MUST await the direct-child
+      //   close (which removes the zombie) and re-probe
+      //   the group only after that.
+      //
+      //   CORRECTION10: on Darwin (and as a general
+      //   matter of safety), a post-SIGKILL probe can
+      //   ALSO return EPERM rather than ESRCH for a
+      //   bounded window. After we have already sent a
+      //   signal to this exact owned group, a later
+      //   EPERM from a null-signal probe is an
+      //   indeterminate non-absence observation and MUST
+      //   stay inside the bounded convergence loop until
+      //   ESRCH closes ownership. EPERM does NOT prove
+      //   absence. Pre-authority / signalGroup-level
+      //   EPERM remains terminal capability_unavailable.
       //
       // If this assertion fails, dump the full evidence
       // shape so we can see exactly where the race lives.
@@ -207,7 +222,9 @@ export const LIVE_CASES: readonly LiveCase[] = [
       eq(r.escalation.killSent, true);
       // Final group probe MUST be absent. The supervisor's
       // combined close + group-absent proof is what makes
-      // this a real cleanup, not a paper one.
+      // this a real cleanup, not a paper one. EPERM at the
+      // final probe would indicate post-SIGKILL probe never
+      // converged to ESRCH — a real failure.
       eq(r.escalation.finalGroupProbe.kind, "absent");
     },
   },
