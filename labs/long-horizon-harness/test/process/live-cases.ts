@@ -178,12 +178,37 @@ export const LIVE_CASES: readonly LiveCase[] = [
     id: "LIVE05",
     title: "ignore TERM -> real KILL",
     run: async ({ run, eq, ok: _ok }) => {
+      // CORRECTION09: a real POSIX host may exhibit a
+      // zombie/reap race on the SIGKILL path. After SIGKILL
+      // is sent, the direct child becomes a zombie until
+      // Node reaps it; during that window a signal-zero
+      // group probe can still appear "alive". The
+      // supervisor's KILL grace must NOT report
+      // cleanup_failed on this transient visibility. It
+      // MUST await the direct-child close (which removes
+      // the zombie) and re-probe the group only after that.
+      //
+      // If this assertion fails, dump the full evidence
+      // shape so we can see exactly where the race lives.
       const r = await run(liveBasicSpec(["ignore-term"], { deadlineMs: 250 }));
-      eq(r.outcome.kind, "deadline");
-      if (r.outcome.kind === "deadline") {
-        eq(r.escalation.termSent, true);
-        eq(r.escalation.killSent, true);
+      if (r.outcome.kind !== "deadline") {
+        // Diagnostic dump on failure only; never on success.
+        throw new Error(
+          `LIVE05 expected outcome=deadline, got=${JSON.stringify({
+            kind: r.outcome.kind,
+            failure: r.outcome.kind === "cleanup_failed"
+              ? r.outcome.failure
+              : undefined,
+            escalation: r.escalation,
+          })}`,
+        );
       }
+      eq(r.escalation.termSent, true);
+      eq(r.escalation.killSent, true);
+      // Final group probe MUST be absent. The supervisor's
+      // combined close + group-absent proof is what makes
+      // this a real cleanup, not a paper one.
+      eq(r.escalation.finalGroupProbe.kind, "absent");
     },
   },
   {

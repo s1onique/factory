@@ -615,3 +615,141 @@ test("CL04 group absent + no close => cleanup_failed(close_timeout)", async () =
     if (result.outcome.failure.kind === "cleanup_timeout") assert.equal(result.outcome.failure.phase, "close");
   }
 });
+
+// ========================================================================
+// CORRECTION09 — KILL-path reap race (zombie visibility)
+// ========================================================================
+//
+// POSIX guarantee: a successfully signalled child remains in
+// the process table as a zombie until its parent reaps it.
+// During that window, kill(-pgid, 0) returns alive even though
+// the child has been killed. The supervisor's KILL grace
+// loop MUST observe Node's reap boundary (the 'close' event)
+// and re-probe the group afterwards, otherwise a successful
+// SIGKILL is mis-classified as cleanup_failed(phase=kill).
+
+test("KR01 KILL path tolerates zombie visibility until direct child reap", async () => {
+  // Model:
+  //   spawn fake child, group=alive
+  //   TERM sent -> group stays alive (ignore-term)
+  //   TERM grace expires (group still alive in probe)
+  //   KILL sent -> "killed" but group stays alive in probe
+  //                (zombie state)
+  //   60ms later: child fires close -> group becomes absent
+  //     (reap effect)
+  //   KILL grace is 200ms, so close fires WITHIN grace.
+  //
+  // Expected: outcome=deadline, finalGroupProbe=absent,
+  //           termSent=true, killSent=true.
+  //
+  // Before CORRECTION09: outcome=cleanup_failed(phase=kill)
+  // because the loop polled alive every 20ms and timed out
+  // before close fired (the loop never re-probed after close).
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  const r = startSupervised({
+    spec: {
+      ...basicSpec(),
+      deadlineMs: 50,
+      termGraceMs: 20,
+      killGraceMs: 200,
+    },
+    clock: realClock(),
+    signals,
+    spawner,
+  });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+
+  // Both TERM and KILL are "sent". The group stays in
+  // aliveGroups UNTIL fireClose fires (simulating the
+  // zombie->reap transition that a real kernel performs
+  // when the parent wait()s on a dead child).
+  signals.signalGroup = (pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid });
+    return { kind: "sent", signal };
+  };
+  const origFireClose = child.fireClose.bind(child);
+  child.fireClose = (code, sig) => {
+    // Simulate Node reaping the child: the zombie is
+    // finally released from the process table.
+    signals.aliveGroups.delete(1000);
+    return origFireClose(code, sig);
+  };
+
+  queueMicrotask(() => child.fireSpawn());
+  // Fire close 40ms after spawn (which is into KILL grace),
+  // so the KILL grace loop must wait for it and re-probe.
+  setTimeout(() => {
+    if (!child.closed) child.fireClose(null, "SIGKILL");
+  }, 90);
+
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "deadline",
+    `expected deadline, got kind=${result.outcome.kind}; ` +
+    `escalation=${JSON.stringify(result.escalation)}`);
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+  assert.equal(result.escalation.finalGroupProbe.kind, "absent",
+    `reap race: finalGroupProbe=${JSON.stringify(result.escalation.finalGroupProbe)}`);
+});
+
+test("KR02 child reap does NOT substitute for group absence (descendant survives)", async () => {
+  // Counter-test: even if the immediate child reaps, the
+  // group probe is the authoritative truth. If a surviving
+  // descendant keeps the group alive, the supervisor MUST
+  // report cleanup_failed(phase=kill).
+  //
+  // This prevents fixing LIVE05 by treating close as a
+  // substitute for group absence.
+  const signals = new FakeSignalPort();
+  signals.aliveGroups.add(1000);
+  const spawner = new FakeSpawnPort();
+  signals.signalGroup = (pgid, signal) => {
+    signals.log.push({ signal: signal as "SIGTERM" | "SIGKILL", pgid });
+    return { kind: "sent", signal };
+  };
+  // The group stays alive in probe forever (descendant
+  // survives). The child's close boundary does NOT remove
+  // the group from aliveGroups.
+  signals.probeGroup = (pgid) =>
+    signals.aliveGroups.has(pgid) ? { kind: "alive" } : { kind: "absent" };
+
+  const r = startSupervised({
+    spec: {
+      ...basicSpec(),
+      deadlineMs: 50,
+      termGraceMs: 30,
+      killGraceMs: 150,
+    },
+    clock: realClock(),
+    signals,
+    spawner,
+  });
+  if (r.ok === false) throw new Error("expected ok");
+  const supervisor = r.value;
+  const child = spawner.children[0]!;
+  queueMicrotask(() => child.fireSpawn());
+  // Fire close ~100ms in (which is into KILL grace, which
+  // starts at t=80ms after deadline+termGrace). Group stays
+  // alive (descendant). KILL grace will time out.
+  setTimeout(() => {
+    if (!child.closed) child.fireClose(null, "SIGKILL");
+  }, 100);
+
+  const result = await supervisor.await();
+  assert.equal(result.outcome.kind, "cleanup_failed",
+    `expected cleanup_failed, got kind=${result.outcome.kind}; ` +
+    `escalation=${JSON.stringify(result.escalation)}`);
+  if (result.outcome.kind === "cleanup_failed") {
+    assert.equal(result.outcome.failure.kind, "cleanup_timeout");
+    if (result.outcome.failure.kind === "cleanup_timeout") {
+      assert.equal(result.outcome.failure.phase, "kill");
+    }
+  }
+  assert.equal(result.escalation.termSent, true);
+  assert.equal(result.escalation.killSent, true);
+  assert.equal(result.escalation.finalGroupProbe.kind, "alive");
+});

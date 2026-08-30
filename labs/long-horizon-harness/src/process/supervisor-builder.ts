@@ -198,6 +198,13 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     signals: args.signals,
     termGraceMs: args.spec.termGraceMs,
     killGraceMs: args.spec.killGraceMs,
+    // CORRECTION09: hand the engine the eagerly-constructed
+    // processCompletion promise so the KILL grace loop can
+    // re-probe the group AFTER Node's reap boundary. Without
+    // this, a successful SIGKILL followed by a sub-grace
+    // zombie window is mis-classified as
+    // cleanup_failed(phase=kill). See termination.ts.
+    directChildCompletion: processCompletion,
     emit: (signal, result) => safeEmit({ kind: "signal_sent", processId: id, signal, result }),
     emitProbe: (probe) => safeEmit({ kind: "cleanup_probe", processId: id, probe }),
   });
