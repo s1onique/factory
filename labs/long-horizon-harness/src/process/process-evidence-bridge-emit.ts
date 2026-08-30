@@ -96,27 +96,36 @@ function persistOne(args: {
       // observer-side unhandled rejection here.
     },
   );
-  // CORRECTION02 OG03: attach a defensive catch on the
-  // returned promise so callers that immediately discard it
-  // (before requireCriticalCommit observes the rejection)
-  // do not produce unhandled-rejection crashes. Critical
-  // callers ALWAYS inspect the outcome via requireCriticalCommit.
-  // CORRECTION02 OG03: attach a defensive catch on the
-  // returned promise so callers that immediately discard it
-  // (before requireCriticalCommit observes the rejection)
-  // do not produce unhandled-rejection crashes. Critical
-  // callers ALWAYS inspect the outcome via requireCriticalCommit.
-  // The returned promise resolves with a synthetic ok:false
-  // marker so it is never rejected. Callers wanting the raw
-  // rejection MUST go through requireCriticalCommit.
-  const safe: Promise<ProcessEvidenceCommitResult> = p.catch(() => {
-    return {
-      ok: false,
-      error: { kind: "ledger_write_failure", message: "internal sink malfunction" },
-    };
-  });
+  // CORRECTION03 §1: preserve the raw critical-promise semantics.
+  // The Promise returned to callers (notably the supervisor's
+  // spawn-resolution gate and the wrappedAwait settlement gate)
+  // MUST remain the raw `p` so that:
+  //
+  //   - fulfilled {ok:true}   propagates as fulfillment
+  //   - fulfilled {ok:false}  propagates as fulfillment
+  //   - Promise rejection      propagates as rejection
+  //
+  // `requireCriticalCommit()` inspects the outcome through a
+  // try/catch and converts each of these three cases into the
+  // typed `CriticalCommitOutcome`. We MUST NOT launder the
+  // rejection into a synthetic `{ok:false}` here; doing so would
+  // collapse internal_malfunction into commit_failed.
+  //
+  // The unhandled-rejection crash is already prevented by the
+  // observer-side `then(_, _)` handler above (which attaches a
+  // no-op rejection observer). The tracker is given a separate
+  // SAFE promise that NEVER rejects, because the tracker's
+  // `waitAll()` is purely a sequencing barrier and does not need
+  // to distinguish rejection from fulfillment.
+  const safe: Promise<ProcessEvidenceCommitResult> = p.catch(() => ({
+    ok: false,
+    error: {
+      kind: "ledger_write_failure",
+      message: "internal sink malfunction (defensive-laundered for tracker only)",
+    },
+  }));
   args.tracker.add(safe);
-  return safe;
+  return p;
 }
 
 /**

@@ -258,6 +258,11 @@ export type PersistedProcessFailure =
       readonly message: string;
     }
   | { readonly kind: "internal_process_failure"; readonly message: string }
+  | {
+      readonly kind: "evidence_persistence_failure";
+      readonly stage: "ownership" | "settlement";
+      readonly message: string;
+    }
   | { readonly kind: "capability_unavailable"; readonly message: string };
 
 /** Persisted shape of {@link SignalAttemptResult}. */

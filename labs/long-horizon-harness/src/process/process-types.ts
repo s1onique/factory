@@ -58,6 +58,11 @@ export type ProcessFailure =
   | { readonly kind: "cleanup_timeout"; readonly phase: "term" | "kill" | "close"; readonly message: string }
   | { readonly kind: "stdio_failure"; readonly stream: "stdout" | "stderr"; readonly code?: string; readonly message: string }
   | { readonly kind: "internal_process_failure"; readonly message: string }
+  | {
+      readonly kind: "evidence_persistence_failure";
+      readonly stage: "ownership" | "settlement";
+      readonly message: string;
+    }
   | { readonly kind: "capability_unavailable"; readonly message: string };
 
 export type SignalAttemptResult =

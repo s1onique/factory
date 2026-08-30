@@ -54,6 +54,8 @@ export function encodeFailure(
       };
     case "internal_process_failure":
       return { kind: f.kind, message: f.message };
+    case "evidence_persistence_failure":
+      return { kind: "evidence_persistence_failure", stage: f.stage, message: f.message };
     case "capability_unavailable":
       return { kind: f.kind, message: f.message };
   }

@@ -162,7 +162,7 @@ test("RPL13 result_committed(spawn_failed) requires spawn_failure_observed", () 
   }
 });
 
-test("RPL14 impossible result history: result_committed(deadline) without deadline evidence", () => {
+test("RPL14 impossible result history: result_committed(deadline) without deadline evidence -> reject", () => {
   const r = projectExecution(
     streamOf([
       { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
@@ -171,17 +171,138 @@ test("RPL14 impossible result history: result_committed(deadline) without deadli
       { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "deadline", escalation: { term_requested: false, term_sent: false, term_result: null, kill_requested: false, kill_sent: false, kill_result: null, final_group_probe: { probe_kind: "absent" } } } },
     ]),
   );
-  assert.equal(r.ok, true);
-  // Without a deadline/cancel/cleanup_failed trigger recorded in
-  // evidence, the projector still accepts deadline because the
-  // state advanced through close. (Compatibility is not
-  // over-restrictive on trigger evidence beyond spawn_failure.)
-  if (r.ok && r.value.kind === "settled") {
-    assert.equal(r.value.result.outcome_kind, "deadline");
-  } else {
-    assert.fail("expected settled with deadline");
-  }
+  // CORRECTION03 §7 (RPL14): a deadline outcome WITHOUT a
+  // preceding process_deadline_reached evidence MUST be
+  // rejected as inconsistent_history. The previous acceptance
+  // was a doctrine violation.
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.error.kind, "inconsistent_history");
 });
+
+test("RPL14b deadline result WITH deadline_reached evidence -> accept", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_deadline_reached", attempt_id: AID, process_id: PID },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "deadline", escalation: { term_requested: true, term_sent: false, term_result: null, kill_requested: true, kill_sent: true, kill_result: { result_kind: "sent", signal: "SIGKILL" }, final_group_probe: { probe_kind: "absent" } } } },
+    ]),
+  );
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.kind, "settled");
+});
+
+test("RPL15 cancelled without cancel evidence -> reject", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: 0, signal: null },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "cancelled", escalation: { term_requested: true, term_sent: true, term_result: { result_kind: "sent", signal: "SIGTERM" }, kill_requested: true, kill_sent: true, kill_result: { result_kind: "sent", signal: "SIGKILL" }, final_group_probe: { probe_kind: "absent" } } } },
+    ]),
+  );
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.error.kind, "inconsistent_history");
+});
+
+test("RPL15b cancelled WITH cancel_requested evidence -> accept", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_cancel_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "cancelled", escalation: { term_requested: true, term_sent: true, term_result: { result_kind: "sent", signal: "SIGTERM" }, kill_requested: true, kill_sent: true, kill_result: { result_kind: "sent", signal: "SIGKILL" }, final_group_probe: { probe_kind: "absent" } } } },
+    ]),
+  );
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.kind, "settled");
+});
+
+test("RPL16 close0 + exited0 -> accept", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: 0, signal: null },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "exited", exit_code: 0 } },
+    ]),
+  );
+  assert.equal(r.ok, true);
+});
+
+test("RPL17 close0 + exited42 -> reject", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: 0, signal: null },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "exited", exit_code: 42 } },
+    ]),
+  );
+  assert.equal(r.ok, false);
+});
+
+test("RPL18 closeSIGTERM + exited0 -> reject", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: null, signal: "SIGTERM" },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "exited", exit_code: 0 } },
+    ]),
+  );
+  assert.equal(r.ok, false);
+});
+
+test("RPL19 closeSIGKILL + signaledSIGKILL -> accept", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: null, signal: "SIGKILL" },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "signaled", signal: "SIGKILL", exit_code: null } },
+    ]),
+  );
+  assert.equal(r.ok, true);
+});
+
+test("RPL20 closeSIGKILL + signaledSIGTERM -> reject", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: null, signal: "SIGKILL" },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "signaled", signal: "SIGTERM", exit_code: null } },
+    ]),
+  );
+  assert.equal(r.ok, false);
+});
+
+test("RPL21 close0 + signaledSIGTERM -> reject", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: 0, signal: null },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "signaled", signal: "SIGTERM", exit_code: null } },
+    ]),
+  );
+  assert.equal(r.ok, false);
+});
+
+test("RPL22 closeSIGTERM + exited -> reject", () => {
+  const r = projectExecution(
+    streamOf([
+      { kind: "process_spawn_requested", attempt_id: AID, process_id: PID },
+      { kind: "process_spawned", attempt_id: AID, process_id: PID, pid: 1, pgid: 1 },
+      { kind: "process_close_observed", attempt_id: AID, process_id: PID, exit_code: null, signal: "SIGTERM" },
+      { kind: "process_result_committed", attempt_id: AID, process_id: PID, result: { outcome_kind: "exited", exit_code: 0 } },
+    ]),
+  );
+  assert.equal(r.ok, false);
+});
+
+
 
 test("ATT01 Attempt A + Process P then Attempt B + Process P -> reject mixed_attempt_identity", () => {
   const r = projectExecution([

@@ -139,19 +139,23 @@ export async function runLifecycle(input: LifecycleInput): Promise<ProcessResult
       };
     }
     if (res.kind === "ownership_persistence_failed") {
-      // CORRECTION02 §2: the OS spawn already succeeded. The
-      // current supervisor MUST run bounded TERM->KILL cleanup
-      // against the live group, prove absence, observe close, and
-      // return evidence_persistence_failure. Reuse the
-      // {@link cleanupPath} helper so the bounded-close semantics
-      // and timeout machinery are identical to the ordinary
-      // deadline / cancelled paths.
+      // CORRECTION02 §2 + CORRECTION03 §5: the OS spawn
+      // already succeeded. The current supervisor MUST run
+      // bounded TERM->KILL cleanup against the live group,
+      // prove absence, observe close, and surface the typed
+      // evidence_persistence_failure cause. Reuse
+      // {@link cleanupPath} so the bounded-close semantics
+      // are identical to the ordinary deadline / cancelled
+      // paths. The cause passed in preserves the typed
+      // ownership-failure origin; the escalation evidence
+      // is whatever TERM/KILL actually produced.
       setSealed();
       return cleanupPath({
         id, spec, engine, safeEmit, setSealed, child,
         spawnResolution, processCompletion, stdoutSink, stderrSink,
         startedAtMs, clock, closeWaitController, closeWaitTimeoutMs,
         pgid: res.pgid,
+        cause: res.failure,
       });
     }
     // Spawned. If termination has already become authoritative,
@@ -239,6 +243,13 @@ function buildNormalOutcome(p: {
 
 async function cleanupPath(p: {
   id: ProcessId; spec: ProcessSpec; engine: ReturnType<typeof import("./termination.js").createTerminationEngine>; safeEmit: (e: RuntimeEvent) => void; setSealed: () => void; child: SpawnedChild; spawnResolution: Promise<SpawnResolution>; processCompletion: Promise<ProcessCompletion>; stdoutSink: SinkLike; stderrSink: SinkLike; startedAtMs: number; clock: Clock; closeWaitController: AbortController; closeWaitTimeoutMs: number; pgid: number;
+  // CORRECTION03 §5: when called from the
+  // ownership_persistence_failed spawn-resolution branch, the
+  // cleanup outcome must carry the typed
+  // evidence_persistence_failure cause, not the generic
+  // 'cleanup failed' classification. When undefined, the
+  // failure is computed from escalation evidence as before.
+  cause?: ProcessFailure;
 }): Promise<ProcessResult> {
   // We have a pgid. Escalate, then await the ORIGINAL process
   // completion promise with a SEPARATE close-wait controller.
@@ -305,9 +316,11 @@ async function cleanupPath(p: {
   // Final probe was NOT absent OR no terminal cause OR close failed
   // (spawn_error after spawn): real cleanup failure.
   const phase = escalation.killRequested ? "kill" : "term";
+  const failure: ProcessFailure =
+    p.cause !== undefined ? p.cause : classifyCleanupFailure(escalation, phase);
   return {
     processId: p.id, spec: p.spec,
-    outcome: { kind: "cleanup_failed", failure: classifyCleanupFailure(escalation, phase), escalation, stdoutFailure: soF, stderrFailure: seF },
+    outcome: { kind: "cleanup_failed", failure, escalation, stdoutFailure: soF, stderrFailure: seF },
     stdout: p.stdoutSink.captured(), stderr: p.stderrSink.captured(),
     startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(),
     escalation,

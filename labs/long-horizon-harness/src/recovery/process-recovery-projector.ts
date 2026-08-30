@@ -5,6 +5,7 @@
 import type {
   PersistedProcessEvidencePayload,
 } from "../evidence/codec-types.js";
+import { areCloseAndResultCompatible, deadlineCompatible, cancelCompatible } from "./process-result-compatibility.js";
 import type { ProcessId } from "../process/process-types.js";
 import type { AttemptId } from "../domain/ids.js";
 import type {
@@ -24,6 +25,10 @@ export function projectExecution(
   let lastPgid: number | null = null;
   let closedSeen = false;
   let groupAbsentSeen = false;
+  let deadlineSeen = false;
+  let cancelSeen = false;
+  let lastCloseCode: number | null = null;
+  let lastCloseSignal: string | null = null;
 
   for (const { payload } of stream) {
     const pid = payloadProcessId(payload);
@@ -53,6 +58,10 @@ export function projectExecution(
       lastPgid,
       closedSeen,
       groupAbsentSeen,
+      deadlineSeen,
+      cancelSeen,
+      closeCode: lastCloseCode,
+      closeSignal: lastCloseSignal,
     });
     if (r.ok === false) return r;
     state = r.value.state;
@@ -60,6 +69,10 @@ export function projectExecution(
     lastPgid = r.value.lastPgid;
     closedSeen = r.value.closedSeen;
     groupAbsentSeen = r.value.groupAbsentSeen;
+    deadlineSeen = r.value.deadlineSeen;
+    cancelSeen = r.value.cancelSeen;
+    lastCloseCode = r.value.lastCloseCode;
+    lastCloseSignal = r.value.lastCloseSignal;
   }
 
   if (state.kind === "settled") return okState(state);
@@ -144,6 +157,10 @@ type ApplyCtx = {
   readonly lastPgid: number | null;
   readonly closedSeen: boolean;
   readonly groupAbsentSeen: boolean;
+  readonly deadlineSeen: boolean;
+  readonly cancelSeen: boolean;
+  readonly closeCode: number | null;
+  readonly closeSignal: string | null;
 };
 
 type ApplyResult = {
@@ -152,6 +169,10 @@ type ApplyResult = {
   readonly lastPgid: number | null;
   readonly closedSeen: boolean;
   readonly groupAbsentSeen: boolean;
+  readonly deadlineSeen: boolean;
+  readonly cancelSeen: boolean;
+  readonly lastCloseCode: number | null;
+  readonly lastCloseSignal: string | null;
 };
 
 function okResult(r: ApplyResult): RecoveryResult<ApplyResult> {
@@ -179,7 +200,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_spawned": {
@@ -197,7 +222,11 @@ function apply(
         lastPid: p.pid,
         lastPgid: p.pgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_spawn_failed": {
@@ -217,7 +246,11 @@ function apply(
         lastPid: null,
         lastPgid: null,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_deadline_reached": {
@@ -229,7 +262,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: true,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_cancel_requested": {
@@ -241,7 +278,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: true,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_signal_attempted": {
@@ -255,7 +296,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_signal_result": {
@@ -280,7 +325,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_group_probe": {
@@ -297,7 +346,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: groupAbsentNow,
+       groupAbsentSeen: groupAbsentNow,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_close_observed": {
@@ -316,15 +369,26 @@ function apply(
           lastPid: ctx.lastPid,
           lastPgid: ctx.lastPgid,
           closedSeen: true,
-          groupAbsentSeen: ctx.groupAbsentSeen,
+         groupAbsentSeen: ctx.groupAbsentSeen,
+         deadlineSeen: ctx.deadlineSeen,
+         cancelSeen: ctx.cancelSeen,
+         lastCloseCode: ctx.closeCode,
+         lastCloseSignal: ctx.closeSignal,
         });
       }
+      // CORRECTION03 §9/§10 (A11/A12): capture the close
+      // fields so the result-committed gate can verify
+      // exit_code/signal compatibility.
       return okResult({
         state: { ...state, phase: "close_seen" },
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: true,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: p.exit_code,
+       lastCloseSignal: p.signal,
       });
     }
     case "process_output_summary": {
@@ -333,7 +397,11 @@ function apply(
         lastPid: ctx.lastPid,
         lastPgid: ctx.lastPgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
     case "process_result_committed": {
@@ -368,7 +436,11 @@ function apply(
           lastPid: null,
           lastPgid: null,
           closedSeen: ctx.closedSeen,
-          groupAbsentSeen: ctx.groupAbsentSeen,
+         groupAbsentSeen: ctx.groupAbsentSeen,
+         deadlineSeen: ctx.deadlineSeen,
+         cancelSeen: ctx.cancelSeen,
+         lastCloseCode: ctx.closeCode,
+         lastCloseSignal: ctx.closeSignal,
         });
       }
       // exited / signaled / deadline / cancelled / cleanup_failed
@@ -377,6 +449,25 @@ function apply(
       if (state.kind !== "in_flight_at_crash") {
         return errInconsistent(
           `${p.result.outcome_kind} result requires in_flight_at_crash state`,
+        );
+      }
+      // CORRECTION03 §7-§10 (A09/A10/A11/A12): deadline / cancelled
+      // outcomes require their trigger evidence; exited /
+      // signaled outcomes must be compatible with the close
+      // observation.
+      if (!deadlineCompatible(p.result, ctx.deadlineSeen)) {
+        return errInconsistent(
+          "deadline result requires process_deadline_reached evidence",
+        );
+      }
+      if (!cancelCompatible(p.result, ctx.cancelSeen)) {
+        return errInconsistent(
+          "cancelled result requires process_cancel_requested evidence",
+        );
+      }
+      if (ctx.closedSeen && !areCloseAndResultCompatible(p.result, ctx.closeCode, ctx.closeSignal)) {
+        return errInconsistent(
+          `close ${ctx.closeCode}/${ctx.closeSignal} incompatible with result ${p.result.outcome_kind}`,
         );
       }
       return okResult({
@@ -390,7 +481,11 @@ function apply(
         lastPid: state.pid,
         lastPgid: state.pgid,
         closedSeen: ctx.closedSeen,
-        groupAbsentSeen: ctx.groupAbsentSeen,
+       groupAbsentSeen: ctx.groupAbsentSeen,
+       deadlineSeen: ctx.deadlineSeen,
+       cancelSeen: ctx.cancelSeen,
+       lastCloseCode: ctx.closeCode,
+       lastCloseSignal: ctx.closeSignal,
       });
     }
   }

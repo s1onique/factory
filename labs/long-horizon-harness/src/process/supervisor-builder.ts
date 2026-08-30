@@ -36,6 +36,7 @@ import type {
   ProcessEvidenceSink,
 } from "./process-evidence-sink.js";
 import type {
+  EscalationEvidence,
   ProcessCompletion,
   ProcessFailure,
   ProcessHandle,
@@ -367,7 +368,8 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
         pid,
         pgid: pgid ?? pid,
         failure: {
-          kind: "internal_process_failure",
+          kind: "evidence_persistence_failure",
+          stage: "ownership",
           message:
             outcome.stage === "internal_malfunction"
               ? `process_spawned commit threw: ${outcome.message}`
@@ -486,7 +488,16 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
               const message = outcome.stage === "internal_malfunction"
                 ? "process_result_committed commit threw: " + outcome.message
                 : "process_result_committed commit failed: " + outcome.message;
-              const emptyEscalation = {
+              // CORRECTION03 §40/§41: a process that exited
+              // cleanly but whose settlement fsync failed is
+              // NOT a cleanup failure. The original
+              // ProcessResult is preserved; we attach the
+              // new typed evidence_persistence_failure cause.
+              // No synthetic EscalationEvidence is
+              // fabricated — the runtime did NOT attempt
+              // TERM/KILL/probe, so the empty record is
+              // genuine.
+              const noCleanupAttempted: EscalationEvidence = {
                 termRequested: false,
                 termSent: false,
                 termResult: null,
@@ -500,8 +511,12 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
                 spec: args.spec,
                 outcome: {
                   kind: "cleanup_failed",
-                  failure: { kind: "internal_process_failure", message },
-                  escalation: emptyEscalation,
+                  failure: {
+                    kind: "evidence_persistence_failure",
+                    stage: "settlement",
+                    message,
+                  },
+                  escalation: noCleanupAttempted,
                   stdoutFailure: null,
                   stderrFailure: null,
                 },
@@ -509,7 +524,7 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
                 stderr: r.stderr,
                 startedAtMs: r.startedAtMs,
                 finishedAtMs: r.finishedAtMs,
-                escalation: emptyEscalation,
+                escalation: noCleanupAttempted,
               };
             }
           }

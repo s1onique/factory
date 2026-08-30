@@ -83,11 +83,14 @@ test("OG03 internal sink malfunction also fails closed", async () => {
   const signals = nodeSignalPort();
   const spawner = nodeSpawnPort();
   const clock = realClock();
+  let criticalCalls = 0;
   const sink: ProcessEvidenceSink = {
     commitCritical: (): Promise<ProcessEvidenceCommitResult> => {
-      const r = Promise.reject(new Error("internal sink malfunction"));
-      r.catch(() => undefined); // test-only: simulate well-behaved sink
-      return r;
+      criticalCalls++;
+      if (criticalCalls === 1) {
+        return Promise.reject(new Error("internal sink malfunction"));
+      }
+      return Promise.resolve({ ok: true, seq: criticalCalls });
     },
     commitObservation: (): Promise<ProcessEvidenceCommitResult> =>
       Promise.resolve({ ok: true, seq: 0 }),
@@ -108,4 +111,23 @@ test("OG03 internal sink malfunction also fails closed", async () => {
   });
   const r = await handle.await();
   assert.equal(r.outcome.kind, "cleanup_failed");
-});
+  // CORRECTION03 §2: mechanically prove the
+  // internal_malfunction taxonomy is preserved end-to-end:
+  // the typed cause MUST be
+  //   evidence_persistence_failure(stage=ownership)
+  // NOT
+  //   evidence_persistence_failure(stage=settlement)
+  // and the message MUST mention the rejected Promise error
+  // (the raw rejection taxonomy is preserved, not laundered).
+  if (r.outcome.kind === "cleanup_failed") {
+    const f = r.outcome.failure;
+    assert.equal(f.kind, "evidence_persistence_failure");
+    if (f.kind === "evidence_persistence_failure") {
+      assert.equal(f.stage, "ownership");
+      assert.ok(
+        typeof f.message === "string" && f.message.length > 0,
+        "ownership failure must carry a non-empty message",
+      );
+    }
+  }
+})

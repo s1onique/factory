@@ -102,6 +102,21 @@ export function decodePersistedProcessFailure(
         if (typeof v["code"] === "string") (r as { code?: string }).code = v["code"];
         return ok(r);
       });
+    case "evidence_persistence_failure":
+      return andThen(decodeStringField(v, "message"), (message) => {
+        const stage = v["stage"];
+        if (stage !== "ownership" && stage !== "settlement") {
+          return err({
+            kind: "invalid_evidence",
+            reason: "evidence_persistence_failure.stage must be ownership | settlement.",
+          });
+        }
+        return ok({
+          kind: "evidence_persistence_failure",
+          stage,
+          message,
+        } as PersistedProcessFailure);
+      });
   }
   return err({
     kind: "invalid_evidence",
