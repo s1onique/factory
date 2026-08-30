@@ -23,7 +23,10 @@ export function wireSpawnOwnershipHandler(args: {
   readonly spawnOwnershipObserver: SpawnOwnershipObserver | undefined;
   readonly setSpawnEventSeen: (v: boolean) => void;
 }): void {
-  args.child.on("spawn", async () => {
+  // CORRECTION08 §28: Node's EventEmitter does NOT await
+  // returned Promises. The async listener body MUST be
+  // wrapped in a catch so a rejection cannot escape.
+  const onSpawn = async (): Promise<void> => {
     args.setSpawnEventSeen(true);
     const pid = args.child.pid;
     const pgid = args.child.pgid !== null && args.child.pgid !== undefined
@@ -61,6 +64,14 @@ export function wireSpawnOwnershipHandler(args: {
         },
       });
     };
-    void awaitOwnership();
+    await awaitOwnership();
+  };
+  // Attach the wrapped listener so unhandled rejections cannot escape.
+  args.child.on("spawn", () => {
+    onSpawn().catch((_e: unknown) => {
+      // Swallow: observers are passive and the supervisor's
+      // own await path is what drives spawn resolution.
+      // Listener exceptions must not crash the process.
+    });
   });
 }

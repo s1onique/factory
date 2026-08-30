@@ -19,7 +19,7 @@
 import { promises as fs } from "node:fs";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
 import { LedgerBackedProcessEvidenceSink } from "../../src/process/process-evidence-sink.js";
-import { buildSupervisor } from "../../src/process/supervisor-builder.js";
+import { buildSupervisor, startSupervisor } from "../../src/process/supervisor-builder.js";
 import { realClock } from "../../src/process/clock.js";
 import { nodeSignalPort } from "../../src/process/process-group.js";
 import { nodeSpawnPort } from "../../src/process/node-spawn.js";
@@ -102,7 +102,7 @@ async function cp03(args: Args, ledger: JsonlLedger): Promise<void> {
     stdoutLimitBytes: 0,
     stderrLimitBytes: 0,
   };
-  const supervisor = buildSupervisor({
+  const startR = await startSupervisor({
     spec,
     clock: realClock(),
     signals: nodeSignalPort(),
@@ -113,30 +113,47 @@ async function cp03(args: Args, ledger: JsonlLedger): Promise<void> {
     idFactory: () => makeProcessId(args.processId),
     spawnOwnershipObserver: {
       afterOsSpawnBeforeOwnershipCommit(observation): Promise<void> {
-        // Emit barrier with REAL pid+pgid (never -1).
-        emit({
+        // CORRECTION08 §19: emit barrier SYNCHRONOUSLY, then
+        // crash IMMEDIATELY. NO setTimeout, NO sleep. The
+        // supervisor's spawn_requested record was already
+        // fsync-acknowledged by `startSupervisor` BEFORE the
+        // OS spawn began; the process_spawned record is NOT
+        // yet durable. The barrier emits a single JSON line to
+        // stdout and process.exit(137) runs in the next macrotask
+        // — but we MUST NOT wait on any timer before crashing.
+        //
+        // CORRECTION08 §20: stdout is flushed via process.stdout
+        // write+callback so the barrier is delivered before exit.
+        const barrier = {
           kind: "barrier",
           point: "CP03",
           test_owned_pgid: observation.pgid,
           supervisor_pid: process.pid,
           spawn_event_pid: observation.pid,
-        });
-        // CORRECTION06 §4: crash BEFORE process_spawned critical
-        // commit / compensation. The supervisor's in-flight
-        // process_spawn_started ledger write drains asynchronously;
-        // we wait a bounded 200ms so the write fsyncs, THEN we
-        // exit. The supervisor code path is still blocked on this
-        // observer (the await in runSpawnOwnershipObserver) so NO
-        // compensation runs before exit.
-        return new Promise<void>((res) => {
-          setTimeout(() => {
+        };
+        const line = JSON.stringify(barrier) + "\n";
+        try {
+          process.stdout.write(line, (err) => {
+            if (err !== undefined && err !== null) {
+              process.stderr.write("cp03 barrier write failed: " + err.message + "\n");
+            }
             process.exit(137);
-            res();
-          }, 200);
-        });
+          });
+        } catch (_e) {
+          process.exit(137);
+        }
+        // Never-resolving promise: the supervisor stays blocked
+        // here until the process dies.
+        return new Promise<void>(() => {});
       },
     },
   });
+  if (startR.ok === false) {
+    process.stderr.write("cp03 startSupervisor failed: " + JSON.stringify(startR.error) + "\n");
+    process.exit(3);
+    return;
+  }
+  const supervisor = startR.value;
   // Drive the supervisor lifecycle. The observer fires BEFORE
   // this returns; the helper exits via process.exit(137).
   // If the observer somehow never fires (a regression), the
