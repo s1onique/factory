@@ -64,14 +64,14 @@ async function main(): Promise<void> {
     const ledger = new JsonlLedger(runDir);
     const openR = await ledger.open({ createIfMissing: false });
     if (!openR.ok) {
-      emit({ kind: "restart_result", state: "error", decision: "no_decision", signals: 0, kernelProbes: 0, error: "ledger_open_failed:" + JSON.stringify(openR.error) });
+      emit({ kind: "restart_result", state: "error", decision: "no_decision", signals: 0, kernelProbes: 0, error: "ledger_open_failed:" + JSON.stringify(openR.error), restart_pid: process.pid });
       process.exit(1);
       return;
     }
     const allR = await ledger.readAll();
     if (!allR.ok) {
       // Malformed committed record → fail closed (CORRECTION04 §37).
-      emit({ kind: "restart_result", state: "error", decision: "no_decision", signals: 0, kernelProbes: 0, error: "ledger_read_failed:" + JSON.stringify(allR.error) });
+      emit({ kind: "restart_result", state: "error", decision: "no_decision", signals: 0, kernelProbes: 0, error: "ledger_read_failed:" + JSON.stringify(allR.error), restart_pid: process.pid });
       process.exit(1);
       return;
     }
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     const stream: EvidenceStream = streamArray;
     const proj = projectExecution(stream);
     if (!proj.ok) {
-      emit({ kind: "restart_result", state: "error", decision: "no_decision", signals: 0, kernelProbes: 0, error: "projection_failed:" + JSON.stringify(proj.error) });
+      emit({ kind: "restart_result", state: "error", decision: "no_decision", signals: 0, kernelProbes: 0, error: "projection_failed:" + JSON.stringify(proj.error), restart_pid: process.pid });
       process.exit(1);
       return;
     }
@@ -125,10 +125,10 @@ async function main(): Promise<void> {
     } else if (state.kind === "not_started") {
       decision = "no_action";
     }
-    emit({ kind: "restart_result", state: stateKind, processId, decision, signals, kernelProbes, error: null });
+    emit({ kind: "restart_result", state: stateKind, processId, decision, signals, kernelProbes, error: null, restart_pid: process.pid });
     process.exit(0);
   } catch (e: unknown) {
-    emit({ kind: "restart_result", state: "exception", decision: "no_decision", signals, kernelProbes, error: e instanceof Error ? e.message : String(e) });
+    emit({ kind: "restart_result", state: "exception", decision: "no_decision", signals, kernelProbes, error: e instanceof Error ? e.message : String(e), restart_pid: process.pid });
     process.exit(1);
   }
 }

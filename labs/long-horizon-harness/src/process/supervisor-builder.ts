@@ -71,18 +71,7 @@ export type Supervisor = {
  * verdict is added as a sibling cause. NEVER collapses a clean
  * exit + settlement fsync failure into a fake cleanup_failed.
  */
-export type OuterSupervisorResult =
-  | { kind: "durably_settled"; process: ProcessResult }
-  | {
-      kind: "settlement_not_durable";
-      process: ProcessResult;
-      failure: { kind: "evidence_persistence_failure"; stage: "settlement"; message: string };
-    }
-  | {
-      kind: "ownership_not_durable";
-      process: ProcessResult;
-      failure: { kind: "evidence_persistence_failure"; stage: "ownership"; message: string };
-    };
+export type { OuterSupervisorResult } from "./outer-supervisor-result.js";
 
 export type CreateSupervisorArgs = {
   readonly spec: ProcessSpec;
@@ -190,9 +179,11 @@ export function invalidSpecSupervisorResult(
       }
       return Promise.resolve(result);
     },
-    awaitOuter: () => Promise.resolve({ kind: "durably_settled", process: result }),
+    awaitOuter: () => Promise.resolve({ kind: "durably_settled", process: result, observedPgid: null, observedPid: null }),
   };
 }
+import type { OuterSupervisorResult } from "./outer-supervisor-result.js";
+
 export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
   const id = (args.idFactory ?? defaultIdFactory)();
   const sink: RuntimeEventSink = args.sink ?? (() => {});
@@ -264,7 +255,7 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
       handle: () => ({ processId: id, pid: null, processGroupId: null }),
       cancel: () => {},
       await: () => Promise.resolve(result),
-      awaitOuter: () => Promise.resolve({ kind: "durably_settled", process: result } satisfies OuterSupervisorResult),
+      awaitOuter: () => Promise.resolve({ kind: "durably_settled", process: result, observedPgid: null, observedPid: null } satisfies OuterSupervisorResult),
     };
   }
 
@@ -561,19 +552,26 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     };
   })();
 
+  // CORRECTION05 §18/§19: awaitExecution() returns the
+  // lifecycle's UNMUTATED ProcessResult. The lifecycle result
+  // is captured BEFORE wrappedAwait runs (which mutates the
+  // result for settlement-failure compatibility). This is the
+  // authoritative execution outcome that awaitOuter uses.
+  const awaitExecution = (): Promise<ProcessResult> => lifecyclePromise;
+
   // CORRECTION04
   const awaitOuter = async () => {
-    if (evidenceBridge === null) {
-      throw new Error("awaitOuter requires an evidenceSink");
-    }
-    const r = await wrappedAwait();
-    if (r.outcome.kind === "cleanup_failed" && r.outcome.failure.kind === "evidence_persistence_failure") {
-      if (r.outcome.failure.stage === "ownership") {
-        return { kind: "ownership_not_durable", process: r, failure: { kind: "evidence_persistence_failure" as const, stage: "ownership" as const, message: r.outcome.failure.message } } as OuterSupervisorResult;
+    if (evidenceBridge === null) throw new Error("awaitOuter requires an evidenceSink");
+    // CORRECTION05 §18: 'verdict' carries settlement verdict; 'execution' is UNMUTATED lifecycle outcome.
+    const verdict = await wrappedAwait();
+    const execution = await awaitExecution();
+    if (verdict.outcome.kind === "cleanup_failed" && verdict.outcome.failure.kind === "evidence_persistence_failure") {
+      if (verdict.outcome.failure.stage === "ownership") {
+        return { kind: "ownership_not_durable", process: execution, failure: { kind: "evidence_persistence_failure" as const, stage: "ownership" as const, message: verdict.outcome.failure.message }, observedPgid: cachedPgid, observedPid: cachedPid } as OuterSupervisorResult;
       }
-      return { kind: "settlement_not_durable", process: r, failure: { kind: "evidence_persistence_failure" as const, stage: "settlement" as const, message: r.outcome.failure.message } } as OuterSupervisorResult;
+      return { kind: "settlement_not_durable", process: execution, failure: { kind: "evidence_persistence_failure" as const, stage: "settlement" as const, message: verdict.outcome.failure.message }, observedPgid: cachedPgid, observedPid: cachedPid } as OuterSupervisorResult;
     }
-    return { kind: "durably_settled", process: r } as OuterSupervisorResult;
+    return { kind: "durably_settled", process: execution, observedPgid: cachedPgid, observedPid: cachedPid } as OuterSupervisorResult;
   };
   return { handle, cancel, await: wrappedAwait, awaitOuter };
 }

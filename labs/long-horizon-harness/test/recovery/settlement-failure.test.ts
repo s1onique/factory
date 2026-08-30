@@ -101,17 +101,19 @@ test("settlement-failure: awaitOuter returns settlement_not_durable (CORRECTION0
     if (r.failure.kind === "evidence_persistence_failure") {
       assert.equal(r.failure.stage, "settlement");
     }
-    // CORRECTION04 §48: PROCESS_CLEANUP_ATTEMPTED=false. The
-    // runtime did NOT run TERM/KILL/probe; the escalation is
-    // genuinely empty. The typed outer result is
-    // settlement_not_durable rather than cleanup_failed.
+    // CORRECTION05 §20: the inner execution outcome is preserved
+    // as the lifecycle produced it. The process exited cleanly;
+    // settlement fsync failed. The original outcome MUST be exited(0),
+    // NOT collapsed into cleanup_failed.
+    assert.equal(r.process.outcome.kind, "exited");
+    if (r.process.outcome.kind === "exited") {
+      assert.equal(r.process.outcome.exitCode, 0);
+    }
+    // The escalation evidence MUST be empty: the runtime did NOT
+    // attempt TERM/KILL/probe, so the empty record is genuine.
     assert.equal(r.process.escalation.termRequested, false);
     assert.equal(r.process.escalation.termSent, false);
     assert.equal(r.process.escalation.killRequested, false);
     assert.equal(r.process.escalation.killSent, false);
-    if (r.process.outcome.kind === "cleanup_failed") {
-      // The cleanup_failed cause must be evidence_persistence_failure.
-      assert.equal(r.process.outcome.failure.kind, "evidence_persistence_failure");
-    }
   }
 });

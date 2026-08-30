@@ -16,7 +16,6 @@
  * LedgerBackedProcessEvidenceSink. No hand-written JSON lines.
  */
 
-import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
 import { LedgerBackedProcessEvidenceSink } from "../../src/process/process-evidence-sink.js";
@@ -81,31 +80,57 @@ function makeIdentity(a: Args): ProcessEvidenceIdentity {
 }
 
 async function cp03(args: Args, ledger: JsonlLedger): Promise<void> {
-  // CORRECTION04 §11: real-JSON-ledger spawn_requested only.
-  // The helper emits process_spawn_requested via the real
-  // ledger (durable fsync), spawns a detached child, then
-  // exits 137 BEFORE process_spawned is committed.
+  // CORRECTION05 §21/§22: CP03 must exercise the REAL production
+  // supervisor seam. The supervisor + evidence bridge drive
+  // process_spawn_requested through the ledger, then attempt the
+  // OS spawn, then try to commit process_spawned. A fault hook
+  // armed on the ledger fails ONLY the process_spawned critical
+  // commit, so the durable history records spawn_requested but
+  // NOT process_spawned — exactly the irreducible gap.
   const identity = makeIdentity(args);
-  const a = args.attemptId;
-  const p = args.processId;
-  // 1. Durable process_spawn_requested via the real ledger.
-  const r1 = await ledger.appendProcessEvidence({
-    eventId: makeEventId("e-" + p + "-cp03-sr"),
-    runId: identity.runId,
-    missionId: identity.missionId,
-    observedAt: Date.now(),
-    payload: { kind: "process_spawn_requested", attempt_id: makeAttemptId(a), process_id: makeProcessId(p) },
+  ledger.armFaultHook({
+    kind: "beforeAppendWrite",
+    payload: { kind: "process_spawned", attempt_id: makeAttemptId(args.attemptId), process_id: makeProcessId(args.processId), pid: 1, pgid: 1 },
+    respond: (candidate, _r) => {
+      if ("kind" in candidate && candidate.kind === "process_spawned") {
+        return { ok: false, error: { kind: "internal_failure", message: "cp03 fault-injected: barrier BEFORE process_spawned commit" } };
+      }
+      return { ok: true, value: undefined };
+    },
   });
-  if (!r1.ok) throw new Error("cp03 spawn_requested failed: " + JSON.stringify(r1.error));
-  // 2. Spawn real detached child (unref so it survives our exit).
-  const child = spawn(args.exec, args.execArgs, { detached: true, stdio: "ignore" });
-  child.unref();
-  const pgid = child.pid;
-  if (pgid === undefined || pgid === null) {
-    throw new Error("cp03 child.pid missing");
-  }
-  emit({ kind: "barrier", point: "CP03", test_owned_pgid: pgid, supervisor_pid: process.pid });
-  // 3. Abrupt crash BEFORE process_spawned durable commit.
+  const exec = args.exec === "true" ? "/bin/sh" : args.exec;
+  const execArgs = args.exec === "true" ? ["-c", "sleep 300"] : args.execArgs;
+  const spec = {
+    executable: exec,
+    args: execArgs,
+    env: {},
+    cwd: process.cwd(),
+    termGraceMs: 1500,
+    killGraceMs: 1500,
+    deadlineMs: 600000,
+    stdoutLimitBytes: 0,
+    stderrLimitBytes: 0,
+  };
+  const supervisor = buildSupervisor({
+    spec,
+    clock: realClock(),
+    signals: nodeSignalPort(),
+    spawner: nodeSpawnPort(),
+    sink: () => {},
+    evidenceSink: new LedgerBackedProcessEvidenceSink(ledger),
+    evidenceIdentity: identity,
+    idFactory: () => makeProcessId(args.processId),
+  });
+  const outer = await supervisor.awaitOuter();
+  // For CP03, the supervisor took the ownership-failure branch.
+  // The detached child may still be alive at OS level.
+  emit({
+    kind: "barrier",
+    point: "CP03",
+    test_owned_pgid: outer.observedPgid ?? -1,
+    supervisor_pid: process.pid,
+  });
+  // Abrupt crash now (after supervisor completed).
   process.exit(137);
 }
 
@@ -233,10 +258,10 @@ async function cp07(args: Args, ledger: JsonlLedger): Promise<void> {
 async function runRealSupervisorWith(args: Args, ledger: JsonlLedger, point: "CP06" | "CP07"): Promise<void> {
   const identity = makeIdentity(args);
   const sink = new LedgerBackedProcessEvidenceSink(ledger);
-  // Short-lived child so cleanup completes quickly even without
-  // signal authority over the group.
+  // CORRECTION05 §13: long-lived fixture so the child does NOT
+  // terminate naturally before current-owner cleanup completes.
   const exec = args.exec === "true" ? "/bin/sh" : args.exec;
-  const execArgs = args.exec === "true" ? ["-c", "sleep 0.1"] : args.execArgs;
+  const execArgs = args.exec === "true" ? ["-c", "sleep 300"] : args.execArgs;
   const spec = {
     executable: exec,
     args: execArgs,
@@ -244,7 +269,7 @@ async function runRealSupervisorWith(args: Args, ledger: JsonlLedger, point: "CP
     cwd: process.cwd(),
     termGraceMs: 1500,
     killGraceMs: 1500,
-    deadlineMs: 60000,
+    deadlineMs: 600000,
     stdoutLimitBytes: 0,
     stderrLimitBytes: 0,
   };
@@ -258,8 +283,26 @@ async function runRealSupervisorWith(args: Args, ledger: JsonlLedger, point: "CP
     evidenceIdentity: identity,
     idFactory: () => makeProcessId(args.processId),
   });
-  await supervisor.await();
-  emit({ kind: "barrier", point, test_owned_pgid: -1, supervisor_pid: process.pid });
+  // Use awaitOuter to surface the actual PGID/PID for cleanup
+  // registration.
+  const outer = await supervisor.awaitOuter();
+  const pgid = outer.observedPgid;
+  const pid = outer.observedPid;
+  if (point === "CP06" || point === "CP07") {
+    // CORRECTION05 §14/§17: surface the real PGID. NEVER -1 for
+    // live ownership cases. Real PGID is required for the test
+    // orchestrator to register and probe cleanup.
+    emit({
+      kind: "ownership_failure_observed",
+      point,
+      observedPgid: pgid,
+      observedPid: pid,
+      outerKind: outer.kind,
+      supervisorPid: process.pid,
+    });
+  } else {
+    emit({ kind: "barrier", point, test_owned_pgid: pgid ?? -1, supervisor_pid: process.pid });
+  }
 }
 
 async function cp10(args: Args, ledger: JsonlLedger): Promise<void> {
@@ -309,7 +352,12 @@ async function main(): Promise<void> {
 }
 
 void main().then(
-  () => undefined,
+  () => {
+    // CORRECTION05: supervisor process must exit after work is
+    // done; stdio handles to the detached child would otherwise
+    // keep the Node event loop alive indefinitely.
+    process.exit(0);
+  },
   (e: unknown) => {
     process.stderr.write("crash supervisor error: " + (e instanceof Error ? e.message : String(e)) + "\n");
     process.exit(2);
