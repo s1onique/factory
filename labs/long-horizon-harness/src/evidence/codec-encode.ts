@@ -5,28 +5,67 @@
  * The encoder accepts a single committed event (payload + metadata)
  * and derives the envelope identity from that event's branded fields.
  * No `as` assertions are used.
+ *
+ * FOUNDATION03 schema evolution:
+ *   - lifecycle records continue to be encoded as schema_version 2
+ *     envelopes with an explicit `kind: "lifecycle"` discriminator.
+ *   - process evidence records are encoded as schema_version 2
+ *     envelopes with `kind: "process_evidence"` and a
+ *     `process_evidence` payload.
+ *   - v1 lifecycle records are still decodable (see codec-decode-
+ *     envelope.ts) but are not emitted by this encoder.
  */
 
 import type { CommittedRunEvent } from "../domain/run-event.js";
 import type { Failure } from "../domain/failure.js";
 import type { BudgetObservation } from "../domain/budget.js";
+import type { CommittedProcessEvidence } from "./committed-process-evidence.js";
 import type {
   EventEnvelope,
   PersistedBudgetObservation,
   PersistedEvent,
   PersistedFailure,
+  PersistedProcessEvidencePayload,
 } from "./codec-types.js";
 
 export function encodeEnvelope(event: CommittedRunEvent): EventEnvelope {
   return {
-    schema_version: 1,
+    schema_version: 2,
     event_id: event.eventId,
     run_id: event.runId,
     mission_id: event.missionId,
     sequence: event.seq,
     observed_at: event.observedAt,
+    kind: "lifecycle",
     event: encodePersistedEvent(event),
   };
+}
+
+/**
+ * Encode a committed process-evidence record into a v2 envelope.
+ */
+export function encodeProcessEvidenceEnvelope(
+  evidence: CommittedProcessEvidence,
+): EventEnvelope {
+  return {
+    schema_version: 2,
+    event_id: evidence.eventId,
+    run_id: evidence.runId,
+    mission_id: evidence.missionId,
+    sequence: evidence.seq,
+    observed_at: evidence.observedAt,
+    kind: "process_evidence",
+    process_evidence: encodePersistedProcessEvidence(evidence.payload),
+  };
+}
+
+export function encodePersistedProcessEvidence(
+  p: import("./codec-types.js").PersistedProcessEvidencePayload,
+): PersistedProcessEvidencePayload {
+  // Identity function for now (persisted shape == typed shape).
+  // Kept as a named function so any future normalisation lives
+  // in one place.
+  return p;
 }
 
 export function encodePersistedEvent(e: CommittedRunEvent): PersistedEvent {

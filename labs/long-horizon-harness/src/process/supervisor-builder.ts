@@ -23,6 +23,14 @@ import { attachBoundedSink } from "./output-capture.js";
 import { createTerminationEngine } from "./termination.js";
 import { runLifecycle } from "./lifecycle-runner.js";
 import { makeProcessId } from "./process-types.js";
+import {
+  emitWithPersistence,
+  PendingCommitsTracker,
+  type EvidenceCommitObserver,
+} from "./process-evidence-bridge.js";
+import type {
+  ProcessEvidenceSink,
+} from "./process-evidence-sink.js";
 import type {
   ProcessCompletion,
   ProcessFailure,
@@ -51,6 +59,26 @@ export type CreateSupervisorArgs = {
   readonly spawner: SpawnPort;
   readonly sink?: RuntimeEventSink;
   readonly idFactory?: () => ProcessId;
+  /**
+   * FOUNDATION03: optional process-evidence sink. When supplied,
+   * the supervisor persists candidate-neutral process-runtime
+   * evidence records through the sink in addition to emitting
+   * the existing RuntimeEvent stream.
+   *
+   * Persistence failures of the `process_spawned` ownership
+   * boundary trigger {@link CreateSupervisorArgs.evidenceObserver}
+   * if provided; the current-run supervisor then bounds-cleanup
+   * the in-memory live process and reports an internal failure.
+   *
+   * For tests and pure FOUNDATION02 verification, omit this.
+   */
+  readonly evidenceSink?: ProcessEvidenceSink;
+  readonly evidenceObserver?: EvidenceCommitObserver;
+  readonly evidenceIdentity?: {
+    readonly runId: string;
+    readonly missionId: string;
+    readonly eventIdFactory: () => string;
+  };
 };
 
 export function defaultIdFactory(): ProcessId {
@@ -140,7 +168,41 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
   const id = (args.idFactory ?? defaultIdFactory)();
   const sink: RuntimeEventSink = args.sink ?? (() => {});
   let sealed = false;
-  const safeEmit = (e: RuntimeEvent): void => { if (sealed) return; sink(e); };
+  // FOUNDATION03: optional evidence bridge. When configured, every
+  // RuntimeEvent also becomes a persisted process-evidence record.
+  // The bridge also exposes a synthetic channel for close, output
+  // summary, and result commit boundaries.
+  const evidenceBridge = (() => {
+    if (args.evidenceSink === undefined || args.evidenceIdentity === undefined) {
+      return null;
+    }
+    return {
+      sink: args.evidenceSink,
+      identity: args.evidenceIdentity,
+      observer: args.evidenceObserver,
+      tracker: new PendingCommitsTracker(),
+    };
+  })();
+  const safeEmit = (e: RuntimeEvent): void => {
+    if (sealed) return;
+    sink(e);
+    if (evidenceBridge !== null) {
+      emitWithPersistence({
+        processId: id,
+        evidenceSink: evidenceBridge.sink,
+        eventIdFactory: evidenceBridge.identity.eventIdFactory,
+        runId: evidenceBridge.identity.runId,
+        missionId: evidenceBridge.identity.missionId,
+        tracker: evidenceBridge.tracker,
+        ...(evidenceBridge.observer !== undefined
+          ? { observer: evidenceBridge.observer }
+          : {}),
+        event: e,
+        innerSink: () => {},
+      });
+    }
+  };
+
   const startedAtMs = args.clock.nowMs();
   safeEmit({ kind: "process_spawn_started", processId: id });
 
@@ -292,5 +354,65 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     processGroupId: cachedPgid,
   });
 
-  return { handle, cancel, await: () => lifecyclePromise };
+  // FOUNDATION03: wrap the lifecycle promise to emit the
+  // synthetic process_result_committed record AFTER all
+  // preceding evidence records have been fsync'd, and the
+  // synthetic process_close_observed record BEFORE the result
+  // commit (close is observed by the lifecycle runner as a
+  // RuntimeEvent today; we re-emit the synthetic record here).
+  //
+  // The wrapper is built ONCE per Supervisor so `await()` is
+  // idempotent (every call returns the same promise reference).
+  const wrappedAwait: () => Promise<ProcessResult> = (() => {
+    let cached: Promise<ProcessResult> | null = null;
+    return () => {
+      if (cached !== null) return cached;
+      cached = (async (): Promise<ProcessResult> => {
+        const r = await lifecyclePromise;
+        if (evidenceBridge !== null) {
+          await evidenceBridge.tracker.waitAll();
+          emitWithPersistence({
+            processId: id,
+            evidenceSink: evidenceBridge.sink,
+            eventIdFactory: evidenceBridge.identity.eventIdFactory,
+            runId: evidenceBridge.identity.runId,
+            missionId: evidenceBridge.identity.missionId,
+            tracker: evidenceBridge.tracker,
+            ...(evidenceBridge.observer !== undefined
+              ? { observer: evidenceBridge.observer }
+              : {}),
+            event: {
+              kind: "process_close_observed",
+              processId: id,
+              exitCode: null,
+              signal: null,
+            },
+            innerSink: () => {},
+          });
+          emitWithPersistence({
+            processId: id,
+            evidenceSink: evidenceBridge.sink,
+            eventIdFactory: evidenceBridge.identity.eventIdFactory,
+            runId: evidenceBridge.identity.runId,
+            missionId: evidenceBridge.identity.missionId,
+            tracker: evidenceBridge.tracker,
+            ...(evidenceBridge.observer !== undefined
+              ? { observer: evidenceBridge.observer }
+              : {}),
+            event: {
+              kind: "process_result_committed",
+              processId: id,
+              result: r,
+            },
+            innerSink: () => {},
+          });
+          await evidenceBridge.tracker.waitAll();
+        }
+        return r;
+      })();
+      return cached;
+    };
+  })();
+
+  return { handle, cancel, await: wrappedAwait };
 }

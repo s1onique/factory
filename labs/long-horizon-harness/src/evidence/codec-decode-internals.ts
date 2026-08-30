@@ -11,15 +11,30 @@
  * CORRECTION02: `decodeAttemptIdField` returns `AttemptId` (not `string`)
  * so call-sites can construct PersistedEvent variants without an
  * avoidable type assertion.
+ *
+ * FOUNDATION03: process-evidence records are decoded by
+ * {@link decodePersistedProcessEvidence}. They share the same trust
+ * boundary rules.
  */
 
 import { isRunEventType, RUN_EVENT_TYPES } from "../domain/run-event.js";
-import { andThen, err, map, ok, type Result } from "../domain/result.js";
+import {
+  andThen,
+  err,
+  map,
+  ok,
+  type Result,
+} from "../domain/result.js";
 import type { InvalidEvidence } from "../domain/failure.js";
 import type { AttemptId, InvalidId } from "../domain/ids.js";
 import { parseAttemptId } from "../domain/ids.js";
 import type { PersistedEvent } from "./codec-types.js";
 import { decodeBudgetObservation, decodeFailure } from "./codec-decode-failure.js";
+import { decodePersistedProcessEvidence } from "./codec-decode-process-evidence.js";
+
+// Re-export so the envelope-level decoder can pull everything from
+// a single sibling module.
+export { decodePersistedProcessEvidence };
 
 function idToEvidence(field: string, e: InvalidId): InvalidEvidence {
   return {

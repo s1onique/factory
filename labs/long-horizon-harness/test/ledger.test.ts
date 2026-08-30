@@ -24,6 +24,7 @@ import {
 } from "./helpers.js";
 import type { RunEvent } from "../src/domain/run-event.js";
 import { JsonlLedger } from "../src/evidence/jsonl-ledger.js";
+import type { EventEnvelope } from "../src/evidence/codec-types.js";
 import { makeEventId } from "../src/domain/ids.js";
 import type { EventId } from "../src/domain/ids.js";
 
@@ -344,12 +345,15 @@ test("T15 failure taxonomy persistence", async () => {
     const all = await ledger2.readAll();
     assert.equal(all.ok, true);
     if (all.ok === true) {
-      const arr: ReadonlyArray<{ readonly event: { readonly type: string; readonly failure?: unknown } }> = all.value;
+      const arr: ReadonlyArray<EventEnvelope> = all.value;
       assert.equal(arr.length, 1 + variants.length);
       for (let i = 0; i < arr.length; i++) {
         const env = arr[i];
         if (env === undefined) {
           throw new Error(`missing envelope at ${i}`);
+        }
+        if (!("event" in env)) {
+          throw new Error(`expected lifecycle envelope at ${i}; got process_evidence.`);
         }
         if (i === 0) {
           assert.equal(env.event.type, "run_created");

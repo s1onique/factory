@@ -6,6 +6,13 @@
  * {@link parseRunId} / family functions in {@link ../domain/ids.ts}.
  * Invalid identifiers are translated into typed `invalid_evidence`
  * errors — no `as` assertion is allowed at the trust boundary.
+ *
+ * FOUNDATION03: this decoder accepts both schema_version 1
+ * (lifecycle-only, FOUNDATION01/F02) and schema_version 2
+ * (discriminated lifecycle | process_evidence). Mixed versions
+ * in the same ledger are permitted because the new ledger will
+ * start emitting v2 while existing v1 records continue to replay
+ * unchanged.
  */
 
 import type { InvalidEvidence } from "../domain/failure.js";
@@ -20,7 +27,10 @@ import {
   SUPPORTED_SCHEMA_VERSIONS,
   type EventEnvelope,
 } from "./codec-types.js";
-import { decodePersistedEvent } from "./codec-decode-internals.js";
+import {
+  decodePersistedEvent,
+  decodePersistedProcessEvidence,
+} from "./codec-decode-internals.js";
 
 /**
  * Translate an {@link InvalidId} into the evidence-layer {@link InvalidEvidence}.
@@ -30,6 +40,19 @@ function idToEvidence(e: InvalidId): InvalidEvidence {
     kind: "invalid_evidence",
     reason: `Invalid persisted identifier on '${e.field}': ${e.reason}`,
   };
+}
+
+export function decodeEnvelopeFromJson(
+  text: string,
+): Result<EventEnvelope, InvalidEvidence> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return err({ kind: "invalid_evidence", reason: `Malformed JSON: ${msg}` });
+  }
+  return decodeEnvelope(raw);
 }
 
 export function decodeEnvelope(
@@ -74,37 +97,92 @@ export function decodeEnvelope(
   const eid = parseEventId(v["event_id"]);
   if (eid.ok === false) return err(idToEvidence(eid.error));
 
-  const rawEvent = v["event"];
-  if (typeof rawEvent !== "object" || rawEvent === null) {
-    return err({ kind: "invalid_evidence", reason: "event must be a non-null object." });
+  // Process-evidence envelopes do NOT carry `event`. Defer the
+  // `event` presence check to the v1 / v2-lifecycle branches below
+  // so process-evidence envelopes (which carry `process_evidence`)
+  // do not fail with a misleading "event must be a non-null object".
+  // Persisted-process-evidence envelopes are decoded only after we
+  // detect kind === "process_evidence".
+
+  if (sv === 1) {
+    const rawEvent = v["event"];
+    if (typeof rawEvent !== "object" || rawEvent === null) {
+      return err({ kind: "invalid_evidence", reason: "event must be a non-null object." });
+    }
+    const ev = decodePersistedEvent(rawEvent);
+    if (ev.ok === false) {
+      return err(ev.error);
+    }
+    return ok({
+      schema_version: 1,
+      event_id: eid.value,
+      run_id: r.value,
+      mission_id: m.value,
+      sequence,
+      observed_at: observedAt,
+      event: ev.value,
+    });
   }
 
-  // Inner event: also has an attempt_id field on relevant variants.
-  const ev = decodePersistedEvent(rawEvent);
-  if (ev.ok === false) {
-    return err(ev.error);
+  // sv === 2: pick the branch on the kind discriminator.
+  const kindRaw = v["kind"];
+  if (typeof kindRaw !== "string") {
+    return err({
+      kind: "invalid_evidence",
+      reason: "schema_version 2 envelope MUST carry a string 'kind' discriminator.",
+    });
   }
-
-  return ok({
-    schema_version: 1,
-    event_id: eid.value,
-    run_id: r.value,
-    mission_id: m.value,
-    sequence,
-    observed_at: observedAt,
-    event: ev.value,
+  if (kindRaw === "lifecycle") {
+    if (v["process_evidence"] !== undefined) {
+      return err({
+        kind: "invalid_evidence",
+        reason: "lifecycle envelope MUST NOT carry a 'process_evidence' field.",
+      });
+    }
+    const rawEvent = v["event"];
+    if (typeof rawEvent !== "object" || rawEvent === null) {
+      return err({ kind: "invalid_evidence", reason: "event must be a non-null object." });
+    }
+    const ev = decodePersistedEvent(rawEvent);
+    if (ev.ok === false) {
+      return err(ev.error);
+    }
+    return ok({
+      schema_version: 2,
+      event_id: eid.value,
+      run_id: r.value,
+      mission_id: m.value,
+      sequence,
+      observed_at: observedAt,
+      kind: "lifecycle",
+      event: ev.value,
+    });
+  }
+  if (kindRaw === "process_evidence") {
+    const pe = v["process_evidence"];
+    if (typeof pe !== "object" || pe === null) {
+      return err({
+        kind: "invalid_evidence",
+        reason: "process_evidence envelope MUST carry a non-null 'process_evidence' payload.",
+      });
+    }
+    const pev = decodePersistedProcessEvidence(pe);
+    if (pev.ok === false) {
+      return err(pev.error);
+    }
+    return ok({
+      schema_version: 2,
+      event_id: eid.value,
+      run_id: r.value,
+      mission_id: m.value,
+      sequence,
+      observed_at: observedAt,
+      kind: "process_evidence",
+      process_evidence: pev.value,
+    });
+  }
+  return err({
+    kind: "invalid_evidence",
+    reason: `Unknown v2 envelope 'kind' '${kindRaw}'. Expected 'lifecycle' or 'process_evidence'.`,
   });
-}
-
-export function decodeEnvelopeFromJson(
-  text: string,
-): Result<EventEnvelope, InvalidEvidence> {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return err({ kind: "invalid_evidence", reason: `Malformed JSON: ${msg}` });
-  }
-  return decodeEnvelope(raw);
 }

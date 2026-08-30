@@ -4,14 +4,47 @@
  * The envelope has already been validated by {@link decodeEnvelope}; this
  * file is a mechanical translation from the persisted shape to the in-memory
  * domain shape.
+ *
+ * Process-evidence envelopes are NOT lifecycle envelopes. The caller
+ * is responsible for branching on `envelope.kind` before calling this
+ * function.
  */
 
 import type { BudgetObservation } from "../domain/budget.js";
 import type { Failure } from "../domain/failure.js";
 import type { RunEvent } from "../domain/run-event.js";
-import type { EventEnvelope } from "./codec-types.js";
+import type { EventEnvelope, PersistedEvent } from "./codec-types.js";
+
+/**
+ * Type guard: returns true iff the envelope carries a lifecycle payload
+ * (either schema_version 1 or schema_version 2 with kind "lifecycle").
+ */
+export function isLifecycleEnvelope(
+  envelope: EventEnvelope,
+): envelope is Extract<EventEnvelope, { event: PersistedEvent }> {
+  return "event" in envelope;
+}
+
+/**
+ * Type guard: returns true iff the envelope carries a process_evidence
+ * payload (schema_version 2 with kind "process_evidence").
+ */
+export function isProcessEvidenceEnvelope(
+  envelope: EventEnvelope,
+): envelope is Extract<EventEnvelope, { kind: "process_evidence" }> {
+  return (
+    envelope.schema_version === 2 &&
+    "process_evidence" in envelope &&
+    envelope.kind === "process_evidence"
+  );
+}
 
 export function envelopeToRunEvent(envelope: EventEnvelope): RunEvent {
+  if (!isLifecycleEnvelope(envelope)) {
+    throw new Error(
+      "envelopeToRunEvent: not a lifecycle envelope (process_evidence?); caller must branch on kind first.",
+    );
+  }
   const common = {
     eventId: envelope.event_id,
     runId: envelope.run_id,

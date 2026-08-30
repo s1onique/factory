@@ -47,8 +47,14 @@ import type { RunState } from "../domain/run-state.js";
 import { replay, type ReplayError } from "../domain/replay.js";
 import { err, ok, type Result } from "../domain/result.js";
 import type { InvalidEvidence } from "../domain/failure.js";
-import { envelopeToCommitted, encodeEnvelope } from "./codec.js";
+import {
+  envelopeToCommitted,
+  encodeEnvelope,
+  encodeProcessEvidenceEnvelope,
+} from "./codec.js";
 import type { EventEnvelope } from "./codec.js";
+import type { CommittedProcessEvidence } from "./committed-process-evidence.js";
+import type { PersistedProcessEvidencePayload } from "./codec-types.js";
 import {
   appendCommittedLineToFile,
   internal,
@@ -269,6 +275,27 @@ export class JsonlLedger {
     return this.runExclusive(() => this.doAppend(input));
   }
 
+  /**
+   * Append a process-evidence payload. Same durability contract as
+   * {@link append}: sequence allocated by the ledger, envelope
+   * written and `fsync()`ed before the returned promise resolves.
+   *
+   * Process-evidence records share the same global monotonic
+   * sequence space as lifecycle events (FOUNDATION03 §45).
+   */
+  async appendProcessEvidence(input: {
+    readonly eventId: EventId;
+    readonly runId: RunId;
+    readonly missionId: MissionId;
+    readonly observedAt: number;
+    readonly payload: PersistedProcessEvidencePayload;
+  }): Promise<Result<CommittedProcessEvidence, LedgerError>> {
+    if (!this.initialized) {
+      return err(internal("Ledger is not open."));
+    }
+    return this.runExclusive(() => this.doAppendProcessEvidence(input));
+  }
+
   async readAll(): Promise<Result<ReadonlyArray<EventEnvelope>, LedgerError>> {
     const r = await readAndValidate(this.filePath);
     if (r.ok === false) return err(r.error);
@@ -290,7 +317,13 @@ export class JsonlLedger {
           reason: `Mixed run identities in ledger; expected run=${runId} mission=${missionId}, got run=${env.run_id} mission=${env.mission_id}.`,
         });
       }
-      events.push(envelopeToCommitted(env));
+      // Process-evidence envelopes share the run/mission identity
+      // but are NOT lifecycle events. The lifecycle replay reducer
+      // consumes only the lifecycle subset; recovery code consumes
+      // the process-evidence subset separately.
+      if (env.schema_version === 1 || env.kind === "lifecycle") {
+        events.push(envelopeToCommitted(env));
+      }
     }
     const r2 = replay(runId, missionId, events);
     if (r2.ok === false) return err(r2.error);
@@ -367,6 +400,51 @@ export class JsonlLedger {
     }
 
     const envelope = encodeEnvelope(committed);
+    const line = JSON.stringify(envelope) + "\n";
+
+    const io = await appendCommittedLineToFile(this.filePath, line);
+    if (io.ok === false) {
+      return err(internalFrom(io.error.message));
+    }
+    return ok(committed);
+  }
+
+  private async doAppendProcessEvidence(input: {
+    readonly eventId: EventId;
+    readonly runId: RunId;
+    readonly missionId: MissionId;
+    readonly observedAt: number;
+    readonly payload: PersistedProcessEvidencePayload;
+  }): Promise<Result<CommittedProcessEvidence, LedgerError>> {
+    const cur = await readAndValidate(this.filePath);
+    if (cur.ok === false) return err(cur.error);
+    const nextSeq = cur.value.lastSeq + 1;
+
+    const committed: CommittedProcessEvidence = {
+      eventId: input.eventId,
+      runId: input.runId,
+      missionId: input.missionId,
+      seq: nextSeq,
+      observedAt: input.observedAt,
+      payload: input.payload,
+    };
+
+    // Same fault-hook semantics as lifecycle append: if a pre-append
+    // hook is armed and reports failure, no sequence is consumed
+    // and no committed record is produced.
+    if (
+      this.faultHook !== null &&
+      this.faultHook.kind === "beforeAppendWrite"
+    ) {
+      const hook = this.faultHook;
+      this.faultHook = null;
+      const response = hook.respond(ok(undefined));
+      if (response.ok === false) {
+        return err(response.error);
+      }
+    }
+
+    const envelope = encodeProcessEvidenceEnvelope(committed);
     const line = JSON.stringify(envelope) + "\n";
 
     const io = await appendCommittedLineToFile(this.filePath, line);

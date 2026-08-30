@@ -4,15 +4,28 @@
  * All branded identifiers were validated by the codec; the inner
  * `attempt_id` (when present) was also a runtime-validated string by
  * the inner decoder. The lift is mechanical.
+ *
+ * FOUNDATION03: process-evidence envelopes are NOT lifecycle
+ * envelopes. Use {@link envelopeToCommittedProcessEvidence} for those.
  */
 
 import type { EventMetadata, CommittedRunEvent } from "../domain/run-event.js";
-import { envelopeToRunEvent } from "./codec.js";
+import {
+  envelopeToRunEvent,
+  isLifecycleEnvelope,
+  isProcessEvidenceEnvelope,
+} from "./codec.js";
 import type { EventEnvelope } from "./codec.js";
+import type { CommittedProcessEvidence } from "./committed-process-evidence.js";
 
 export function envelopeToCommitted(
   envelope: EventEnvelope,
 ): CommittedRunEvent {
+  if (!isLifecycleEnvelope(envelope)) {
+    throw new Error(
+      "envelopeToCommitted: not a lifecycle envelope; use envelopeToCommittedProcessEvidence for process_evidence.",
+    );
+  }
   const inner = envelopeToRunEvent(envelope);
   const base: EventMetadata = {
     eventId: envelope.event_id,
@@ -76,4 +89,30 @@ export function envelopeToCommitted(
         observation: inner.observation,
       };
   }
+}
+
+/**
+ * Lift a v2 process_evidence envelope into a
+ * {@link CommittedProcessEvidence}.
+ *
+ * The envelope has already been validated by the codec; the inner
+ * process_evidence payload is guaranteed to satisfy
+ * {@link PersistedProcessEvidencePayload}.
+ */
+export function envelopeToCommittedProcessEvidence(
+  envelope: EventEnvelope,
+): CommittedProcessEvidence {
+  if (!isProcessEvidenceEnvelope(envelope)) {
+    throw new Error(
+      "envelopeToCommittedProcessEvidence: not a process_evidence envelope.",
+    );
+  }
+  return {
+    eventId: envelope.event_id,
+    runId: envelope.run_id,
+    missionId: envelope.mission_id,
+    seq: envelope.sequence,
+    observedAt: envelope.observed_at,
+    payload: envelope.process_evidence,
+  };
 }
