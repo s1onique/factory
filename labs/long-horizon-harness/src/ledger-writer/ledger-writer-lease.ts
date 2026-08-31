@@ -46,11 +46,30 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { randomBytes } from "node:crypto";
 
 import type { LedgerWriterInstanceId } from "./ledger-writer-types.js";
+import {
+  checkLeaseDirExists,
+  verifyLeaseToken,
+  rmLeaseDir,
+} from "./ledger-writer-lease-io.js";
+
+/**
+ * Generate a fresh, unguessable 32-byte hex token. Used
+ * to bind a LeaseHandle to its specific acquisition.
+ */
+export function generateLeaseToken(): string {
+  return randomBytes(32).toString("hex");
+}
 
 export const LEDGER_WRITER_LEASE_DIRNAME = "ledger-writer-owner";
 export const LEDGER_WRITER_LEASE_FILENAME = "owner.json";
+// B0-CORR04 §23: a per-acquisition random token written
+// alongside owner.json. The LeaseHandle carries the same
+// token and verifies it before rm. A stale handle cannot
+// delete a replacement lease.
+export const LEDGER_WRITER_LEASE_TOKEN_FILENAME = "token";
 
 export function leaseDir(runDir: string): string {
   return path.join(runDir, LEDGER_WRITER_LEASE_DIRNAME);
@@ -58,6 +77,10 @@ export function leaseDir(runDir: string): string {
 
 export function leasePath(runDir: string): string {
   return path.join(leaseDir(runDir), LEDGER_WRITER_LEASE_FILENAME);
+}
+
+export function leaseTokenPath(runDir: string): string {
+  return path.join(leaseDir(runDir), LEDGER_WRITER_LEASE_TOKEN_FILENAME);
 }
 
 export type LeaseMetadata = {
@@ -94,63 +117,50 @@ export class LeaseHandle {
   // @ts-expect-error - field retained for diagnostics
   private readonly instanceId: LedgerWriterInstanceId;
   private readonly runDir: string;
-  constructor(runDir: string, instanceId: LedgerWriterInstanceId) {
+  // B0-CORR04 §23: per-acquisition token. Release verifies
+  // the on-disk token matches before rm. ABA-safe.
+  private readonly token: string;
+  constructor(
+    runDir: string,
+    instanceId: LedgerWriterInstanceId,
+    token: string,
+  ) {
     this.runDir = runDir;
     this.instanceId = instanceId;
+    this.token = token;
   }
 
   /**
    * Release the lease via the in-memory capability, NOT via
-   * the mutable owner.json metadata. The handle is the
-   * authoritative release authority (B0-CORR03 §25).
+   * the mutable owner.json metadata.
    *
-   * If the on-disk metadata was corrupted while the lease
-   * was held (the directory is still the authority, but
-   * the descriptive JSON is unreadable), the capability
-   * handle is still valid. We therefore release directly by
-   * removing the directory; we do NOT consult owner.json.
+   * B0-CORR04 §23: the on-disk token MUST match the
+   * in-memory token. If the operator/test removed the lease
+   * and a fresh lease at the same pathname now carries a
+   * different token, the capability is stale and release
+   * MUST fail closed (lease_replaced).
+   *
+   * The I/O is delegated to ledger-writer-lease-io.ts to
+   * keep this file under the 400-LOC discipline.
    */
   async release(): Promise<LeaseReleaseResult> {
     if (this.released) {
       return { ok: false, error: { kind: "lease_not_held" } };
     }
     this.released = true;
-    const dir = leaseDir(this.runDir);
-    // Confirm the lease directory still exists. If it does
-    // not, the lease was already gone (e.g. an external
-    // operator removed it). Treat as lease_not_held.
-    try {
-      const st = await fs.lstat(dir);
-      if (!st.isDirectory()) {
-        return { ok: false, error: { kind: "lease_not_held" } };
-      }
-    } catch (e: unknown) {
-      const code = (e as { code?: string }).code;
-      if (code === "ENOENT") {
-        return { ok: false, error: { kind: "lease_not_held" } };
-      }
-      return {
-        ok: false,
-        error: {
-          kind: "io_error",
-          message:
-            e instanceof Error ? e.message : String(e),
-        },
-      };
+    const dirCheck = await checkLeaseDirExists(this.runDir);
+    if (!dirCheck.ok) {
+      return { ok: false, error: dirCheck.error };
     }
-    try {
-      await fs.rm(dir, { recursive: true, force: true });
-      return { ok: true };
-    } catch (e: unknown) {
-      return {
-        ok: false,
-        error: {
-          kind: "io_error",
-          message:
-            e instanceof Error ? e.message : String(e),
-        },
-      };
+    const tokenCheck = await verifyLeaseToken(this.runDir, this.token);
+    if (!tokenCheck.ok) {
+      return { ok: false, error: tokenCheck.error };
     }
+    const rmResult = await rmLeaseDir(this.runDir);
+    if (!rmResult.ok) {
+      return { ok: false, error: rmResult.error };
+    }
+    return { ok: true };
   }
 
   isReleased(): boolean {
@@ -163,6 +173,7 @@ export type LeaseReleaseResult =
   | { readonly ok: false; readonly error:
       | { readonly kind: "lease_not_held" }
       | { readonly kind: "lease_held_by_other"; readonly existing: LeaseMetadata | null }
+      | { readonly kind: "lease_replaced"; readonly message: string }
       | { readonly kind: "io_error"; readonly message: string }
     };
 
@@ -229,7 +240,35 @@ export async function acquireLedgerWriterLease(args: {
       },
     };
   }
-  return { ok: true, leaseDir: dir, handle: new LeaseHandle(args.runDir, args.instanceId) };
+  // B0-CORR04 §23: write a fresh per-acquisition token.
+  // The LeaseHandle carries the same token; release
+  // verifies it before rm.
+  const token = generateLeaseToken();
+  try {
+    await fs.writeFile(leaseTokenPath(args.runDir), token, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (e: unknown) {
+    // Roll back the directory so the next caller can try again.
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    return {
+      ok: false,
+      error: {
+        kind: "io_error",
+        message: `cannot write lease token: ${e instanceof Error ? e.message : String(e)}`,
+      },
+    };
+  }
+  return {
+    ok: true,
+    leaseDir: dir,
+    handle: new LeaseHandle(args.runDir, args.instanceId, token),
+  };
 }
 
 /**

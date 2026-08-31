@@ -62,11 +62,11 @@ import { persistIndex } from "./ledger-writer-persistence.js";
  *             ↓
  *     send ACK
  *
- * B0-CORR02 §5: the hook MUST fire after fsync and before
- * any sidecar write or client ACK. Returning `crash` makes
- * the writer child exit abruptly (process.exit(137)) so
- * the test can prove the cut is at the asserted boundary,
- * not at a later point.
+ * B0-CORR02 §5 + B0-CORR04 §26: the hook MUST fire after
+ * fsync and before any sidecar write or client ACK.
+ * Returning `crash` triggers an abrupt process exit so the
+ * test can prove the cut is at the asserted boundary, not
+ * at a later point.
  *
  * Production code MUST NOT set this. The child main never
  * sets it.
@@ -219,10 +219,20 @@ export async function handleRequest(
     if (state.crashCutHook !== null) {
       const verdict = state.crashCutHook.onCommit();
       if (verdict === "crash") {
-        // Abrupt exit. Process.exit(137) = SIGKILL-equivalent
-        // for tests. We do NOT release the lease or
-        // persist the sidecar — the test asserts that the
-        // recovery path can rebuild from the ledger alone.
+        // B0-CORR04 §26: process.exit(137) is an
+        // `abrupt_exit_cut`, NOT a real SIGKILL. Node's
+        // process.exit() triggers 'exit' listeners and
+        // exits synchronously with the given code; SIGKILL
+        // cannot have a listener and unconditionally
+        // terminates the process. For the test harness this
+        // is sufficient to prove that no commitId mapping
+        // can resurrect from the sidecar (the sidecar is a
+        // cache; the ledger is authoritative).
+        //
+        // A strict SIGKILL-equivalent cut is documented in
+        // B0-CORR04 §27 and is exercised on unrestricted
+        // POSIX hosts separately. The current cut proves
+        // the persistence boundary, not signal semantics.
         process.exit(137);
       }
     }

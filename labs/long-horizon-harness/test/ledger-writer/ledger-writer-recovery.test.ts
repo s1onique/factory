@@ -71,6 +71,103 @@ function b0Line(seq: number, commitId: string, contentHash: string): string {
   );
 }
 
+function malformedLifecycleLine(seq: number): string {
+  // Syntactically valid JSON, valid sequence, but the
+  // lifecycle event type is unknown — decoder rejects it.
+  return (
+    JSON.stringify({
+      schema_version: 1,
+      event_id: `evt-${seq}`,
+      run_id: "r",
+      mission_id: "m",
+      sequence: seq,
+      observed_at: 0,
+      event: { type: "totally_made_up_event" },
+    }) + "\n"
+  );
+}
+
+function malformedProcessLine(seq: number): string {
+  return (
+    JSON.stringify({
+      schema_version: 2,
+      event_id: `evt-${seq}`,
+      run_id: "r",
+      mission_id: "m",
+      sequence: seq,
+      observed_at: 0,
+      kind: "process_evidence",
+      process_evidence: { kind: "nonsense_kind" },
+    }) + "\n"
+  );
+}
+
+function unknownFieldsLine(seq: number): string {
+  // Sequence-valid but no event/process_evidence discriminator
+  // at all — the authoritative decoder must reject this.
+  return (
+    JSON.stringify({
+      schema_version: 1,
+      event_id: `evt-${seq}`,
+      run_id: "r",
+      mission_id: "m",
+      sequence: seq,
+      observed_at: 0,
+      foo: "bar",
+    }) + "\n"
+  );
+}
+
+test("REC-SNAP03 unknown field envelope → invalid_evidence (B0-CORR04 §10)", async () => {
+  const tmp = await mkTmp();
+  try {
+    let ledger = "";
+    ledger += unknownFieldsLine(1);
+    ledger += unknownFieldsLine(2);
+    await fs.writeFile(path.join(tmp, LEDGER_FILENAME), ledger);
+    const r = await recoverLedgerWriterState(tmp);
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.error.kind, "invalid_evidence");
+  } finally {
+    await rmTmp(tmp);
+  }
+});
+
+test("REC-SNAP04 malformed lifecycle payload → invalid_evidence", async () => {
+  const tmp = await mkTmp();
+  try {
+    let ledger = "";
+    ledger += legacyLine(1, "run_created");
+    ledger += malformedLifecycleLine(2);
+    ledger += legacyLine(3, "run_created");
+    await fs.writeFile(path.join(tmp, LEDGER_FILENAME), ledger);
+    const r = await recoverLedgerWriterState(tmp);
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.error.kind, "invalid_evidence");
+  } finally {
+    await rmTmp(tmp);
+  }
+});
+
+test("REC-SNAP05 malformed process evidence payload → invalid_evidence", async () => {
+  const tmp = await mkTmp();
+  try {
+    let ledger = "";
+    ledger += legacyLine(1, "run_created");
+    ledger += malformedProcessLine(2);
+    ledger += legacyLine(3, "run_created");
+    await fs.writeFile(path.join(tmp, LEDGER_FILENAME), ledger);
+    const r = await recoverLedgerWriterState(tmp);
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.error.kind, "invalid_evidence");
+  } finally {
+    await rmTmp(tmp);
+  }
+});
+
 test("RECSEQ01 legacy-only ledger seq 1..10 → maxSequence=10, byCommitId={}", async () => {
   const tmp = await mkTmp();
   try {
@@ -534,3 +631,4 @@ test("REC-SNAP02 parse anomaly in authoritative history fails closed", async () 
     await rmTmp(tmp);
   }
 });
+

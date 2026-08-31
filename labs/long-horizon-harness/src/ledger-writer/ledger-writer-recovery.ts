@@ -48,6 +48,7 @@ import * as path from "node:path";
 
 import { LEDGER_FILENAME } from "../evidence/jsonl-ledger.js";
 import { type LedgerError } from "../evidence/ledger-read-validate.js";
+import { validateLedgerSnapshot } from "../evidence/ledger-validate-snapshot.js";
 import type { CommitId, DedupEntry } from "./ledger-writer-types.js";
 
 /**
@@ -166,7 +167,11 @@ export async function recoverLedgerWriterState(
 
   // Single read of the authoritative history. We read the
   // file once into memory and derive BOTH projections from
-  // this single in-memory buffer (B0-CORR03 §7).
+  // this single in-memory buffer (B0-CORR03 §7, B0-CORR04 §9).
+  //
+  // FOUNDATION01 authoritative envelope decode + sequence
+  // validation is reused via validateLedgerSnapshot; we
+  // do NOT introduce a separate validation policy.
   let raw: string;
   try {
     raw = await fs.readFile(ledgerPath, "utf8");
@@ -189,90 +194,22 @@ export async function recoverLedgerWriterState(
     };
   }
 
-  // Torn-tail detection (mirrors readAndValidate).
-  if (raw.length > 0 && !raw.endsWith("\n")) {
-    return {
-      ok: false,
-      error: {
-        kind: "invalid_evidence",
-        reason:
-          "Ledger ends with a non-empty unterminated suffix; open must be called to recover.",
-      },
-    };
+  const snapshotResult = validateLedgerSnapshot(raw);
+  if (snapshotResult.ok === false) {
+    return { ok: false, error: snapshotResult.error };
   }
+  const snapshot = snapshotResult.value;
 
-  // Single-snapshot projection pass. We walk the lines
-  // ONCE; for each line we either fail closed (B0-CORR03
-  // §10: parse anomalies are `invalid_evidence`, not
-  // omissions) or we extract both the sequence and the B0
-  // side-channel from the SAME line.
+  // B0 side-channel contribution from the same validated
+  // records. We use the typed envelopes (envelope.sequence)
+  // for maxSequence — no second schema.
   const byCommitId: Record<string, DedupEntry> = {};
-  let maxSequence = 0;
-  let scannedLines = 0;
-  const lines = raw.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line === undefined || line.length === 0) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (e: unknown) {
-      return {
-        ok: false,
-        error: {
-          kind: "invalid_evidence",
-          reason: `malformed JSON at line ${i + 1}: ${
-            e instanceof Error ? e.message : String(e)
-          }`,
-        },
-      };
-    }
-    if (typeof parsed !== "object" || parsed === null) {
-      return {
-        ok: false,
-        error: {
-          kind: "invalid_evidence",
-          reason: `non-object record at line ${i + 1}`,
-        },
-      };
-    }
-    const o = parsed as Record<string, unknown>;
-    const seqRaw = o["sequence"];
-    if (
-      typeof seqRaw !== "number" ||
-      !Number.isInteger(seqRaw) ||
-      seqRaw < 1
-    ) {
-      return {
-        ok: false,
-        error: {
-          kind: "invalid_evidence",
-          reason: `invalid sequence at line ${i + 1}: ${String(seqRaw)}`,
-        },
-      };
-    }
-    const seq = seqRaw;
-    const expectedSeq = scannedLines + 1;
-    if (seq !== expectedSeq) {
-      return {
-        ok: false,
-        error: {
-          kind: "invalid_evidence",
-          reason:
-            `Sequence gap at line ${i + 1}: got ${seq}, expected ${expectedSeq}.`,
-        },
-      };
-    }
-    scannedLines++;
-    maxSequence = seq;
-
-    // B0 side-channel contribution. The side-channel is
-    // B0+; legacy lines (FOUNDATION01/02/03) contribute
-    // only to maxSequence.
-    const side = decodeB0SideChannel(o);
+  for (const rec of snapshot.rawRecords) {
+    const side = decodeB0SideChannel(rec.parsed);
     if (side.hasCommitMapping) {
       const key = side.commitId as unknown as string;
       const existing = byCommitId[key];
+      const seq = rec.parsed["sequence"] as number;
       if (existing === undefined || seq > existing.sequence) {
         byCommitId[key] = {
           sequence: seq,
@@ -284,8 +221,8 @@ export async function recoverLedgerWriterState(
 
   return {
     ok: true,
-    state: { maxSequence, byCommitId },
-    scannedLines,
+    state: { maxSequence: snapshot.lastSeq, byCommitId },
+    scannedLines: snapshot.rawRecords.length,
   };
 }
 

@@ -1,14 +1,26 @@
 /**
- * FOUNDATION04 — B0-CORR03 — LedgerWriter response decoder.
+ * FOUNDATION04 — B0-CORR04 — LedgerWriter response decoder.
  *
- * Single source of truth for runtime-validating a
- * LedgerWriterResponse value received over UDS.
+ * B0-CORR04 §14: every response variant MUST validate
+ *   protocolVersion === LEDGER_WRITER_PROTOCOL_VERSION
+ * Missing, wrong type, or wrong value → reject. Never
+ * fabricate protocolVersion 2 from malformed input.
+ *
+ * B0-CORR04 §17: error responses are dispatched against an
+ * enumerated set of valid error kinds. Unknown error kind
+ * rejects the whole response.
+ *
+ * Doctrine (B0-CORR04):
+ *   **Decoder non-fabrication law:** a runtime decoder
+ *   validates protocol facts; it must never repair or
+ *   invent them.
  */
 
 import { ok, err, type Result } from "../domain/result.js";
 import type { InvalidEvidence } from "../domain/failure.js";
 import { IDENTIFIER_GRAMMAR } from "../domain/ids.js";
 import type { LedgerWriterResponse } from "./ledger-writer-protocol.js";
+import { LEDGER_WRITER_PROTOCOL_VERSION } from "./ledger-writer-protocol.js";
 
 export type ResponseDecodeError =
   | InvalidEvidence
@@ -62,6 +74,80 @@ function validateNonNegativeInt(value: unknown, field: string):
   return ok(value);
 }
 
+function validateProtocolVersion(
+  value: unknown,
+  kind: string,
+):
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: InvalidEvidence } {
+  if (value === undefined || value === null) {
+    return err({
+      kind: "invalid_evidence",
+      reason: `${kind}.protocolVersion is required`,
+    });
+  }
+  if (value !== LEDGER_WRITER_PROTOCOL_VERSION) {
+    return err({
+      kind: "invalid_evidence",
+      reason: `${kind}.protocolVersion=${String(value)} does not match ${LEDGER_WRITER_PROTOCOL_VERSION}`,
+    });
+  }
+  return ok(undefined);
+}
+
+/**
+ * B0-CORR04 §17: enumerate the protocol error ADT.
+ * Unknown error kind rejects the whole response.
+ */
+const VALID_ERROR_KINDS = new Set([
+  "invalid_envelope",
+  "conflicting_commit",
+  "content_hash_mismatch",
+  "append_failed",
+  "writer_busy",
+  "protocol_version_mismatch",
+  "malformed_message",
+]);
+
+function validateErrorObject(
+  value: unknown,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: InvalidEvidence } {
+  const invalid = (reason: string): { readonly ok: false; readonly error: InvalidEvidence } => ({
+    ok: false,
+    error: { kind: "invalid_evidence", reason },
+  });
+  if (typeof value !== "object" || value === null) {
+    return invalid("error envelope must contain an error object");
+  }
+  const e = value as Record<string, unknown>;
+  const ek = e["kind"];
+  if (typeof ek !== "string") {
+    return invalid("error.kind must be a string");
+  }
+  if (!VALID_ERROR_KINDS.has(ek)) {
+    return invalid(`unknown error kind ${ek}`);
+  }
+  if (ek === "protocol_version_mismatch") {
+    if (typeof e["observed"] !== "number" || !Number.isInteger(e["observed"])) {
+      return invalid("protocol_version_mismatch.observed must be an integer");
+    }
+    return ok({
+      kind: "protocol_version_mismatch",
+      observed: e["observed"],
+    });
+  }
+  const msg = e["message"] ?? e["reason"];
+  if (typeof msg !== "string") {
+    return invalid(`error.${ek} requires a string message/reason field`);
+  }
+  return ok({
+    kind: ek,
+    ...(ek === "invalid_envelope"
+      ? { reason: msg }
+      : { message: msg }),
+  });
+}
+
 export function decodeLedgerWriterResponse(
   value: unknown,
 ): Result<LedgerWriterResponse, ResponseDecodeError> {
@@ -79,6 +165,8 @@ export function decodeLedgerWriterResponse(
       reason: "response.kind must be a string",
     });
   }
+  const pv = validateProtocolVersion(o["protocolVersion"], kind);
+  if (!pv.ok) return err(pv.error);
   switch (kind) {
     case "appended": {
       const seq = validatePositiveInt(o["sequence"], "appended.sequence");
@@ -89,7 +177,7 @@ export function decodeLedgerWriterResponse(
       if (!ch.ok) return err(ch.error);
       return ok({
         kind: "appended",
-        protocolVersion: 2,
+        protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
         commitId: cid.value as LedgerWriterResponse extends { kind: "appended"; commitId: infer C } ? C : never,
         sequence: seq.value,
         contentHash: ch.value,
@@ -104,36 +192,19 @@ export function decodeLedgerWriterResponse(
       if (!ch.ok) return err(ch.error);
       return ok({
         kind: "replay",
-        protocolVersion: 2,
+        protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
         commitId: cid.value as LedgerWriterResponse extends { kind: "replay"; commitId: infer C } ? C : never,
         sequence: seq.value,
         contentHash: ch.value,
       });
     }
     case "error": {
-      const errorObj = o["error"];
-      if (typeof errorObj !== "object" || errorObj === null) {
-        return err({
-          kind: "invalid_evidence",
-          reason: "error envelope must contain an error object",
-        });
-      }
-      const e = errorObj as Record<string, unknown>;
-      const ek = e["kind"];
-      if (typeof ek !== "string") {
-        return err({
-          kind: "invalid_evidence",
-          reason: "error.kind must be a string",
-        });
-      }
-      const msg = e["message"];
+      const errorRes = validateErrorObject(o["error"]);
+      if (!errorRes.ok) return err(errorRes.error);
       return ok({
         kind: "error",
-        protocolVersion: 2,
-        error: {
-          kind: ek as LedgerWriterResponse extends { kind: "error"; error: { kind: infer K } } ? K : never,
-          ...(typeof msg === "string" ? { message: msg } : {}),
-        } as LedgerWriterResponse extends { kind: "error"; error: infer E } ? E : never,
+        protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
+        error: errorRes.value as LedgerWriterResponse extends { kind: "error"; error: infer E } ? E : never,
       });
     }
     case "pong": {
@@ -143,7 +214,7 @@ export function decodeLedgerWriterResponse(
       if (!ms.ok) return err(ms.error);
       return ok({
         kind: "pong",
-        protocolVersion: 2,
+        protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
         instanceId: iid.value as LedgerWriterResponse extends { kind: "pong"; instanceId: infer I } ? I : never,
         maxSequence: ms.value,
       });
@@ -168,7 +239,7 @@ export function decodeLedgerWriterResponse(
       if (!ms.ok) return err(ms.error);
       return ok({
         kind: "self",
-        protocolVersion: 2,
+        protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
         instanceId: iid.value as LedgerWriterResponse extends { kind: "self"; instanceId: infer I } ? I : never,
         socketPath: sp,
         runId: rid.value,

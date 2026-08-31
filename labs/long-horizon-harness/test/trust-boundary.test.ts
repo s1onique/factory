@@ -89,6 +89,7 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
   const allowedFiles = new Set([
     "src/evidence/codec-decode-envelope.ts",
     "src/evidence/ledger-internals.ts",
+    "src/evidence/ledger-validate-snapshot.ts",
     "src/evidence/jsonl-ledger.ts",
     "src/witness/witness-codec-decode.ts",
     // FOUNDATION04 CORRECTION02: LedgerWriter is its own

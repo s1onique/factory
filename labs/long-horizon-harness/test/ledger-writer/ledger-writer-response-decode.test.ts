@@ -112,3 +112,67 @@ test("RESP06 valid full matrix accepted", () => {
   });
   assert.equal(r5.ok, true);
 });
+
+test("RESP07 wrong protocolVersion value reject (B0-CORR04 §14)", () => {
+  const r = decodeLedgerWriterResponse({
+    kind: "pong",
+    protocolVersion: 999,
+    instanceId: "lw-1",
+    maxSequence: 0,
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  if (r.error.kind === "invalid_evidence") {
+    assert.match(r.error.reason, /protocolVersion=999/);
+  }
+});
+
+test("RESP08 missing protocolVersion reject", () => {
+  const r = decodeLedgerWriterResponse({
+    kind: "pong",
+    instanceId: "lw-1",
+    maxSequence: 0,
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  if (r.error.kind === "invalid_evidence") {
+    assert.match(r.error.reason, /protocolVersion is required/);
+  }
+});
+
+test("RESP09 unknown error kind reject (B0-CORR04 §17)", () => {
+  const r = decodeLedgerWriterResponse({
+    kind: "error",
+    protocolVersion: 2,
+    error: { kind: "launch_nuclear_missiles" },
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  if (r.error.kind === "invalid_evidence") {
+    assert.match(r.error.reason, /unknown error kind launch_nuclear_missiles/);
+  }
+});
+
+test("RESP10 valid error matrix round-trip", () => {
+  const kinds = [
+    { kind: "invalid_envelope", reason: "x" },
+    { kind: "conflicting_commit", message: "x" },
+    { kind: "content_hash_mismatch", message: "x" },
+    { kind: "append_failed", message: "x" },
+    { kind: "writer_busy", message: "x" },
+    { kind: "protocol_version_mismatch", observed: 1 },
+    { kind: "malformed_message", message: "x" },
+  ];
+  for (const k of kinds) {
+    const r = decodeLedgerWriterResponse({
+      kind: "error",
+      protocolVersion: 2,
+      error: k,
+    });
+    assert.equal(
+      r.ok,
+      true,
+      `error kind=${(k as { kind: string }).kind} failed`,
+    );
+  }
+});

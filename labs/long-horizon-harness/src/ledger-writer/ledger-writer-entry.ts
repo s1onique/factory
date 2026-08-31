@@ -72,47 +72,47 @@ main().catch((e: unknown) => {
 });
 
 /**
- * B0-CORR03 §1..2: ordered shutdown. We DO NOT release the
- * lease until the server has actually closed (no more
- * connections, no more in-flight handlers). Repeated signals
- * are coalesced.
+ * B0-CORR04: ordered, bounded shutdown. The lease is NEVER
+ * released if any phase fails. Repeated signals are
+ * coalesced.
+ *
+ * The state machine lives in ledger-writer-shutdown.ts.
  */
 async function shutdownGracefully(handle: {
   readonly server: Server;
   readonly leaseHandle: { readonly release: () => Promise<unknown> };
   readonly waitForInFlight: () => Promise<void>;
 }): Promise<void> {
-  // Step a: stop accepting new connections. server.close()
-  // is asynchronous — existing connections remain open until
-  // they finish.
-  const closePromise = new Promise<void>((resolve, reject) => {
-    handle.server.close((err) => {
-      if (err !== undefined && err !== null) {
-        reject(err);
-      } else {
-        resolve();
-      }
-    });
+  const { shutdownLedgerWriter, asShutdownServerPort } = await import(
+    "./ledger-writer-shutdown.js"
+  );
+  const releaseAdapter = async (): Promise<{ readonly ok: boolean }> => {
+    const r = await handle.leaseHandle.release();
+    if (
+      typeof r === "object" &&
+      r !== null &&
+      "ok" in r &&
+      typeof (r as { ok: unknown }).ok === "boolean"
+    ) {
+      return { ok: (r as { ok: boolean }).ok };
+    }
+    return { ok: false };
+  };
+  const result = await shutdownLedgerWriter({
+    server: asShutdownServerPort(handle.server),
+    waitForInFlight: handle.waitForInFlight,
+    leaseHandle: { release: releaseAdapter },
+    drainDeadlineMs: SHUTDOWN_DEADLINE_MS,
+    closeDeadlineMs: SHUTDOWN_DEADLINE_MS,
+    leaseReleaseDeadlineMs: SHUTDOWN_DEADLINE_MS,
   });
-  // Step b: wait for in-flight handlers to settle.
-  await Promise.race([
-    handle.waitForInFlight(),
-    new Promise<void>((r) => setTimeout(r, SHUTDOWN_DEADLINE_MS)),
-  ]);
-  try {
-    await closePromise;
-  } catch {
-    // server.close() failed; treat as best-effort.
+  if (result.ok) {
+    process.exit(0);
   }
-  // Step c+d: release the lease and exit.
-  const releaseResult = await handle.leaseHandle.release();
-  if (
-    typeof releaseResult === "object" &&
-    releaseResult !== null &&
-    "ok" in releaseResult &&
-    releaseResult.ok === false
-  ) {
-    process.exit(1);
-  }
-  process.exit(0);
+  // Fail closed: retain the lease and exit non-zero. An
+  // external SIGKILL is required to remove the writer.
+  process.stderr.write(
+    `ledger-writer: shutdown failed in phase=${result.phase}: ${result.reason}\n`,
+  );
+  process.exit(1);
 }
