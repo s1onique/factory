@@ -31,7 +31,14 @@ is part of the FOUNDATION01 evidence ledger surface:
 WAIVED_FILE=src/evidence/jsonl-ledger.ts
 WAIVED_CONTENT_SHA256=6d58a4c95ebc7a029d643980b2190db234f9556437f0667caf01acb311b31cf4
 WAIVER_ESTABLISHED_AT=53124dd733f1fb25c1e3aa2c6c2144d8c766b32a
-WAIVER_REINFORCED_AT=d13b49e
+WAIVER_REINFORCED_AT=<sha of CORRECTION11 commit — see git log>
+
+> Note: the SHA of the commit that introduces/updates this
+> block IS itself content of this block, which creates a
+> chicken-and-egg. The authoritative SHA is the git-log
+> `CORRECTION11:` commit immediately following the
+> `CORRECTION10:` commit on `main`. The mechanical SHA-256
+> gate below is the actual lock; this value is informational.
 ```
 
 ### Mechanical verification
