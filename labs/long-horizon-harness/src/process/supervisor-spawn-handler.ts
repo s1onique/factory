@@ -41,12 +41,23 @@ export function wireSpawnOwnershipHandler(args: {
     const pgid = args.child.pgid !== null && args.child.pgid !== undefined
       ? args.child.pgid
       : (pid !== null && pid !== undefined ? pid : null);
-    if (pid === null || pid === undefined) {
+    // CORRECTION11: Node's "spawn" event means creation
+    // succeeded. A missing pid/pgid is a PORT-CONTRACT
+    // violation, not a spawn failure. Resolve
+    // `post_spawn_identity_unavailable` (fail-closed) and
+    // return so the catch path stays idle.
+    if (
+      pid === null || pid === undefined ||
+      pgid === null || pgid === undefined
+    ) {
       args.resolveSpawnResolution({
-        kind: "spawn_failed",
+        kind: "post_spawn_identity_unavailable",
         failure: {
           kind: "internal_process_failure",
-          message: "spawn event fired but pid is null",
+          message:
+            `Node "spawn" event fired but identity is unavailable; ` +
+            `pid=${pid === null ? "null" : pid === undefined ? "undefined" : pid} ` +
+            `pgid=${pgid === null ? "null" : pgid === undefined ? "undefined" : pgid}`,
         },
       });
       return;
@@ -90,31 +101,36 @@ export function wireSpawnOwnershipHandler(args: {
   };
   args.child.on("spawn", () => {
     onSpawn().catch((e: unknown) => {
-      // CORRECTION10 §10-§19: by the time `spawn` fires,
-      // Node has already created the child. We MUST NOT
-      // resolve as `spawn_failed` (semantically "creation
-      // never happened"). The OS process exists; the current
-      // supervisor owns it and must run bounded cleanup.
-      //
-      // Fail-closed via `post_spawn_internal_failure`:
-      //   - carries the real pid/pgid (read AFTER spawn)
-      //   - preserves the typed cause
-      //   - is routed through cleanupPath by runLifecycle
+      // CORRECTION11: by the time `spawn` fires, Node has
+      // already created the child. We MUST NEVER resolve as
+      // `spawn_failed` (creation did happen). The catch is
+      // reached only when the async body REJECTED after the
+      // identity checks succeeded (so pid and pgid are
+      // already known). Resolve `post_spawn_internal_failure`
+      // so runLifecycle routes through cleanupPath.
       const message =
         e instanceof Error ? e.message : String(e);
       const pid = args.child.pid;
       const pgid = args.child.pgid !== null && args.child.pgid !== undefined
         ? args.child.pgid
         : (pid !== null && pid !== undefined ? pid : null);
-      if (pid === null || pid === undefined || pgid === null || pgid === undefined) {
-        // No real pid/pgid available → we genuinely cannot
-        // claim ownership; this is the only legal path back
-        // to `spawn_failed` post-spawn.
+      if (
+        pid === null || pid === undefined ||
+        pgid === null || pgid === undefined
+      ) {
+        // The async body rejected AFTER having observed
+        // `spawn`, but identity is still unavailable at
+        // catch time. This is the same port-contract
+        // violation: post_spawn_identity_unavailable.
         args.resolveSpawnResolution({
-          kind: "spawn_failed",
+          kind: "post_spawn_identity_unavailable",
           failure: {
             kind: "internal_process_failure",
-            message: `async spawn-handler rejected without pid/pgid: ${message}`,
+            message:
+              `async spawn-handler rejected after Node "spawn"; ` +
+              `pid=${pid === null ? "null" : pid === undefined ? "undefined" : pid} ` +
+              `pgid=${pgid === null ? "null" : pgid === undefined ? "undefined" : pgid}; ` +
+              `cause=${message}`,
           },
         });
         return;

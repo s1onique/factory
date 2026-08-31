@@ -6,13 +6,41 @@
 // fork-mode IPC server (named pipe on macOS) which some
 // restricted sandboxes cannot bind. Using --import tsx
 // in-process avoids that IPC layer entirely.
+//
+// CORRECTION11: enforce the FOUNDATION01 frozen inherited
+// file-size waiver mechanically via SHA-256. The waived file
+// MUST NOT change unless the waiver is explicitly revised.
 import { spawn } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
+
+// CORRECTION11 §4: mechanical anchor for the FOUNDATION01
+// frozen inherited file-size waiver. If the hash drifts,
+// the run fails discipline BEFORE any test runs.
+const WAIVED_FILE = "src/evidence/jsonl-ledger.ts";
+const WAIVED_SHA256 =
+  "6d58a4c95ebc7a029d643980b2190db234f9556437f0667caf01acb311b31cf4";
+const waivedPath = path.join(root, WAIVED_FILE);
+const actual = createHash("sha256")
+  .update(readFileSync(waivedPath))
+  .digest("hex");
+if (actual !== WAIVED_SHA256) {
+  process.stderr.write(
+    `[discipline] ${WAIVED_FILE} sha256 drifted.\n` +
+    `  expected: ${WAIVED_SHA256}\n` +
+    `  actual:   ${actual}\n` +
+    `  The FOUNDATION01 frozen inherited file-size waiver is ` +
+    `violated. Re-anchor the waiver in docs/SOURCE_SIZE_DISCIPLINE.md ` +
+    `with the new SHA-256 and the reviewed commit.\n`,
+  );
+  process.exit(1);
+}
+
 const testDir = path.join(root, "test");
 
 const files = [];

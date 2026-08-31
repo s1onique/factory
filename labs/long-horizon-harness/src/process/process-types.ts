@@ -123,6 +123,16 @@ export type ProcessOutcome =
  *     bounded cleanup. Distinct from
  *     ownership_persistence_failed because the cause is
  *     internal machinery, not ledger failure.
+ *   - post_spawn_identity_unavailable(failure) — Node "spawn"
+ *     fired (creation is known successful) but pid/pgid
+ *     were NOT observable. The supervisor MUST NOT claim
+ *     spawn_failed (creation did happen); it MUST NOT
+ *     claim absence (a process may exist whose identity
+ *     we cannot establish). This is an internal-process
+ *     invariant failure surfaced as a typed cause; the
+ *     lifecycle cannot prove group-level cleanup without a
+ *     pgid and so MUST fail closed without fabricating
+ *     absence. CORRECTION11 introduced this kind.
  */
 export type SpawnResolution =
   | { readonly kind: "spawned"; readonly pid: number; readonly pgid: number }
@@ -137,6 +147,10 @@ export type SpawnResolution =
       readonly kind: "post_spawn_internal_failure";
       readonly pid: number;
       readonly pgid: number;
+      readonly failure: ProcessFailure;
+    }
+  | {
+      readonly kind: "post_spawn_identity_unavailable";
       readonly failure: ProcessFailure;
     };
 
@@ -173,6 +187,7 @@ export type RuntimeEvent =
   | { readonly kind: "process_spawn_started"; readonly processId: ProcessId }
   | { readonly kind: "process_spawned"; readonly processId: ProcessId; readonly pid: number; readonly processGroupId: number }
   | { readonly kind: "process_spawn_failed"; readonly processId: ProcessId; readonly failure: ProcessFailure }
+  | { readonly kind: "process_spawn_identity_unavailable"; readonly processId: ProcessId; readonly cause: ProcessFailure }
   | { readonly kind: "stdout_progress"; readonly processId: ProcessId; readonly bytesSeen: number; readonly bytesRetained: number; readonly truncated: boolean }
   | { readonly kind: "stderr_progress"; readonly processId: ProcessId; readonly bytesSeen: number; readonly bytesRetained: number; readonly truncated: boolean }
   | { readonly kind: "stdout_closed"; readonly processId: ProcessId; readonly stdioFailure?: ProcessFailure }

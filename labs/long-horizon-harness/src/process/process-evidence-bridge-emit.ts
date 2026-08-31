@@ -297,6 +297,13 @@ function toPersistedPayloads(
     case "stdout_closed":
     case "stderr_closed":
     case "stdio_failure":
+    case "process_spawn_identity_unavailable":
+      // CORRECTION11: identity was lost AFTER Node "spawn"
+      // fired. We MUST NOT append any synthetic
+      // process_close_observed or process_result_committed
+      // (we did not observe close; we cannot claim absence).
+      // Recovery projector sees the gap and treats the
+      // attempt as `spawn_outcome_unknown`.
       return [];
   }
 }

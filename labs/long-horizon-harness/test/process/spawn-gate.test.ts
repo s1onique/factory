@@ -894,3 +894,140 @@ test("SG06 full trace: every critical + observation record carries the same Proc
   const requestCount = kinds.filter((k) => k === "process_spawn_requested").length;
   assert.equal(requestCount, 1, `exactly ONE process_spawn_requested; got ${requestCount}`);
 });
+
+// ---------------------------------------------------------------------------
+// SG08 — Malformed SpawnPort: post-spawn identity unavailable
+// (CORRECTION11)
+//
+// A faulty SpawnPort returns a child object whose pid and
+// pgid are BOTH undefined, then fires "spawn" (which Node
+// would normally only fire on a real successful spawn).
+// The supervisor's async handler body rejects on a throwing
+// sink. The catch path MUST resolve
+// `post_spawn_identity_unavailable`, NOT `spawn_failed`,
+// because creation did happen (we observed the event). The
+// outcome MUST be `cleanup_failed` with empty escalation —
+// no TERM/KILL/probe fiction, no group-absence claim.
+// ---------------------------------------------------------------------------
+
+test("SG08 malformed SpawnPort (spawn fired, pid/pgid undefined) → post_spawn_identity_unavailable → fail-closed", async () => {
+  const signals = new CountingSignalPort();
+  // Deliberately leave aliveGroups empty — the supervisor
+  // MUST NOT attempt TERM/KILL/probe anyway (no target).
+
+  // Malformed child: fires "spawn" but exposes no identity.
+  const childListeners: Array<{ event: string; listener: (...args: unknown[]) => void }> = [];
+  const malformedChild = {
+    pid: undefined as unknown as number,
+    pgid: undefined as unknown as number,
+    stdout: new Readable({ read() {} }),
+    stderr: new Readable({ read() {} }),
+    on(event: string, listener: (...args: unknown[]) => void) {
+      childListeners.push({ event, listener });
+      return malformedChild;
+    },
+    once(event: string, listener: (...args: unknown[]) => void) {
+      const wrap = (...args: unknown[]) => {
+        const idx = childListeners.findIndex((l) => l.event === event && l.listener === wrap);
+        if (idx >= 0) childListeners.splice(idx, 1);
+        listener(...args);
+      };
+      childListeners.push({ event, listener: wrap });
+      return malformedChild;
+    },
+    kill: () => false,
+  };
+
+  const malformedSpawner: SpawnPort = {
+    spawn() {
+      return malformedChild as unknown as SpawnedChild;
+    },
+  };
+
+  // Same throwing sink as SG07: process_spawn_requested OK,
+  // process_spawned throws synchronously to force the catch.
+  const throwingSink: ProcessEvidenceSink = {
+    commitCritical: (input): Promise<ProcessEvidenceCommitResult> => {
+      if (input.payload.kind === "process_spawn_requested") {
+        return Promise.resolve({ ok: true, seq: 1 });
+      }
+      if (input.payload.kind === "process_spawned") {
+        throw new Error("sync sink explosion on process_spawned");
+      }
+      return Promise.resolve({ ok: true, seq: 999 });
+    },
+    commitObservation: () =>
+      Promise.resolve({ ok: true, seq: 999 }),
+  };
+
+  // Long-deadline realClock so the deadline path does not
+  // win the lifecycle race before the spawn-handler catch
+  // resolves.
+  const spec: ProcessSpec = { ...basicSpec(), deadlineMs: 60_000 };
+  const r = await startSupervisor({
+    spec,
+    clock: realClock(),
+    signals,
+    spawner: malformedSpawner,
+    sink: () => {},
+    evidenceSink: throwingSink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const supervisor = r.value;
+
+  // Fire the malformed "spawn" event. The async body rejects,
+  // the catch sees no pid/pgid, and resolves
+  // post_spawn_identity_unavailable.
+  for (const l of childListeners) {
+    if (l.event === "spawn") l.listener();
+  }
+
+  const settle = await Promise.race([
+    supervisor.await(),
+    new Promise<never>((_res, reject) =>
+      setTimeout(() => reject(new Error("supervisor.await() HUNG")), 1000),
+    ),
+  ]);
+
+  assert.notEqual(
+    settle.outcome.kind,
+    "spawn_failed",
+    `SG08 contract: a post-'spawn' failure MUST NOT be labeled spawn_failed; got ${settle.outcome.kind}`,
+  );
+  assert.equal(
+    settle.outcome.kind,
+    "cleanup_failed",
+    `expected cleanup_failed; got ${settle.outcome.kind}`,
+  );
+  if (settle.outcome.kind === "cleanup_failed") {
+    assert.equal(
+      settle.outcome.failure.kind,
+      "internal_process_failure",
+      `expected internal_process_failure; got ${JSON.stringify(settle.outcome.failure)}`,
+    );
+    const e = settle.outcome.escalation;
+    // The supervisor MUST NOT have attempted TERM/KILL/probe
+    // because there was no usable pid/pgid.
+    assert.equal(e.termRequested, false, "TERM MUST NOT be requested without a pgid");
+    assert.equal(e.termSent, false);
+    assert.equal(e.killRequested, false, "KILL MUST NOT be requested without a pgid");
+    assert.equal(e.killSent, false);
+    // Note: freshEscalation's default finalGroupProbe.kind is
+    // "absent" because that is the empty escalation. The
+    // REAL probe-absence guarantee is the signals.probeCount
+    // assertion below.
+    // The signal port MUST have observed no activity.
+    assert.equal(
+      signals.signalCount,
+      0,
+      `signals MUST NOT have been touched; got signalCount=${signals.signalCount}`,
+    );
+    assert.equal(
+      signals.probeCount,
+      0,
+      `probes MUST NOT have been touched; got probeCount=${signals.probeCount}`,
+    );
+  }
+});

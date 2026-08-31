@@ -1,32 +1,13 @@
 /**
- * Lifecycle runner (CORRECTION02).
+ * Lifecycle runner (CORRECTION11).
  *
- * Architecture:
- *   1. ONE eager spawn resolution promise (spawned | spawn_failed).
- *      Constructed synchronously during supervisor construction.
- *      The lifecycle MUST consume this promise before settling.
- *
- *   2. ONE eager process-completion promise (close | spawn_error).
- *      Retained for the entire lifecycle. Used both as the
- *      normal exit signal AND as the post-termination close
- *      wait target. This prevents missing a 'close' that fires
- *      during escalation.
- *
- *   3. SEPARATE AbortControllers:
- *        - deadlineController: aborts the pending deadline sleep
- *          when termination wins.
- *        - closeWaitController: used ONLY to bound the
- *          post-termination close wait. Not aborted by
- *          termination.
- *
- *   4. cleanup_verified is emitted ONLY after
- *      finalGroupProbe.kind === "absent". Otherwise a
- *      cleanup_failed event is emitted.
- *
- *   5. Synchronous-spawn-throw emits process_spawn_failed BEFORE
- *      seal.
- *
- *   6. Stdio failures appear structurally in the final outcome.
+ * Architecture (CORRECTION02): ONE eager spawn-resolution
+ * promise + ONE eager process-completion promise + separate
+ * deadline/close-wait AbortControllers. cleanup_verified is
+ * emitted ONLY after finalGroupProbe.kind === "absent".
+ * Synchronous-spawn-throw emits process_spawn_failed BEFORE
+ * seal. CORRECTION11 adds post_spawn_identity_unavailable
+ * fail-closed outcome (no TERM/KILL/probe fiction).
  */
 
 import type {
@@ -161,6 +142,13 @@ export async function runLifecycle(input: LifecycleInput): Promise<ProcessResult
         startedAtMs, clock, closeWaitController, closeWaitTimeoutMs,
         pgid: res.pgid,
         cause: res.failure,
+      });
+    }
+    if (res.kind === "post_spawn_identity_unavailable") {
+      setSealed();
+      return identityUnavailableOutcome({
+        id, spec, safeEmit, stdoutSink, stderrSink, startedAtMs, clock,
+        failure: res.failure,
       });
     }
     // Spawned. If termination has already become authoritative,
@@ -326,6 +314,15 @@ async function settleAfterTermination(p: {
       escalation: freshEscalation(),
     };
   }
+  if (res.kind === "post_spawn_identity_unavailable") {
+    p.setSealed();
+    return identityUnavailableOutcome({
+      id: p.id, spec: p.spec, safeEmit: p.safeEmit,
+      stdoutSink: p.stdoutSink, stderrSink: p.stderrSink,
+      startedAtMs: p.startedAtMs, clock: p.clock,
+      failure: res.failure,
+    });
+  }
   if (res.kind === "post_spawn_internal_failure") {
     // CORRECTION10: termination already fired; spawn
     // resolved with internal failure carrying pid/pgid.
@@ -362,4 +359,27 @@ async function waitForCompletionOrBound(
     return { kind: "close_timeout" };
   }
   return r;
+}
+
+/**
+ * CORRECTION11: SpawnPort emitted "spawn" without pid/pgid.
+ * We CANNOT claim spawn_failed (creation did happen) and
+ * CANNOT claim group absence (no pgid). cleanup_failed +
+ * empty escalation; no close/result evidence.
+ */
+function identityUnavailableOutcome(a: {
+  id: ProcessId; spec: ProcessSpec;
+  safeEmit: (e: RuntimeEvent) => void;
+  stdoutSink: SinkLike; stderrSink: SinkLike;
+  startedAtMs: number; clock: Clock;
+  failure: ProcessFailure;
+}): ProcessResult {
+  const empty = freshEscalation();
+  a.safeEmit({ kind: "process_spawn_identity_unavailable", processId: a.id, cause: a.failure });
+  return {
+    processId: a.id, spec: a.spec,
+    outcome: { kind: "cleanup_failed", failure: a.failure, escalation: empty, stdoutFailure: null, stderrFailure: null },
+    stdout: a.stdoutSink.captured(), stderr: a.stderrSink.captured(),
+    startedAtMs: a.startedAtMs, finishedAtMs: a.clock.nowMs(), escalation: empty,
+  };
 }
