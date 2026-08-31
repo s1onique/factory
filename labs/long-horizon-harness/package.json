@@ -19,6 +19,7 @@
     "qualify:recovery-live": "FACTORY_STRICT_RECOVERY_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/recovery/cp-crash.test.ts",
     "test:witness": "node --import tsx --test --test-reporter=spec test/witness/pure.test.ts test/witness/codec.test.ts",
     "test:ledger-writer": "node --import tsx --test --test-reporter=spec test/ledger-writer/dedup.test.ts test/ledger-writer/writer-live.test.ts",
+    "qualify:ledger-writer-live": "FACTORY_STRICT_LEDGER_WRITER_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/ledger-writer/ledger-writer-live-qualification.test.ts",
     "qualify:witness-live": "FACTORY_STRICT_WITNESS_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=90000 test/witness/witness-live.test.ts",
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",
