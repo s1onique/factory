@@ -47,10 +47,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import { LEDGER_FILENAME } from "../evidence/jsonl-ledger.js";
-import {
-  readAndValidate,
-  type LedgerError,
-} from "../evidence/ledger-read-validate.js";
+import { type LedgerError } from "../evidence/ledger-read-validate.js";
 import type { CommitId, DedupEntry } from "./ledger-writer-types.js";
 
 /**
@@ -119,9 +116,37 @@ function decodeB0SideChannel(
  * Recover the LedgerWriter's authoritative startup state
  * directly from the durable ledger.
  *
- * This is the SOLE source of truth. The sidecar is treated
- * as a cache (B0-CORR02 §3: derived-state non-authority law).
- * Whatever the sidecar said, it is not consulted here.
+ * B0-CORR03 §7..10 — single-snapshot recovery. The
+ * `maxSequence` projection and the `byCommitId` projection
+ * MUST be derived from the same validated byte snapshot.
+ *
+ * We read the ledger ONCE into memory and derive both
+ * projections from this single in-memory buffer. This
+ * avoids the B0-CORR02 two-snapshot seam where concurrent
+ * mutation between two `fs.readFile` calls could disagree
+ * the projections.
+ *
+ * Mirroring FOUNDATION01's `readAndValidate` semantics:
+ *   - each line must be a JSON object;
+ *   - sequence must be strictly increasing by 1;
+ *   - the file must end in '\n' (no torn tail).
+ *
+ * We do NOT call the existing JsonlLedger codec here
+ * (readAndValidate) because it does not surface the raw
+ * lines alongside the typed envelope — and we explicitly
+ * need the raw text for the B0 side-channel projection.
+ * The semantic checks (sequence contiguity, JSON parse,
+ * torn-tail detection) are duplicated here as a single-
+ * snapshot pass.
+ *
+ * B0-CORR03 §10: parse anomalies in authoritative recovered
+ * history are `invalid_evidence`, not omissions.
+ *
+ * Doctrine (B0-CORR03):
+ *
+ *   "For one recovery invocation, maxSequence projection
+ *    and byCommitId projection MUST refer to exactly the
+ *    same durable byte snapshot."
  *
  * Failure modes:
  *   - internal_failure: file unreadable, IO error other than
@@ -139,10 +164,12 @@ export async function recoverLedgerWriterState(
 ): Promise<RecoverLedgerWriterStateResult> {
   const ledgerPath = path.join(runDir, LEDGER_FILENAME);
 
-  // Short-circuit the missing-ledger case so readAndValidate's
-  // ENOENT branch does not need to know about our types.
+  // Single read of the authoritative history. We read the
+  // file once into memory and derive BOTH projections from
+  // this single in-memory buffer (B0-CORR03 §7).
+  let raw: string;
   try {
-    await fs.access(ledgerPath);
+    raw = await fs.readFile(ledgerPath, "utf8");
   } catch (e: unknown) {
     const code = (e as { code?: string }).code;
     if (code === "ENOENT") {
@@ -162,72 +189,102 @@ export async function recoverLedgerWriterState(
     };
   }
 
-  const rv = await readAndValidate(ledgerPath);
-  if (rv.ok === false) {
-    // Propagate the typed LedgerError verbatim. The startup
-    // path fails closed (B0-CORR02 §2).
-    return { ok: false, error: rv.error };
+  // Torn-tail detection (mirrors readAndValidate).
+  if (raw.length > 0 && !raw.endsWith("\n")) {
+    return {
+      ok: false,
+      error: {
+        kind: "invalid_evidence",
+        reason:
+          "Ledger ends with a non-empty unterminated suffix; open must be called to recover.",
+      },
+    };
   }
 
-  const { envelopes, lastSeq } = rv.value;
-
-  // The validated envelopes advance maxSequence (lastSeq is
-  // the largest valid sequence; readAndValidate enforces
-  // contiguity so lastSeq === envelopes.length for v1/v2
-  // records; B0 records also count).
-  //
-  // For the dedup projection, we re-read the file once to
-  // extract the B0 side-channel. readAndValidate does not
-  // surface the raw text, and the codec's typed shape does
-  // not carry commit_id/content_hash. The extra read at
-  // startup is acceptable for the durability guarantee we
-  // are buying. The trust-boundary allowlist covers this
-  // JSON.parse site.
-  let scannedLines = 0;
+  // Single-snapshot projection pass. We walk the lines
+  // ONCE; for each line we either fail closed (B0-CORR03
+  // §10: parse anomalies are `invalid_evidence`, not
+  // omissions) or we extract both the sequence and the B0
+  // side-channel from the SAME line.
   const byCommitId: Record<string, DedupEntry> = {};
-  const raw = await fs.readFile(ledgerPath, "utf8");
+  let maxSequence = 0;
+  let scannedLines = 0;
   const lines = raw.split("\n");
-  for (const line of lines) {
-    if (line.length === 0) continue;
-    if (scannedLines >= envelopes.length) break;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === undefined || line.length === 0) continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
-    } catch {
-      // Should not happen: readAndValidate already proved
-      // every line up to lastSeq is decodable. Be defensive
-      // anyway — skip and continue.
-      scannedLines++;
-      continue;
+    } catch (e: unknown) {
+      return {
+        ok: false,
+        error: {
+          kind: "invalid_evidence",
+          reason: `malformed JSON at line ${i + 1}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        },
+      };
     }
     if (typeof parsed !== "object" || parsed === null) {
-      scannedLines++;
-      continue;
+      return {
+        ok: false,
+        error: {
+          kind: "invalid_evidence",
+          reason: `non-object record at line ${i + 1}`,
+        },
+      };
     }
     const o = parsed as Record<string, unknown>;
-    const side = decodeB0SideChannel(o);
     const seqRaw = o["sequence"];
     if (
-      side.hasCommitMapping &&
-      typeof seqRaw === "number" &&
-      Number.isInteger(seqRaw)
+      typeof seqRaw !== "number" ||
+      !Number.isInteger(seqRaw) ||
+      seqRaw < 1
     ) {
-      const seq = seqRaw;
-      const existing =
-        byCommitId[side.commitId as unknown as string];
+      return {
+        ok: false,
+        error: {
+          kind: "invalid_evidence",
+          reason: `invalid sequence at line ${i + 1}: ${String(seqRaw)}`,
+        },
+      };
+    }
+    const seq = seqRaw;
+    const expectedSeq = scannedLines + 1;
+    if (seq !== expectedSeq) {
+      return {
+        ok: false,
+        error: {
+          kind: "invalid_evidence",
+          reason:
+            `Sequence gap at line ${i + 1}: got ${seq}, expected ${expectedSeq}.`,
+        },
+      };
+    }
+    scannedLines++;
+    maxSequence = seq;
+
+    // B0 side-channel contribution. The side-channel is
+    // B0+; legacy lines (FOUNDATION01/02/03) contribute
+    // only to maxSequence.
+    const side = decodeB0SideChannel(o);
+    if (side.hasCommitMapping) {
+      const key = side.commitId as unknown as string;
+      const existing = byCommitId[key];
       if (existing === undefined || seq > existing.sequence) {
-        byCommitId[side.commitId as unknown as string] = {
+        byCommitId[key] = {
           sequence: seq,
           contentHash: side.contentHash,
         };
       }
     }
-    scannedLines++;
   }
 
   return {
     ok: true,
-    state: { maxSequence: lastSeq, byCommitId },
+    state: { maxSequence, byCommitId },
     scannedLines,
   };
 }

@@ -480,3 +480,57 @@ test("CACHE08 delete sidecar between runs → byte-equivalent semantics", async 
     await rmTmp(tmp);
   }
 });
+
+test("REC-SNAP01 single-snapshot property: one readFile per recovery", async () => {
+  const tmp = await mkTmp();
+  try {
+    let ledger = "";
+    for (let i = 1; i <= 5; i++) {
+      ledger += b0Line(i, `cid-${i}`, "f".repeat(64));
+    }
+    await fs.writeFile(path.join(tmp, LEDGER_FILENAME), ledger);
+
+    const realReadFile = fs.readFile;
+    let readFileCalls = 0;
+    (fs as unknown as { readFile: typeof fs.readFile }).readFile = ((
+      ...args: unknown[]
+    ) => {
+      if (typeof args[0] === "string" && args[0].endsWith(LEDGER_FILENAME)) {
+        readFileCalls++;
+      }
+      return (realReadFile as unknown as (...a: unknown[]) => Promise<unknown>)(
+        ...args,
+      );
+    }) as typeof fs.readFile;
+
+    try {
+      const r = await recoverLedgerWriterState(tmp);
+      assert.equal(r.ok, true);
+      if (!r.ok) return;
+      assert.equal(readFileCalls, 1, "must read ledger exactly once");
+      assert.equal(r.state.maxSequence, 5);
+      assert.equal(Object.keys(r.state.byCommitId).length, 5);
+    } finally {
+      (fs as unknown as { readFile: typeof fs.readFile }).readFile = realReadFile;
+    }
+  } finally {
+    await rmTmp(tmp);
+  }
+});
+
+test("REC-SNAP02 parse anomaly in authoritative history fails closed", async () => {
+  const tmp = await mkTmp();
+  try {
+    let ledger = "";
+    ledger += b0Line(1, "cid-1", "a".repeat(64));
+    ledger += "{not json}\n";
+    ledger += b0Line(3, "cid-3", "c".repeat(64));
+    await fs.writeFile(path.join(tmp, LEDGER_FILENAME), ledger);
+    const r = await recoverLedgerWriterState(tmp);
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.error.kind, "invalid_evidence");
+  } finally {
+    await rmTmp(tmp);
+  }
+});

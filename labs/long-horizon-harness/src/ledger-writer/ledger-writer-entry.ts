@@ -1,22 +1,21 @@
 #!/usr/bin/env node
 /**
- * FOUNDATION04 — CORRECTION01 — LedgerWriter entry script.
+ * FOUNDATION04 — CORRECTION03 — LedgerWriter entry script.
  *
- * Runs as a detached child of the supervisor. Reads bootstrap
- * inputs from env vars (set by startLedgerWriter()), opens the
- * UDS, and serves append/ping/who_are_you requests.
+ * Lifetime contract (B0-CORR03 §1..2):
  *
- * The script's ONLY responsibilities are:
- *   - bind the UDS at the requested path
- *   - service one-shot framed RPCs
- *   - own the dedup index for the run
- *
- * It deliberately has no concept of run state, witness state,
- * candidate execution, or cryptography. Those live elsewhere.
- *
- * This script is invoked as:
- *   node --import tsx src/ledger-writer/ledger-writer-entry.ts
- * with the FACTORY_LEDGER_WRITER_* env vars set by the parent.
+ *   1. Bind UDS (acquire run-scoped lease first).
+ *   2. Service requests.
+ *   3. SIGTERM/SIGINT → orderly shutdown:
+ *        a. server.close() (stop accepting new connections)
+ *        b. wait for server 'close' event and in-flight
+ *           handlers to settle
+ *        c. ONLY THEN release the lease via the capability
+ *           handle
+ *        d. process.exit(0)
+ *      Bounded by a deadline; if the deadline expires, the
+ *      lease is RETAINED and process.exit(1) — an external
+ *      SIGKILL is required to remove the writer.
  */
 import { startWriterServer } from "./ledger-writer-server.js";
 import {
@@ -26,23 +25,17 @@ import {
   ENV_RUN_ID,
   ENV_SOCKET_PATH,
 } from "./ledger-writer-process.js";
-import {
-  releaseLedgerWriterLease,
-} from "./ledger-writer-lease.js";
-import {
-  makeLedgerWriterInstanceId,
-} from "./ledger-writer-types.js";
 import type { Server } from "node:net";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (typeof v !== "string" || v.length === 0) {
-    // Refuse to start without bootstrap inputs. This is the
-    // boot-time guarantee: no env, no writer.
     throw new Error(`missing required env var ${name}`);
   }
   return v;
 }
+
+const SHUTDOWN_DEADLINE_MS = 5000;
 
 async function main(): Promise<void> {
   const args = {
@@ -54,10 +47,6 @@ async function main(): Promise<void> {
   };
   const result = await startWriterServer(args);
   if (!result.ok) {
-    // We are detached, so we can't talk to the parent. Exit
-    // non-zero with a descriptive message; the parent's
-    // socket-poll will time out and the supervisor will see
-    // `writer_not_ready`.
     const e = result.error;
     const msg =
       e.kind === "directory_wrong_mode"
@@ -66,19 +55,15 @@ async function main(): Promise<void> {
     console.error(`ledger-writer: failed to start: ${msg}`);
     process.exit(2);
   }
-  // Stay alive. The supervisor may eventually kill us (clean
-  // shutdown) or we may crash (unclean); either way, the
-  // socket file disappears and any in-flight client retries
-  // will see `writer_unavailable`.
-  // Keep the process alive on its own. `server` is held in
-  // the closure of the createServer callback; the only handle
-  // keeping the event loop alive is the server itself.
-  process.on("SIGTERM", () => {
-    void shutdownGracefully(result.value, args);
-  });
-  process.on("SIGINT", () => {
-    void shutdownGracefully(result.value, args);
-  });
+  const handle = result.value;
+  let shutdownInProgress = false;
+  const onShutdownSignal = (): void => {
+    if (shutdownInProgress) return;
+    shutdownInProgress = true;
+    void shutdownGracefully(handle);
+  };
+  process.on("SIGTERM", onShutdownSignal);
+  process.on("SIGINT", onShutdownSignal);
 }
 
 main().catch((e: unknown) => {
@@ -87,31 +72,47 @@ main().catch((e: unknown) => {
 });
 
 /**
- * Graceful shutdown: close the server, release the lease,
- * exit. Idempotent against repeated signals.
+ * B0-CORR03 §1..2: ordered shutdown. We DO NOT release the
+ * lease until the server has actually closed (no more
+ * connections, no more in-flight handlers). Repeated signals
+ * are coalesced.
  */
-async function shutdownGracefully(
-  server: Server,
-  args: {
-    readonly runDir: string;
-    readonly runId: string;
-    readonly missionId: string;
-    readonly socketPath: string;
-    readonly instanceId: string;
-  },
-): Promise<void> {
-  try {
-    server.close();
-  } catch {
-    // best-effort
-  }
-  try {
-    await releaseLedgerWriterLease({
-      runDir: args.runDir,
-      expectedInstanceId: makeLedgerWriterInstanceId(args.instanceId),
+async function shutdownGracefully(handle: {
+  readonly server: Server;
+  readonly leaseHandle: { readonly release: () => Promise<unknown> };
+  readonly waitForInFlight: () => Promise<void>;
+}): Promise<void> {
+  // Step a: stop accepting new connections. server.close()
+  // is asynchronous — existing connections remain open until
+  // they finish.
+  const closePromise = new Promise<void>((resolve, reject) => {
+    handle.server.close((err) => {
+      if (err !== undefined && err !== null) {
+        reject(err);
+      } else {
+        resolve();
+      }
     });
+  });
+  // Step b: wait for in-flight handlers to settle.
+  await Promise.race([
+    handle.waitForInFlight(),
+    new Promise<void>((r) => setTimeout(r, SHUTDOWN_DEADLINE_MS)),
+  ]);
+  try {
+    await closePromise;
   } catch {
-    // best-effort
+    // server.close() failed; treat as best-effort.
+  }
+  // Step c+d: release the lease and exit.
+  const releaseResult = await handle.leaseHandle.release();
+  if (
+    typeof releaseResult === "object" &&
+    releaseResult !== null &&
+    "ok" in releaseResult &&
+    releaseResult.ok === false
+  ) {
+    process.exit(1);
   }
   process.exit(0);
 }

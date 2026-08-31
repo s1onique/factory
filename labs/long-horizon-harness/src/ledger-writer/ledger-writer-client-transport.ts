@@ -27,6 +27,9 @@ import {
   type LedgerWriterRequest,
   type LedgerWriterResponse,
 } from "./ledger-writer-protocol.js";
+import {
+  decodeLedgerWriterResponse,
+} from "./ledger-writer-response-decode.js";
 
 export type LedgerWriterClientError =
   | { readonly kind: "socket_missing"; readonly socketPath: string }
@@ -216,9 +219,27 @@ export async function sendLedgerWriterRequest(
           });
           return;
         }
+        const decodedResp = decodeLedgerWriterResponse(parsed);
+        if (decodedResp.ok === false) {
+          const errObj = decodedResp.error as unknown as { readonly reason?: unknown; readonly message?: unknown };
+          const reason =
+            typeof errObj.reason === "string"
+              ? errObj.reason
+              : typeof errObj.message === "string"
+              ? errObj.message
+              : "unknown";
+          finalize({
+            ok: false,
+            error: {
+              kind: "frame_decode_failed",
+              reason: `response decode failed: ${reason}`,
+            },
+          });
+          return;
+        }
         finalize({
           ok: true,
-          value: parsed as unknown as LedgerWriterResponse,
+          value: decodedResp.value,
         });
         return;
       }

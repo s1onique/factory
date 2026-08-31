@@ -1,7 +1,7 @@
 /**
- * FOUNDATION04 — B0-CORR02 — LedgerWriter lease tests.
+ * FOUNDATION04 — B0-CORR03 — LedgerWriter lease tests.
  *
- * LEASE01..08 (B0-CORR02 §4):
+ * LEASE01..09:
  *   - mkdir-based atomic lease acquisition.
  *   - second writer cannot acquire while first holds.
  *   - only the holder can release.
@@ -9,6 +9,7 @@
  *     is rejected.
  *   - WHO timeout / malformed response CANNOT cause unlink.
  *   - concurrent ×100 starter → exactly one winner.
+ *   - capability handle release is idempotent and safe.
  */
 
 import { test } from "node:test";
@@ -208,3 +209,4 @@ test("LEASE08 symlink at lease path rejected by lstat? (informational)", async (
     await rmTmp(tmp);
   }
 });
+

@@ -31,6 +31,15 @@ import type {
   LedgerWriterInstanceId,
 } from "./ledger-writer-types.js";
 import { COMMIT_ID_GRAMMAR } from "./ledger-writer-types.js";
+import {
+  decodePersistedEvent,
+} from "../evidence/codec-decode-internals.js";
+import {
+  decodePersistedProcessEvidence,
+} from "../evidence/codec-decode-process-evidence.js";
+import {
+  decodePersistedWitnessEvidence,
+} from "../witness/witness-evidence-decode.js";
 
 export const LEDGER_WRITER_PROTOCOL_VERSION = 2 as const;
 
@@ -222,12 +231,15 @@ function isRecord(x: unknown): x is Record<string, unknown> {
 function validateWriterEvent(o: Record<string, unknown>):
   | { readonly ok: true; readonly event: WriterEvent }
   | { readonly ok: false; readonly reason: string } {
-  // B0-CORR02 §6: at the wire boundary, all required
-  // fields of WriterEvent are enforced — eventId must be
-  // a present string with the IDENTIFIER_GRAMMAR,
-  // observedAt must be a present finite integer inside the
-  // legal timestamp domain, and the payload must be a
-  // recorded object.
+  // B0-CORR02 §6 + B0-CORR03 §11..13: at the wire
+  // boundary, the WriterEvent's kind discriminator is
+  // validated, the eventId and observedAt are validated
+  // for grammar / domain, AND the payload is dispatched to
+  // the AUTHORITATIVE domain decoder. We do NOT
+  // locally approximate any schema — every payload variant
+  // goes through its existing decoder (decodePersistedEvent
+  // / decodePersistedProcessEvidence /
+  // decodePersistedWitnessEvidence).
   const kind = o["kind"];
   if (kind !== "lifecycle" && kind !== "process_evidence" && kind !== "witness_evidence") {
     return { ok: false, reason: `unknown event kind ${String(kind)}` };
@@ -250,15 +262,13 @@ function validateWriterEvent(o: Record<string, unknown>):
     return { ok: false, reason: "event.observedAt must be finite" };
   }
   // Legal timestamp domain: positive, not absurdly large.
-  // We use 1e15 (≈ year 33658 in ms) as the upper bound.
   if (observedAt < 0 || observedAt > 1e15) {
     return { ok: false, reason: "event.observedAt outside legal domain" };
   }
   if (kind === "lifecycle") {
-    const event = o["event"];
-    if (!isRecord(event)) return { ok: false, reason: "lifecycle event.event must be an object" };
-    if (!isString(event["type"])) {
-      return { ok: false, reason: "lifecycle event.type must be a string" };
+    const eventR = decodePersistedEvent(o["event"]);
+    if (eventR.ok === false) {
+      return { ok: false, reason: `lifecycle event: ${eventR.error.reason}` };
     }
     return {
       ok: true,
@@ -266,13 +276,14 @@ function validateWriterEvent(o: Record<string, unknown>):
         kind: "lifecycle",
         eventId,
         observedAt,
-        event: event as unknown as Extract<WriterEvent, { readonly kind: "lifecycle" }>["event"],
+        event: eventR.value as Extract<WriterEvent, { readonly kind: "lifecycle" }>["event"],
       },
     };
   }
   if (kind === "process_evidence") {
-    if (!isRecord(o["payload"])) {
-      return { ok: false, reason: "process_evidence payload must be an object" };
+    const payloadR = decodePersistedProcessEvidence(o["payload"]);
+    if (payloadR.ok === false) {
+      return { ok: false, reason: `process_evidence payload: ${payloadR.error.reason}` };
     }
     return {
       ok: true,
@@ -280,13 +291,14 @@ function validateWriterEvent(o: Record<string, unknown>):
         kind: "process_evidence",
         eventId,
         observedAt,
-        payload: o["payload"] as unknown as Extract<WriterEvent, { readonly kind: "process_evidence" }>["payload"],
+        payload: payloadR.value as Extract<WriterEvent, { readonly kind: "process_evidence" }>["payload"],
       },
     };
   }
   // witness_evidence
-  if (!isRecord(o["payload"])) {
-    return { ok: false, reason: "witness_evidence payload must be an object" };
+  const payloadR = decodePersistedWitnessEvidence(o["payload"]);
+  if (payloadR.ok === false) {
+    return { ok: false, reason: `witness_evidence payload: ${payloadR.error.reason}` };
   }
   return {
     ok: true,
@@ -294,7 +306,7 @@ function validateWriterEvent(o: Record<string, unknown>):
       kind: "witness_evidence",
       eventId,
       observedAt,
-      payload: o["payload"] as unknown as Extract<WriterEvent, { readonly kind: "witness_evidence" }>["payload"],
+      payload: payloadR.value as Extract<WriterEvent, { readonly kind: "witness_evidence" }>["payload"],
     },
   };
 }

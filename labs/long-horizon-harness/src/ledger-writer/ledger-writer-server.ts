@@ -44,7 +44,7 @@ import {
 } from "./ledger-writer-request-handler.js";
 import {
   acquireLedgerWriterLease,
-  releaseLedgerWriterLease,
+  type LeaseHandle,
   LEDGER_WRITER_LEASE_DIRNAME,
 } from "./ledger-writer-lease.js";
 import type { LedgerWriterInstanceId } from "./ledger-writer-types.js";
@@ -81,13 +81,21 @@ export type WriterServerError =
       readonly observed: number;
     };
 
+export type WriterServerHandle = {
+  readonly server: Server;
+  readonly leaseHandle: LeaseHandle;
+  readonly waitForInFlight: () => Promise<void>;
+};
+
 export type WriterServerResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: WriterServerError };
 
 export async function startWriterServer(
   args: WriterServerArgs,
-): Promise<WriterServerResult<Server>> {
+): Promise<WriterServerResult<WriterServerHandle>> {
+  // B0-CORR03 §1..2: declare the in-flight counter here so
+  // handleConnection can mutate it.
   // Refuse to start with an over-long socket path. Node's
   // bind would otherwise fail with EINVAL.
   const pathByteLen = Buffer.byteLength(args.socketPath, "utf8");
@@ -106,16 +114,25 @@ export async function startWriterServer(
     crashCutHook: process.env["FACTORY_LEDGER_WRITER_CRASH_CUT"] === "1"
       ? { onCommit: () => "crash" }
       : null,
+    inFlight: 0,
   };
 
   const server = createServer((socket: Socket) => {
-    handleConnection(socket, args, state).catch(() => {
-      try {
-        socket.destroy();
-      } catch {
-        // best-effort
-      }
-    });
+    // B0-CORR03 §2: count in-flight handler work so the
+    // lease release can wait for all accepted connections
+    // to settle.
+    state.inFlight++;
+    handleConnection(socket, args, state)
+      .catch(() => {
+        try {
+          socket.destroy();
+        } catch {
+          // best-effort
+        }
+      })
+      .finally(() => {
+        state.inFlight--;
+      });
   });
 
   // B0-CORR02 §4: bind-time path-collision policy.
@@ -181,10 +198,7 @@ export async function startWriterServer(
   const probe = await probeSocketPath(args.socketPath);
   if (!probe.ok) {
     server.close();
-    await releaseLedgerWriterLease({
-      runDir: args.runDir,
-      expectedInstanceId: args.instanceId as LedgerWriterInstanceId,
-    }).catch(() => undefined);
+    await lease.handle.release().catch(() => undefined);
     return probe;
   }
   if (probe.value === "unknown_socket") {
@@ -199,10 +213,7 @@ export async function startWriterServer(
       const code = (e as { code?: string }).code;
       if (code !== "ENOENT") {
         server.close();
-        await releaseLedgerWriterLease({
-          runDir: args.runDir,
-          expectedInstanceId: args.instanceId as LedgerWriterInstanceId,
-        }).catch(() => undefined);
+        await lease.handle.release().catch(() => undefined);
         return {
           ok: false,
           error: {
@@ -234,6 +245,7 @@ export async function startWriterServer(
   } catch (e: unknown) {
     const err = e as NodeJS.ErrnoException;
     if (err.code === "EADDRINUSE") {
+      await lease.handle.release().catch(() => undefined);
       return {
         ok: false,
         error: {
@@ -242,6 +254,7 @@ export async function startWriterServer(
         },
       };
     }
+    await lease.handle.release().catch(() => undefined);
     return {
       ok: false,
       error: {
@@ -251,7 +264,35 @@ export async function startWriterServer(
     };
   }
 
-  return { ok: true, value: server };
+  // B0-CORR03 §1..2 — lease lifetime law. The lease handle
+  // is returned alongside the server so the entry can drive
+  // the orderly shutdown sequence:
+  //
+  //   shutdown requested
+  //   → stop accepting new connections (server.close)
+  //   → wait for in-flight handlers to settle (in-flight
+  //     counter, awaited via `waitForInFlight`)
+  //   → observe net.Server `close` event
+  //   → ONLY THEN release lease
+  //   → exit
+  //
+  // If the bounded shutdown timeout expires, the lease is
+  // RETAINED (fail closed) — an external SIGKILL is required
+  // to remove the writer. The lease directory being held is
+  // the authoritative signal that the previous writer did
+  // not exit cleanly.
+  return {
+    ok: true,
+    value: {
+      server,
+      leaseHandle: lease.handle,
+      waitForInFlight: async (): Promise<void> => {
+        while (state.inFlight > 0) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      },
+    },
+  };
 }
 
 async function handleConnection(

@@ -79,6 +79,10 @@ export type WriterState = {
   index: DedupIndex;
   busy: boolean;
   readonly crashCutHook: CrashCutHook | null;
+  // B0-CORR03 §1..2: in-flight handler counter. The server
+  // exposes a waitForInFlight() that observes this counter;
+  // the lease is NOT released until it reaches zero.
+  inFlight: number;
 };
 
 export type WriterServerArgs = {

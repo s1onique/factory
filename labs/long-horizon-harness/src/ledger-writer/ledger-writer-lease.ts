@@ -69,12 +69,94 @@ export type LeaseMetadata = {
 };
 
 export type LeaseAcquireResult =
-  | { readonly ok: true; readonly leaseDir: string }
+  | { readonly ok: true; readonly leaseDir: string; readonly handle: LeaseHandle }
   | { readonly ok: false; readonly error:
       | { readonly kind: "lease_held"; readonly existing: LeaseMetadata | null; readonly leaseDir: string }
       | { readonly kind: "io_error"; readonly message: string }
       | { readonly kind: "invalid_run_dir"; readonly message: string }
     };
+
+/**
+ * Capability-style handle returned by a successful
+ * acquisition. The holder may release the lease WITHOUT
+ * needing to provide the instanceId again — the handle
+ * carries the in-memory capability.
+ *
+ * B0-CORR03 §25: release safety MUST NOT depend solely on
+ * mutable owner.json metadata after acquisition.
+ */
+export class LeaseHandle {
+  private released = false;
+  // The instanceId is retained as a class field for
+  // diagnostic logging; the release path uses the
+  // in-memory capability and does not consult mutable
+  // metadata (B0-CORR03 §25).
+  // @ts-expect-error - field retained for diagnostics
+  private readonly instanceId: LedgerWriterInstanceId;
+  private readonly runDir: string;
+  constructor(runDir: string, instanceId: LedgerWriterInstanceId) {
+    this.runDir = runDir;
+    this.instanceId = instanceId;
+  }
+
+  /**
+   * Release the lease via the in-memory capability, NOT via
+   * the mutable owner.json metadata. The handle is the
+   * authoritative release authority (B0-CORR03 §25).
+   *
+   * If the on-disk metadata was corrupted while the lease
+   * was held (the directory is still the authority, but
+   * the descriptive JSON is unreadable), the capability
+   * handle is still valid. We therefore release directly by
+   * removing the directory; we do NOT consult owner.json.
+   */
+  async release(): Promise<LeaseReleaseResult> {
+    if (this.released) {
+      return { ok: false, error: { kind: "lease_not_held" } };
+    }
+    this.released = true;
+    const dir = leaseDir(this.runDir);
+    // Confirm the lease directory still exists. If it does
+    // not, the lease was already gone (e.g. an external
+    // operator removed it). Treat as lease_not_held.
+    try {
+      const st = await fs.lstat(dir);
+      if (!st.isDirectory()) {
+        return { ok: false, error: { kind: "lease_not_held" } };
+      }
+    } catch (e: unknown) {
+      const code = (e as { code?: string }).code;
+      if (code === "ENOENT") {
+        return { ok: false, error: { kind: "lease_not_held" } };
+      }
+      return {
+        ok: false,
+        error: {
+          kind: "io_error",
+          message:
+            e instanceof Error ? e.message : String(e),
+        },
+      };
+    }
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+      return { ok: true };
+    } catch (e: unknown) {
+      return {
+        ok: false,
+        error: {
+          kind: "io_error",
+          message:
+            e instanceof Error ? e.message : String(e),
+        },
+      };
+    }
+  }
+
+  isReleased(): boolean {
+    return this.released;
+  }
+}
 
 export type LeaseReleaseResult =
   | { readonly ok: true }
@@ -147,7 +229,7 @@ export async function acquireLedgerWriterLease(args: {
       },
     };
   }
-  return { ok: true, leaseDir: dir };
+  return { ok: true, leaseDir: dir, handle: new LeaseHandle(args.runDir, args.instanceId) };
 }
 
 /**

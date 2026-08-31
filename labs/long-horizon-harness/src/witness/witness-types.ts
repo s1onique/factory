@@ -15,8 +15,10 @@
  * inferred from numeric PID values.
  */
 
-import type { AttemptId, MissionId, RunId } from "../domain/ids.js";
+import type { AttemptId, MissionId, RunId, InvalidId } from "../domain/ids.js";
 import type { ProcessId } from "../process/process-types.js";
+import { IDENTIFIER_GRAMMAR } from "../domain/ids.js";
+import { err, ok, type Result } from "../domain/result.js";
 
 // --------------------------------------------------------------------------
 // Branded identifier primitives
@@ -44,6 +46,58 @@ export function makeWitnessInstanceId(value: string): WitnessInstanceId {
 
 export function makeWitnessCommandId(value: string): WitnessCommandId {
   return value as WitnessCommandId;
+}
+
+/**
+ * Trust-boundary validators. These reject values that do
+ * not match the IDENTIFIER_GRAMMAR and surface typed
+ * `invalid_id` errors. Used by the LedgerWriter wire
+ * boundary and any other caller that ingests untrusted JS
+ * bytes for these identifiers.
+ *
+ * (B0-CORR03 §12: the LedgerWriter MUST NOT locally
+ * approximate the witness schema.)
+ */
+function parseId<F extends string>(
+  value: unknown,
+  field: F,
+): Result<string, InvalidId> {
+  if (typeof value !== "string") {
+    return err({
+      kind: "invalid_id",
+      field,
+      reason: `expected string, got ${value === null ? "null" : typeof value}`,
+    });
+  }
+  if (!IDENTIFIER_GRAMMAR.test(value)) {
+    return err({
+      kind: "invalid_id",
+      field,
+      reason: `value does not match identifier grammar`,
+    });
+  }
+  return ok(value);
+}
+
+export function parseWitnessId(value: unknown): Result<WitnessId, InvalidId> {
+  const r = parseId(value, "WitnessId");
+  return r.ok
+    ? ok(r.value as WitnessId)
+    : err(r.error);
+}
+
+export function parseWitnessInstanceId(value: unknown): Result<WitnessInstanceId, InvalidId> {
+  const r = parseId(value, "WitnessInstanceId");
+  return r.ok
+    ? ok(r.value as WitnessInstanceId)
+    : err(r.error);
+}
+
+export function parseWitnessCommandId(value: unknown): Result<WitnessCommandId, InvalidId> {
+  const r = parseId(value, "WitnessCommandId");
+  return r.ok
+    ? ok(r.value as WitnessCommandId)
+    : err(r.error);
 }
 
 // --------------------------------------------------------------------------

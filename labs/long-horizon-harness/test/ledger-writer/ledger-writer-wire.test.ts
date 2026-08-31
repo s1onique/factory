@@ -98,7 +98,7 @@ test("WIRE04 malformed lifecycle reject", () => {
   });
   assert.equal(r.ok, false);
   if (r.ok) return;
-  assert.match(r.reason, /event\.type/);
+  assert.match(r.reason, /event/);
 });
 
 test("WIRE05 malformed process evidence reject", () => {
@@ -222,4 +222,153 @@ test("WIRE08 valid all-three event families round-trip", () => {
   if (!r3.ok) return;
   if (r3.request.kind !== "append") return;
   assert.equal(r3.request.event.kind, "witness_evidence");
+});
+
+test("WIRE09 object-shaped bogus process evidence → reject", () => {
+  const r = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-9",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "process_evidence",
+      eventId: "evt-9",
+      observedAt: 1000,
+      payload: {},
+    },
+  });
+  assert.equal(r.ok, false);
+});
+
+test("WIRE10 malformed real process variant → reject", () => {
+  const r = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-10",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "process_evidence",
+      eventId: "evt-10",
+      observedAt: 1000,
+      payload: {
+        kind: "process_spawned",
+        attempt_id: "att-1",
+        process_id: "",
+        pid: -1,
+      },
+    },
+  });
+  assert.equal(r.ok, false);
+});
+
+test("WIRE11 object-shaped bogus witness evidence → reject", () => {
+  const r = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-11",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "witness_evidence",
+      eventId: "evt-11",
+      observedAt: 1000,
+      payload: {},
+    },
+  });
+  assert.equal(r.ok, false);
+});
+
+test("WIRE12 malformed real witness variant → reject", () => {
+  const r = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-12",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "witness_evidence",
+      eventId: "evt-12",
+      observedAt: 1000,
+      // Take a valid witness_ready, corrupt one mandatory field.
+      payload: {
+        kind: "witness_ready",
+        witness_id: "",
+        witness_instance_id: "wi-12",
+        historical_witness_pid: 1,
+        socket_path: "/tmp/s",
+        witness_public_key: "k",
+        witness_public_key_fingerprint: "f",
+        controller_public_key_fingerprint: "f",
+        protocol_version: 1,
+      },
+    },
+  });
+  assert.equal(r.ok, false);
+});
+
+test("WIRE13 unknown lifecycle variant → reject", () => {
+  const r = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-13",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "lifecycle",
+      eventId: "evt-13",
+      observedAt: 1000,
+      event: { type: "totally_made_up_event_type" },
+    },
+  });
+  assert.equal(r.ok, false);
+});
+
+test("WIRE14 valid family matrix round-trip (lifecycle + process + witness)", () => {
+  // Lifecycle
+  const r1 = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-14a",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "lifecycle",
+      eventId: "evt-14a",
+      observedAt: 1000,
+      event: { type: "run_created" },
+    },
+  });
+  assert.equal(r1.ok, true);
+  // Process_evidence
+  const r2 = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-14b",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "process_evidence",
+      eventId: "evt-14b",
+      observedAt: 1000,
+      payload: {
+        kind: "process_spawn_requested",
+        attempt_id: "att-1",
+        process_id: "pid-1",
+      },
+    },
+  });
+  assert.equal(r2.ok, true);
+  // Witness_evidence (witness_start_requested)
+  const r3 = parseLedgerWriterRequest({
+    protocolVersion: 2,
+    kind: "append",
+    commitId: "cid-14c",
+    clientContentHash: "h".repeat(64),
+    event: {
+      kind: "witness_evidence",
+      eventId: "evt-14c",
+      observedAt: 1000,
+      payload: {
+        kind: "witness_start_requested",
+        witness_id: "w-1",
+        witness_instance_id: "wi-1",
+      },
+    },
+  });
+  assert.equal(r3.ok, true);
 });
