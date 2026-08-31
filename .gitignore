@@ -1,6 +1,7 @@
 
 # LaTeX / Factory build output
 build/
+.wt/
 *.aux
 *.bbl
 *.bcf
