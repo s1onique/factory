@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSupervisor } from "../../src/process/supervisor-builder.js";
+import { startSupervisor } from "../../src/process/supervisor-builder.js";
 import { realClock } from "../../src/process/clock.js";
 import { nodeSignalPort } from "../../src/process/process-group.js";
 import { nodeSpawnPort } from "../../src/process/node-spawn.js";
@@ -39,7 +39,7 @@ test("settlement-failure: process_result_committed returns {ok:false} -> evidenc
     },
     commitObservation: (): Promise<ProcessEvidenceCommitResult> => Promise.resolve({ ok: true, seq: 99 }),
   };
-  const handle = buildSupervisor({
+  const startR = await startSupervisor({
     spec: SPEC,
     clock: realClock(),
     signals: nodeSignalPort(),
@@ -53,6 +53,8 @@ test("settlement-failure: process_result_committed returns {ok:false} -> evidenc
       eventIdFactory: () => makeEventId("e-sf"),
     },
   });
+  if (startR.ok === false) throw new Error("startSupervisor failed: " + JSON.stringify(startR.error));
+  const handle = startR.value;
   const r = await handle.await();
   assert.equal(r.outcome.kind, "cleanup_failed");
   if (r.outcome.kind === "cleanup_failed") {
@@ -82,7 +84,7 @@ test("settlement-failure: awaitOuter returns settlement_not_durable (CORRECTION0
     },
     commitObservation: (): Promise<ProcessEvidenceCommitResult> => Promise.resolve({ ok: true, seq: 99 }),
   };
-  const handle = buildSupervisor({
+  const startR = await startSupervisor({
     spec: SPEC,
     clock: realClock(),
     signals: nodeSignalPort(),
@@ -96,6 +98,8 @@ test("settlement-failure: awaitOuter returns settlement_not_durable (CORRECTION0
       eventIdFactory: () => makeEventId("e-sf-outer"),
     },
   });
+  if (startR.ok === false) throw new Error("startSupervisor failed: " + JSON.stringify(startR.error));
+  const handle = startR.value;
   const r = await handle.awaitOuter();
   assert.equal(r.kind, "settlement_not_durable");
   if (r.kind === "settlement_not_durable") {

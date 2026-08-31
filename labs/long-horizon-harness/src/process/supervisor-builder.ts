@@ -1,30 +1,16 @@
 /**
- * Supervisor builder (CORRECTION09).
+ * Supervisor builder (CORRECTION10).
  *
- * Eager single-shot lifecycle with:
- *   - eager 'spawn', 'error', 'exit', 'close', 'stdout',
- *     'stderr' listeners attached immediately after spawn();
- *   - exactly one lifecycle promise constructed at
- *     createSupervisor() time;
- *   - ONE spawn resolution promise (spawned | spawn_failed),
- *     the single source of truth for whether the child exists;
- *   - ONE process completion promise (close | spawn_error),
- *     retained for the entire lifecycle;
- *   - separate AbortControllers: deadlineController (aborts the
- *     pending deadline sleep) and closeWaitController (bounds
- *     the post-termination close wait, NEVER pre-aborted by
- *     termination).
+ * Eager single-shot lifecycle. Listener wiring + spawn-resolution
+ * + process-completion + separate AbortControllers for deadline
+ * and close-wait.
  *
- * Synchronous spawn() throws: emit process_spawn_failed BEFORE
- * sealing.
- *
- * CORRECTION08/09 — pre-spawn durability gate:
- *   `startSupervisor()` (async) is the evidence-enabled
- *   entry point. It mints ProcessId once, emits ONE
- *   `process_spawn_started`, awaits the fsync ACK, and only
- *   then calls `buildStartedSupervisor(ctx)` which performs
- *   the OS spawn. `buildSupervisor()` (sync) is the
- *   FOUNDATION02 no-sink fast path.
+ * CORRECTION10 — arg-type split:
+ *   - buildSupervisor / createSupervisor accept ONLY
+ *     NoEvidenceSupervisorArgs (compile-time enforced).
+ *   - startSupervisor accepts ONLY EvidenceSupervisorArgs and
+ *     awaits the durable `process_spawn_requested` fsync ACK
+ *     before OS spawn.
  */
 
 import { attachBoundedSink } from "./output-capture.js";
@@ -67,18 +53,43 @@ import type { Result } from "../domain/result.js";
 export type Supervisor = SupervisorHandle;
 export type { OuterSupervisorResult } from "./outer-supervisor-result.js";
 
-export type CreateSupervisorArgs = {
+/**
+ * CORRECTION10 — arg-type split.
+ *
+ * The synchronous APIs (`buildSupervisor`, `createSupervisor`)
+ * accept ONLY the no-evidence type. The async `startSupervisor`
+ * accepts ONLY the evidence type. Combining a sync entry
+ * point with durable evidence is impossible at compile time.
+ */
+type BaseSupervisorArgs = {
   readonly spec: ProcessSpec;
   readonly clock: Clock;
   readonly signals: SignalPort;
   readonly spawner: SpawnPort;
   readonly sink?: (e: RuntimeEvent) => void;
   readonly idFactory?: () => ProcessId;
-  readonly evidenceSink?: ProcessEvidenceSink;
-  readonly evidenceObserver?: EvidenceCommitObserver;
-  readonly evidenceIdentity?: ProcessEvidenceIdentity;
   readonly spawnOwnershipObserver?: SpawnOwnershipObserver;
 };
+
+export type NoEvidenceSupervisorArgs = BaseSupervisorArgs & {
+  readonly evidenceSink?: never;
+  readonly evidenceObserver?: never;
+  readonly evidenceIdentity?: never;
+};
+
+export type EvidenceSupervisorArgs = BaseSupervisorArgs & {
+  readonly evidenceSink: ProcessEvidenceSink;
+  readonly evidenceIdentity: ProcessEvidenceIdentity;
+  readonly evidenceObserver?: EvidenceCommitObserver;
+};
+
+export type CreateSupervisorArgs =
+  | NoEvidenceSupervisorArgs
+  | (BaseSupervisorArgs & {
+      readonly evidenceSink: ProcessEvidenceSink;
+      readonly evidenceIdentity: ProcessEvidenceIdentity;
+      readonly evidenceObserver?: EvidenceCommitObserver;
+    });
 
 // Re-export helper utilities for backwards compat (tests import
 // defaultIdFactory / emptyEscalation / etc. from supervisor-builder).
@@ -98,28 +109,18 @@ type StartedSupervisorContext = {
 /**
  * CORRECTION09 — Async start function (FOUNDATION03 evidence path).
  *
- * Path:
- *   1. validateProcessSpec; on invalid spec, returns
- *      Result.error(invalid_process_spec). NO evidence commit.
- *   2. Mints ProcessId, creates EvidenceRuntime bound to it.
- *   3. Emits ONE `process_spawn_started` (critical boundary).
- *   4. Awaits the fsync ACK.
- *   5a. ok:true  → buildStartedSupervisor(ctx) — preserves
- *       ProcessId + EvidenceRuntime; OS spawn happens here.
- *   5b. {ok:false}|rejection → Result.error with
- *       evidence_persistence_failure(stage=spawn_request).
- *       No supervisor, no OS process.
- *
- * No-sink callers go through sync `buildSupervisor()` (FOUNDATION02).
+ * Path: validateProcessSpec → mint ProcessId → create
+ * EvidenceRuntime → emit ONE `process_spawn_started` → await
+ * fsync ACK → on pass: buildStartedSupervisor(ctx); on fail:
+ * Result.error(evidence_persistence_failure(stage=spawn_request)).
+ * No-sink callers go through sync `buildSupervisor()`
+ * (FOUNDATION02).
  */
 export async function startSupervisor(
-  args: CreateSupervisorArgs,
+  args: EvidenceSupervisorArgs,
 ): Promise<Result<Supervisor, ProcessFailure>> {
   const v = validateProcessSpec(args.spec);
   if (v.ok === false) return err(v.error);
-  if (args.evidenceSink === undefined || args.evidenceIdentity === undefined) {
-    return ok(buildSupervisor(args));
-  }
 
   const processId: ProcessId = (args.idFactory ?? helperDefaultIdFactory)();
   const evidenceRuntime: EvidenceRuntime = createEvidenceRuntime({
@@ -148,13 +149,13 @@ export async function startSupervisor(
 /**
  * CORRECTION09 — Post-gate supervisor builder. Used by
  * `startSupervisor` after the durability gate has passed.
- * Contract:
- *   - `idFactory` is NEVER called again.
- *   - `process_spawn_started` is NEVER emitted again.
- *   - The EvidenceRuntime is reused (tracker + sealed + observer).
+ * Contract: `idFactory` is NEVER called again, the
+ * `process_spawn_started` critical commit is NEVER emitted
+ * again, the EvidenceRuntime is reused (tracker + sealed +
+ * observer).
  */
 export function buildStartedSupervisor(
-  args: CreateSupervisorArgs,
+  args: EvidenceSupervisorArgs,
   ctx: StartedSupervisorContext,
 ): Supervisor {
   return buildSupervisorInternal({
@@ -165,29 +166,15 @@ export function buildStartedSupervisor(
   });
 }
 
-export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
-  const id = (args.idFactory ?? helperDefaultIdFactory)();
-  const evidenceRuntime: EvidenceRuntime | null =
-    args.evidenceSink !== undefined && args.evidenceIdentity !== undefined
-      ? createEvidenceRuntime({
-          processId: id,
-          evidenceSink: args.evidenceSink,
-          evidenceIdentity: args.evidenceIdentity,
-          ...(args.evidenceObserver !== undefined
-            ? { evidenceObserver: args.evidenceObserver }
-            : {}),
-        })
-      : null;
-  // The sync buildSupervisor() entry-point emits ONE
-  // process_spawn_started (FOUNDATION02 behavior preserved)
-  // and does NOT wait for the gate. The async startSupervisor()
-  // path uses buildStartedSupervisor() which omits the
-  // process_spawn_started emit (because the caller already
-  // emitted one and awaited its ACK).
+export function buildSupervisor(args: NoEvidenceSupervisorArgs): Supervisor {
+  // CORRECTION10: type system enforces no-evidence fields.
+  // `emitSpawnStarted:true` keeps the user-supplied sink
+  // receiving the runtime event (SE01) without a critical
+  // evidence commit (no evidenceRuntime).
   return buildSupervisorInternal({
     args,
-    processId: id,
-    evidenceRuntime,
+    processId: (args.idFactory ?? helperDefaultIdFactory)(),
+    evidenceRuntime: null,
     emitSpawnStarted: true,
   });
 }
@@ -204,7 +191,7 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
  * already emitted the pre-spawn intent and awaited its ACK.
  */
 function buildSupervisorInternal(input: {
-  readonly args: CreateSupervisorArgs;
+  readonly args: CreateSupervisorArgs | EvidenceSupervisorArgs | NoEvidenceSupervisorArgs;
   readonly processId: ProcessId;
   readonly evidenceRuntime: EvidenceRuntime | null;
   readonly emitSpawnStarted: boolean;

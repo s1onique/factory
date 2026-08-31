@@ -90,16 +90,42 @@ export function wireSpawnOwnershipHandler(args: {
   };
   args.child.on("spawn", () => {
     onSpawn().catch((e: unknown) => {
-      // CORRECTION09 §19: fail-closed. spawnResolution MUST
-      // resolve so the lifecycle can proceed to cleanup.
+      // CORRECTION10 §10-§19: by the time `spawn` fires,
+      // Node has already created the child. We MUST NOT
+      // resolve as `spawn_failed` (semantically "creation
+      // never happened"). The OS process exists; the current
+      // supervisor owns it and must run bounded cleanup.
+      //
+      // Fail-closed via `post_spawn_internal_failure`:
+      //   - carries the real pid/pgid (read AFTER spawn)
+      //   - preserves the typed cause
+      //   - is routed through cleanupPath by runLifecycle
       const message =
         e instanceof Error ? e.message : String(e);
       const pid = args.child.pid;
+      const pgid = args.child.pgid !== null && args.child.pgid !== undefined
+        ? args.child.pgid
+        : (pid !== null && pid !== undefined ? pid : null);
+      if (pid === null || pid === undefined || pgid === null || pgid === undefined) {
+        // No real pid/pgid available → we genuinely cannot
+        // claim ownership; this is the only legal path back
+        // to `spawn_failed` post-spawn.
+        args.resolveSpawnResolution({
+          kind: "spawn_failed",
+          failure: {
+            kind: "internal_process_failure",
+            message: `async spawn-handler rejected without pid/pgid: ${message}`,
+          },
+        });
+        return;
+      }
       args.resolveSpawnResolution({
-        kind: "spawn_failed",
+        kind: "post_spawn_internal_failure",
+        pid,
+        pgid,
         failure: {
           kind: "internal_process_failure",
-          message: `async spawn-handler rejected: ${message}; pid=${pid ?? "null"}`,
+          message: `async spawn-handler rejected: ${message}`,
         },
       });
     });

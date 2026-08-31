@@ -669,18 +669,29 @@ test("ID03 no duplicate process_spawn_requested in evidence stream", async () =>
     `process_spawn_requested emitted exactly ONCE; got ${requests.length}`,
   );
 });// ---------------------------------------------------------------------------
-// SG07 — async spawn-handler unexpected failure → typed spawn_failed
+// SG07 — async spawn-handler unexpected failure → typed
+// post_spawn_internal_failure → bounded current-owner cleanup
+// (CORRECTION10 §11-§16)
 //
-// This test injects an UNEXPECTED rejection into the async body
-// of the spawn handler (via a sink that throws on
-// process_spawned commit). The catch in wireSpawnOwnershipHandler
-// MUST convert this into a typed spawn_resolution(spawn_failed)
-// and the supervisor's await() MUST settle within a bounded
-// window (no hang).
+// After Node "spawn" fires, the OS child exists. Any
+// rejection in the post-spawn handler MUST NOT label this
+// as `spawn_failed`. The supervisor MUST run bounded cleanup
+// against the real pgid and surface an internal_process_failure
+// cause through the cleanup path. This test exercises the
+// synchronous-throw sink and asserts the resulting state.
 // ---------------------------------------------------------------------------
 
-test("SG07 async spawn-handler rejection: lifecycle settles with typed spawn_failed", async () => {
+test("SG07 async spawn-handler rejection → post_spawn_internal_failure → bounded cleanup", async () => {
+  // The cleanup path should TERM the group, observe it absent,
+  // then close, and surface internal_process_failure.
   const signals = new CountingSignalPort();
+  // Pre-populate the alive group: the supervisor will TERM/SIGKILL
+  // it and observe it absent. SIGKILL removes the entry from the set.
+  signals.aliveGroups.add(7777);
+  // Use a long-deadline realClock so the deadline path does not
+  // win the lifecycle race before the spawn-handler catch
+  // resolves `post_spawn_internal_failure`.
+  const spec: ProcessSpec = { ...basicSpec(), deadlineMs: 60_000 };
 
   const childRef: { current: FakeChild | null } = { current: null };
   const capturingSpawner: SpawnPort = {
@@ -692,11 +703,12 @@ test("SG07 async spawn-handler rejection: lifecycle settles with typed spawn_fai
   };
 
   // Sink: process_spawn_requested ACK is fine but
-  // process_spawned commit throws SYNCHRONOUSLY (so the
+  // process_spawned commit throws SYNCHRONOUSLY (the
   // safeEmit returns a rejected promise AND any code that
   // tries to await it will reject). The supervisor's
   // child.on("spawn") async body must convert this to a
-  // typed spawn_failed via the catch path.
+  // typed post_spawn_internal_failure via the catch path,
+  // NOT spawn_failed.
   const throwingSink: ProcessEvidenceSink = {
     commitCritical: (input): Promise<ProcessEvidenceCommitResult> => {
       if (input.payload.kind === "process_spawn_requested") {
@@ -715,8 +727,8 @@ test("SG07 async spawn-handler rejection: lifecycle settles with typed spawn_fai
   };
 
   const r = await startSupervisor({
-    spec: basicSpec(),
-    clock: manualClock(),
+    spec,
+    clock: realClock(),
     signals,
     spawner: capturingSpawner,
     sink: () => {},
@@ -727,9 +739,21 @@ test("SG07 async spawn-handler rejection: lifecycle settles with typed spawn_fai
   if (!r.ok) throw new Error("expected ok");
   const supervisor = r.value;
 
-  // Fire the 'spawn' event.
+  // Fire the 'spawn' event so the supervisor's async handler
+  // body rejects on the throwing sink. The catch must resolve
+  // spawnResolution as `post_spawn_internal_failure`.
   if (childRef.current !== null) {
     childRef.current.fireSpawn();
+  }
+
+  // Yield to the microtask queue so the async spawn-handler
+  // can reject and the supervisor's catch path can resolve
+  // spawnResolution as `post_spawn_internal_failure`. We then
+  // drive cleanup by firing close so the bounded close wait
+  // observes Node's close boundary.
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  if (childRef.current !== null) {
+    childRef.current.fireClose(0, null);
   }
 
   // Bounded await: MUST settle, NOT hang.
@@ -739,25 +763,40 @@ test("SG07 async spawn-handler rejection: lifecycle settles with typed spawn_fai
       setTimeout(() => reject(new Error("supervisor.await() HUNG")), 1000),
     ),
   ]);
-  // Either outcome.kind === "spawn_failed" (catch path) OR
-  // outcome.kind === "cleanup_failed" with internal_process_failure
-  // (requireCriticalCommit classified the rejection as
-  // internal_malfunction). Both satisfy the CORRECTION09 §19
-  // contract: the supervisor MUST settle, NOT hang.
-  if (settle.outcome.kind === "cleanup_failed" && settle.outcome.failure.kind === "internal_process_failure") {
-    // requireCriticalCommit caught the rejection. Acceptable.
-    return;
-  }
+
+  // The supervisor MUST route through the cleanup path
+  // because Node's "spawn" already fired. Outcome is
+  // cleanup_failed (typed cause = internal_process_failure)
+  // OR — in the case where requireCriticalCommit
+  // re-classified — a same cleanup_failed with the
+  // preserved internal_process_failure kind. We MUST NOT
+  // see spawn_failed (CORRECTION10 §14: forbidden after
+  // spawn event).
   assert.equal(
     settle.outcome.kind,
-    "spawn_failed",
-    `expected spawn_failed; got ${settle.outcome.kind}`,
+    "cleanup_failed",
+    `expected cleanup_failed (post-spawn cleanup); got ${settle.outcome.kind}`,
   );
-  if (settle.outcome.kind === "spawn_failed") {
+  if (settle.outcome.kind === "cleanup_failed") {
+    const f = settle.outcome.failure;
     assert.equal(
-      settle.outcome.failure.kind,
+      f.kind,
       "internal_process_failure",
-      `expected internal_process_failure; got ${JSON.stringify(settle.outcome.failure)}`,
+      `expected internal_process_failure; got ${JSON.stringify(f)}`,
+    );
+    // The cleanup MUST have been attempted (TERM requested)
+    // against the real pgid (7777).
+    const e = settle.outcome.escalation;
+    assert.equal(e.termRequested, true, "TERM MUST have been requested against the live pgid");
+    assert.equal(
+      e.termSent === true || e.termResult !== null,
+      true,
+      "TERM MUST have been attempted; got " + JSON.stringify(e),
+    );
+    assert.equal(
+      signals.aliveGroups.has(7777),
+      false,
+      "the OS process group MUST have been reaped by the current owner",
     );
   }
 });// ---------------------------------------------------------------------------

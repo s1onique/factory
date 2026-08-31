@@ -19,7 +19,7 @@
 import { promises as fs } from "node:fs";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
 import { LedgerBackedProcessEvidenceSink } from "../../src/process/process-evidence-sink.js";
-import { buildSupervisor, startSupervisor } from "../../src/process/supervisor-builder.js";
+import { startSupervisor } from "../../src/process/supervisor-builder.js";
 import { realClock } from "../../src/process/clock.js";
 import { nodeSignalPort } from "../../src/process/process-group.js";
 import { nodeSpawnPort } from "../../src/process/node-spawn.js";
@@ -209,7 +209,7 @@ async function cp04(args: Args, ledger: JsonlLedger): Promise<void> {
     stdoutLimitBytes: 0,
     stderrLimitBytes: 0,
   };
-  const supervisor = buildSupervisor({
+  const startR = await startSupervisor({
     spec,
     clock: realClock(),
     signals: nodeSignalPort(),
@@ -219,6 +219,11 @@ async function cp04(args: Args, ledger: JsonlLedger): Promise<void> {
     evidenceIdentity: identity,
     idFactory: () => makeProcessId(args.processId),
   });
+  if (startR.ok === false) {
+    process.stderr.write("cp04 startSupervisor failed: " + JSON.stringify(startR.error) + "\n");
+    process.exit(1);
+  }
+  const supervisor = startR.value;
   // The supervisor runs internally; await() will block.
   // We do not call await() — instead we poll the ledger and exit 137.
   void supervisor.await();
@@ -302,7 +307,7 @@ async function runRealSupervisorWith(args: Args, ledger: JsonlLedger, point: "CP
     stdoutLimitBytes: 0,
     stderrLimitBytes: 0,
   };
-  const supervisor = buildSupervisor({
+  const startR = await startSupervisor({
     spec,
     clock: realClock(),
     signals: nodeSignalPort(),
@@ -312,6 +317,11 @@ async function runRealSupervisorWith(args: Args, ledger: JsonlLedger, point: "CP
     evidenceIdentity: identity,
     idFactory: () => makeProcessId(args.processId),
   });
+  if (startR.ok === false) {
+    process.stderr.write("cp06/07 startSupervisor failed: " + JSON.stringify(startR.error) + "\n");
+    process.exit(1);
+  }
+  const supervisor = startR.value;
   // Use awaitOuter to surface the actual PGID/PID for cleanup
   // registration.
   const outer = await supervisor.awaitOuter();
@@ -353,7 +363,7 @@ async function cp10(args: Args, ledger: JsonlLedger): Promise<void> {
     stdoutLimitBytes: 0,
     stderrLimitBytes: 0,
   };
-  const supervisor = buildSupervisor({
+  const startR = await startSupervisor({
     spec,
     clock: realClock(),
     signals: nodeSignalPort(),
@@ -363,6 +373,11 @@ async function cp10(args: Args, ledger: JsonlLedger): Promise<void> {
     evidenceIdentity: identity,
     idFactory: () => makeProcessId(args.processId),
   });
+  if (startR.ok === false) {
+    process.stderr.write("cp10 startSupervisor failed: " + JSON.stringify(startR.error) + "\n");
+    process.exit(1);
+  }
+  const supervisor = startR.value;
   const r = await supervisor.await();
   emit({ kind: "barrier", point: "CP10", outcome_kind: r.outcome.kind });
 }

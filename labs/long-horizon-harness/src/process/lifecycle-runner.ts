@@ -148,6 +148,21 @@ export async function runLifecycle(input: LifecycleInput): Promise<ProcessResult
         cause: res.failure,
       });
     }
+    if (res.kind === "post_spawn_internal_failure") {
+      // CORRECTION10 §11-§13: same ownership obligation as
+      // ownership_persistence_failed — the OS process exists.
+      // The cause is INTERNAL (not evidence persistence), so
+      // the typed `internal_process_failure` is preserved
+      // through cleanup.
+      setSealed();
+      return cleanupPath({
+        id, spec, engine, safeEmit, setSealed, child,
+        spawnResolution, processCompletion, stdoutSink, stderrSink,
+        startedAtMs, clock, closeWaitController, closeWaitTimeoutMs,
+        pgid: res.pgid,
+        cause: res.failure,
+      });
+    }
     // Spawned. If termination has already become authoritative,
     // escalate against the freshly known pgid.
     if (engine.hasTerminalCause()) {
@@ -310,6 +325,16 @@ async function settleAfterTermination(p: {
       startedAtMs: p.startedAtMs, finishedAtMs: p.clock.nowMs(),
       escalation: freshEscalation(),
     };
+  }
+  if (res.kind === "post_spawn_internal_failure") {
+    // CORRECTION10: termination already fired; spawn
+    // resolved with internal failure carrying pid/pgid.
+    // Run cleanup against the real pgid.
+    p.setSealed();
+    return await cleanupPath({
+      id: p.id, spec: p.spec, engine: p.engine, safeEmit: p.safeEmit, setSealed: p.setSealed, child: p.child, spawnResolution: p.spawnResolution, processCompletion: p.processCompletion, stdoutSink: p.stdoutSink, stderrSink: p.stderrSink, startedAtMs: p.startedAtMs, clock: p.clock, closeWaitController: p.closeWaitController, closeWaitTimeoutMs: p.closeWaitTimeoutMs, pgid: res.pgid,
+      cause: res.failure,
+    });
   }
   // Child is live. Run cleanup against the spawned pgid.
   return await cleanupPath({

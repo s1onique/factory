@@ -109,13 +109,32 @@ export type ProcessOutcome =
  *
  *   - spawned(pid, pgid)  — Node "spawn" event fired.
  *   - spawn_failed(failure) — Node "error" event fired BEFORE
- *     "spawn", or the spawn port threw synchronously.
+ *     "spawn", or the spawn port threw synchronously, or pid
+ *     was unavailable before any successful ownership. STRICT:
+ *     this kind MUST NOT be used after Node "spawn" has fired.
+ *   - ownership_persistence_failed(pid, pgid, failure) — Node
+ *     "spawn" fired; the supervisor attempted to durably
+ *     commit ownership; the fsync rejected. The current owner
+ *     retains authority and runs bounded cleanup.
+ *   - post_spawn_internal_failure(pid, pgid, failure) —
+ *     Node "spawn" fired; some unexpected exception in the
+ *     post-spawn handler (NOT the ownership commit itself)
+ *     occurred. The current owner retains authority and runs
+ *     bounded cleanup. Distinct from
+ *     ownership_persistence_failed because the cause is
+ *     internal machinery, not ledger failure.
  */
 export type SpawnResolution =
   | { readonly kind: "spawned"; readonly pid: number; readonly pgid: number }
   | { readonly kind: "spawn_failed"; readonly failure: ProcessFailure }
   | {
       readonly kind: "ownership_persistence_failed";
+      readonly pid: number;
+      readonly pgid: number;
+      readonly failure: ProcessFailure;
+    }
+  | {
+      readonly kind: "post_spawn_internal_failure";
       readonly pid: number;
       readonly pgid: number;
       readonly failure: ProcessFailure;

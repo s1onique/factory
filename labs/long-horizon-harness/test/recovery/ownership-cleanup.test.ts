@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSupervisor } from "../../src/process/supervisor-builder.js";
+import { startSupervisor } from "../../src/process/supervisor-builder.js";
 import { realClock } from "../../src/process/clock.js";
 import { nodeSignalPort } from "../../src/process/process-group.js";
 import { nodeSpawnPort } from "../../src/process/node-spawn.js";
@@ -54,7 +54,7 @@ test("OG01/OG02 ownership gate fails closed when commitCritical returns {ok:fals
   const spawner = nodeSpawnPort();
   const clock = realClock();
   const sink = faultInjectingSink();
-  const handle = buildSupervisor({
+  const startR = await startSupervisor({
     spec: SPEC,
     clock,
     signals,
@@ -68,6 +68,8 @@ test("OG01/OG02 ownership gate fails closed when commitCritical returns {ok:fals
       eventIdFactory: () => makeEventId("e-og"),
     },
   });
+  if (startR.ok === false) throw new Error("startSupervisor failed: " + JSON.stringify(startR.error));
+  const handle = startR.value;
   const r = await handle.await();
   assert.equal(r.outcome.kind, "cleanup_failed");
   if (r.outcome.kind === "cleanup_failed") {
@@ -107,7 +109,7 @@ test("OG03 internal sink malfunction also fails closed", async () => {
     commitObservation: (): Promise<ProcessEvidenceCommitResult> =>
       Promise.resolve({ ok: true, seq: 0 }),
   };
-  const handle = buildSupervisor({
+  const startR = await startSupervisor({
     spec: SPEC,
     clock,
     signals,
@@ -121,6 +123,8 @@ test("OG03 internal sink malfunction also fails closed", async () => {
       eventIdFactory: () => makeEventId("e-og2"),
     },
   });
+  if (startR.ok === false) throw new Error("startSupervisor failed: " + JSON.stringify(startR.error));
+  const handle = startR.value;
   const r = await handle.await();
   assert.equal(r.outcome.kind, "cleanup_failed");
   // CORRECTION03 §2: mechanically prove the
