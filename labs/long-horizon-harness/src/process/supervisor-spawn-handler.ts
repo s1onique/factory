@@ -4,6 +4,13 @@
  * resolve pid+pgid, observe the SpawnOwnershipObserver seam,
  * emit process_spawned, and resolve spawnResolution based on
  * the durable commit outcome.
+ *
+ * CORRECTION09 §19: if the async listener body throws an
+ * unexpected rejection (programming bug, sink malfunction
+ * surfaced through the listener path, etc.), the supervisor
+ * MUST NOT leave spawnResolution pending. Instead it
+ * resolves `spawn_failed(internal_process_failure)` so the
+ * supervisor's current-owner cleanup path can run.
  */
 import type { ProcessId, RuntimeEvent } from "./process-types.js";
 import type { SpawnedChild, SpawnResolution } from "./process-types.js";
@@ -23,9 +30,11 @@ export function wireSpawnOwnershipHandler(args: {
   readonly spawnOwnershipObserver: SpawnOwnershipObserver | undefined;
   readonly setSpawnEventSeen: (v: boolean) => void;
 }): void {
-  // CORRECTION08 §28: Node's EventEmitter does NOT await
+  // CORRECTION09 §22: Node's EventEmitter does NOT await
   // returned Promises. The async listener body MUST be
-  // wrapped in a catch so a rejection cannot escape.
+  // wrapped in a catch. The catch converts any unexpected
+  // rejection into a typed spawn failure (fail-closed) —
+  // it does NOT silently drop the rejection.
   const onSpawn = async (): Promise<void> => {
     args.setSpawnEventSeen(true);
     const pid = args.child.pid;
@@ -33,45 +42,66 @@ export function wireSpawnOwnershipHandler(args: {
       ? args.child.pgid
       : (pid !== null && pid !== undefined ? pid : null);
     if (pid === null || pid === undefined) {
-      args.resolveSpawnResolution({ kind: "spawn_failed", failure: { kind: "internal_process_failure", message: "spawn event fired but pid is null" } });
+      args.resolveSpawnResolution({
+        kind: "spawn_failed",
+        failure: {
+          kind: "internal_process_failure",
+          message: "spawn event fired but pid is null",
+        },
+      });
       return;
     }
     args.cachedPidRef.current = pid;
     args.cachedPgidRef.current = pgid;
-    // CORRECTION06 §3: observer seam BEFORE process_spawned commit.
-    // CORRECTION06 §4: await the observer BEFORE emitting process_spawned
-    await runSpawnOwnershipObserver(args.spawnOwnershipObserver, { processId: args.id, pid, pgid: pgid ?? pid });
-    args.safeEmit({ kind: "process_spawned", processId: args.id, pid, processGroupId: pgid ?? pid });
-    const awaitOwnership = async (): Promise<void> => {
-      const p = args.ownershipCommitRef.current;
-      if (p === null) {
-        args.resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
-        return;
-      }
-      const outcome = await requireCriticalCommit(p as Promise<ProcessEvidenceCommitResult>);
-      if (outcome.kind === "ok") {
-        args.resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
-        return;
-      }
+    await runSpawnOwnershipObserver(args.spawnOwnershipObserver, {
+      processId: args.id,
+      pid,
+      pgid: pgid ?? pid,
+    });
+    args.safeEmit({
+      kind: "process_spawned",
+      processId: args.id,
+      pid,
+      processGroupId: pgid ?? pid,
+    });
+    const p = args.ownershipCommitRef.current;
+    if (p === null) {
+      args.resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
+      return;
+    }
+    const outcome = await requireCriticalCommit(p as Promise<ProcessEvidenceCommitResult>);
+    if (outcome.kind === "ok") {
+      args.resolveSpawnResolution({ kind: "spawned", pid, pgid: pgid ?? pid });
+      return;
+    }
+    args.resolveSpawnResolution({
+      kind: "ownership_persistence_failed",
+      pid,
+      pgid: pgid ?? pid,
+      failure: {
+        kind: "evidence_persistence_failure",
+        stage: "ownership",
+        message:
+          outcome.stage === "internal_malfunction"
+            ? `process_spawned commit threw: ${outcome.message}`
+            : `process_spawned commit failed: ${outcome.message}`,
+      },
+    });
+  };
+  args.child.on("spawn", () => {
+    onSpawn().catch((e: unknown) => {
+      // CORRECTION09 §19: fail-closed. spawnResolution MUST
+      // resolve so the lifecycle can proceed to cleanup.
+      const message =
+        e instanceof Error ? e.message : String(e);
+      const pid = args.child.pid;
       args.resolveSpawnResolution({
-        kind: "ownership_persistence_failed",
-        pid,
-        pgid: pgid ?? pid,
+        kind: "spawn_failed",
         failure: {
-          kind: "evidence_persistence_failure",
-          stage: "ownership",
-          message: outcome.stage === "internal_malfunction" ? `process_spawned commit threw: ${outcome.message}` : `process_spawned commit failed: ${outcome.message}`,
+          kind: "internal_process_failure",
+          message: `async spawn-handler rejected: ${message}; pid=${pid ?? "null"}`,
         },
       });
-    };
-    await awaitOwnership();
-  };
-  // Attach the wrapped listener so unhandled rejections cannot escape.
-  args.child.on("spawn", () => {
-    onSpawn().catch((_e: unknown) => {
-      // Swallow: observers are passive and the supervisor's
-      // own await path is what drives spawn resolution.
-      // Listener exceptions must not crash the process.
     });
   });
 }

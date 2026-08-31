@@ -1,5 +1,5 @@
 /**
- * Supervisor builder (CORRECTION08).
+ * Supervisor builder (CORRECTION09).
  *
  * Eager single-shot lifecycle with:
  *   - eager 'spawn', 'error', 'exit', 'close', 'stdout',
@@ -18,24 +18,20 @@
  * Synchronous spawn() throws: emit process_spawn_failed BEFORE
  * sealing.
  *
- * CORRECTION08 — pre-spawn durability gate:
- *   When `args.evidenceSink !== undefined`, the OS `spawn()`
- *   call is deferred until the durable intent record
- *   `process_spawn_requested` fsync ACK succeeds. This is
- *   enforced by `startSupervisor()` (async). The sync
- *   `buildSupervisor()` here is the FOUNDATION02 no-sink fast
- *   path AND the post-gate wiring step called by
- *   `startSupervisor()` once the gate has passed.
- *
- *   The CORRECTION07 `.then()` pseudo-gate is removed.
- *   There is no production execution path in which
- *   `args.spawner.spawn()` runs while the request commit is
- *   unresolved.
+ * CORRECTION08/09 — pre-spawn durability gate:
+ *   `startSupervisor()` (async) is the evidence-enabled
+ *   entry point. It mints ProcessId once, emits ONE
+ *   `process_spawn_started`, awaits the fsync ACK, and only
+ *   then calls `buildStartedSupervisor(ctx)` which performs
+ *   the OS spawn. `buildSupervisor()` (sync) is the
+ *   FOUNDATION02 no-sink fast path.
  */
 
 import { attachBoundedSink } from "./output-capture.js";
 import { createTerminationEngine } from "./termination.js";
 import { runLifecycle } from "./lifecycle-runner.js";
+import { validateProcessSpec } from "./process-types.js";
+import { err, ok } from "../domain/result.js";
 import type {
   ProcessCompletion,
   ProcessFailure,
@@ -54,10 +50,9 @@ import type { EvidenceCommitObserver, ProcessEvidenceIdentity } from "./process-
 import type { ProcessEvidenceSink, ProcessEvidenceCommitResult } from "./process-evidence-sink.js";
 import type { EvidenceRuntime } from "./supervisor-evidence-runtime.js";
 import { createEvidenceRuntime } from "./supervisor-evidence-runtime.js";
-import { buildSupervisorHandle, type SupervisorHandle } from "./supervisor-handle-api.js";
+import { buildSupervisorHandle, makeCancelFn, type SupervisorHandle } from "./supervisor-handle-api.js";
 import {
   awaitSpawnIntent,
-  spawnRequestFailureResult,
 } from "./supervisor-spawn-gate.js";
 import {
   buildSpawnFailure,
@@ -70,11 +65,6 @@ import type { OuterSupervisorResult } from "./outer-supervisor-result.js";
 import type { Result } from "../domain/result.js";
 
 export type Supervisor = SupervisorHandle;
-
-/**
- * CORRECTION04 §29/§41: a typed outer result that distinguishes
- * the execution outcome from the durability outcome.
- */
 export type { OuterSupervisorResult } from "./outer-supervisor-result.js";
 
 export type CreateSupervisorArgs = {
@@ -95,115 +85,88 @@ export type CreateSupervisorArgs = {
 export const defaultIdFactory = helperDefaultIdFactory;
 export { buildSpawnFailure, emptyCaptured, emptyEscalation, invalidSpecSupervisorResult };
 
+// CORRECTION09: identity-continuity context. `startSupervisor()`
+// mints a single ProcessId once, creates the EvidenceRuntime once,
+// and emits exactly one durable `process_spawn_requested`. On
+// gate-pass it calls `buildStartedSupervisor()` passing the
+// preminted ID and the existing runtime through.
+type StartedSupervisorContext = {
+  readonly processId: ProcessId;
+  readonly evidenceRuntime: EvidenceRuntime;
+};
+
 /**
- * CORRECTION08 — async start function.
- *
- * Public entry point for the FOUNDATION03 evidence-enabled
- * supervisor. Awaits the durable intent ACK BEFORE the OS
- * spawn. Returns a typed Result.
+ * CORRECTION09 — Async start function (FOUNDATION03 evidence path).
  *
  * Path:
- *   - emits process_spawn_started (critical boundary)
- *   - awaits the fsync ACK
- *   - on failure/rejection → typed evidence_persistence_failure
- *     (stage: spawn_request); no spawn, no cleanup, return
- *     synthetic Supervisor whose await() reports the failure
- *   - on success → calls buildSupervisor(args), which spawns
- *     the child synchronously and wires the lifecycle
+ *   1. validateProcessSpec; on invalid spec, returns
+ *      Result.error(invalid_process_spec). NO evidence commit.
+ *   2. Mints ProcessId, creates EvidenceRuntime bound to it.
+ *   3. Emits ONE `process_spawn_started` (critical boundary).
+ *   4. Awaits the fsync ACK.
+ *   5a. ok:true  → buildStartedSupervisor(ctx) — preserves
+ *       ProcessId + EvidenceRuntime; OS spawn happens here.
+ *   5b. {ok:false}|rejection → Result.error with
+ *       evidence_persistence_failure(stage=spawn_request).
+ *       No supervisor, no OS process.
  *
- * No-sink fast path: when args.evidenceSink is undefined the
- * gate trivially resolves to `spawn`; the OS spawn runs
- * synchronously (FOUNDATION02 behavior preserved).
+ * No-sink callers go through sync `buildSupervisor()` (FOUNDATION02).
  */
 export async function startSupervisor(
   args: CreateSupervisorArgs,
 ): Promise<Result<Supervisor, ProcessFailure>> {
-  const id = (args.idFactory ?? helperDefaultIdFactory)();
-  const startedAtMs = args.clock.nowMs();
+  const v = validateProcessSpec(args.spec);
+  if (v.ok === false) return err(v.error);
+  if (args.evidenceSink === undefined || args.evidenceIdentity === undefined) {
+    return ok(buildSupervisor(args));
+  }
 
-  const evidenceRuntime: EvidenceRuntime | null =
-    args.evidenceSink !== undefined && args.evidenceIdentity !== undefined
-      ? createEvidenceRuntime({
-          processId: id,
-          evidenceSink: args.evidenceSink,
-          evidenceIdentity: args.evidenceIdentity,
-          ...(args.evidenceObserver !== undefined
-            ? { evidenceObserver: args.evidenceObserver }
-            : {}),
-        })
-      : null;
+  const processId: ProcessId = (args.idFactory ?? helperDefaultIdFactory)();
+  const evidenceRuntime: EvidenceRuntime = createEvidenceRuntime({
+    processId,
+    evidenceSink: args.evidenceSink,
+    evidenceIdentity: args.evidenceIdentity,
+    ...(args.evidenceObserver !== undefined
+      ? { evidenceObserver: args.evidenceObserver }
+      : {}),
+  });
 
-  const intentCommit =
-    evidenceRuntime !== null
-      ? evidenceRuntime.safeEmit({
-          kind: "process_spawn_started",
-          processId: id,
-        })
-      : null;
+  const intentCommit = evidenceRuntime.safeEmit({
+    kind: "process_spawn_started",
+    processId,
+  });
 
   const gate = await awaitSpawnIntent(intentCommit);
   if (gate.kind !== "spawn") {
-    const finishedAtMs = args.clock.nowMs();
-    const failure = gate.failure;
-    if (evidenceRuntime !== null) evidenceRuntime.seal();
-    const synthetic = makeSpawnRequestFailureSupervisor({
-      id,
-      spec: args.spec,
-      startedAtMs,
-      finishedAtMs,
-      failure,
-    });
-    return { ok: true, value: synthetic };
+    evidenceRuntime.seal();
+    return err(gate.failure);
   }
 
-  return { ok: true, value: buildSupervisor(args) };
+  return ok(buildStartedSupervisor(args, { processId, evidenceRuntime }));
 }
 
 /**
- * Build a Supervisor handle for a spawn_request persistence
- * failure. The result is durable: the spawn_requested record
- * is NOT durable, so restart-from-ledger will see `not_started`.
- * This Supervisor reports a typed `spawn_failed` outcome with
- * `evidence_persistence_failure(spawn_request)` as the cause.
+ * CORRECTION09 — Post-gate supervisor builder. Used by
+ * `startSupervisor` after the durability gate has passed.
+ * Contract:
+ *   - `idFactory` is NEVER called again.
+ *   - `process_spawn_started` is NEVER emitted again.
+ *   - The EvidenceRuntime is reused (tracker + sealed + observer).
  */
-function makeSpawnRequestFailureSupervisor(args: {
-  readonly id: ProcessId;
-  readonly spec: ProcessSpec;
-  readonly startedAtMs: number;
-  readonly finishedAtMs: number;
-  readonly failure: ProcessFailure;
-}): Supervisor {
-  const result = spawnRequestFailureResult({
-    id: args.id,
-    spec: args.spec,
-    startedAtMs: args.startedAtMs,
-    finishedAtMs: args.finishedAtMs,
-    failure: args.failure,
+export function buildStartedSupervisor(
+  args: CreateSupervisorArgs,
+  ctx: StartedSupervisorContext,
+): Supervisor {
+  return buildSupervisorInternal({
+    args,
+    processId: ctx.processId,
+    evidenceRuntime: ctx.evidenceRuntime,
+    emitSpawnStarted: false,
   });
-  return {
-    handle: () => ({
-      processId: args.id,
-      pid: null,
-      processGroupId: null,
-    }),
-    cancel: () => {},
-    await: () => Promise.resolve(result),
-    awaitOuter: () =>
-      Promise.resolve({
-        kind: "durably_settled",
-        process: result,
-        observedPgid: null,
-        observedPid: null,
-      } satisfies OuterSupervisorResult),
-  };
 }
 
 export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
-
   const id = (args.idFactory ?? helperDefaultIdFactory)();
-  const sink: (e: RuntimeEvent) => void = args.sink ?? (() => {});
-  const ownershipCommitRef = { current: null as Promise<unknown> | null };
-
   const evidenceRuntime: EvidenceRuntime | null =
     args.evidenceSink !== undefined && args.evidenceIdentity !== undefined
       ? createEvidenceRuntime({
@@ -215,6 +178,42 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
             : {}),
         })
       : null;
+  // The sync buildSupervisor() entry-point emits ONE
+  // process_spawn_started (FOUNDATION02 behavior preserved)
+  // and does NOT wait for the gate. The async startSupervisor()
+  // path uses buildStartedSupervisor() which omits the
+  // process_spawn_started emit (because the caller already
+  // emitted one and awaited its ACK).
+  return buildSupervisorInternal({
+    args,
+    processId: id,
+    evidenceRuntime,
+    emitSpawnStarted: true,
+  });
+}
+
+/**
+ * CORRECTION09 — Internal builder used by both
+ * `buildSupervisor` (sync, FOUNDATION02 fast path) and
+ * `buildStartedSupervisor` (post-gate, evidence-enabled path).
+ *
+ * The optional `emitSpawnStarted` flag determines whether this
+ * function emits `process_spawn_started` (and the underlying
+ * `process_spawn_requested` critical commit). The async
+ * `startSupervisor` path sets it to `false` because the caller
+ * already emitted the pre-spawn intent and awaited its ACK.
+ */
+function buildSupervisorInternal(input: {
+  readonly args: CreateSupervisorArgs;
+  readonly processId: ProcessId;
+  readonly evidenceRuntime: EvidenceRuntime | null;
+  readonly emitSpawnStarted: boolean;
+}): Supervisor {
+  const args = input.args;
+  const id = input.processId;
+  const evidenceRuntime = input.evidenceRuntime;
+  const sink: (e: RuntimeEvent) => void = args.sink ?? (() => {});
+  const ownershipCommitRef = { current: null as Promise<unknown> | null };
 
   const sealedRef = { current: false };
   const safeEmit = (e: RuntimeEvent): Promise<ProcessEvidenceCommitResult> | null => {
@@ -230,13 +229,14 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
 
   const startedAtMs = args.clock.nowMs();
 
-  // CORRECTION08: emit process_spawn_started. The event is
-  // ALWAYS sent to the user-supplied sink (FOUNDATION02
-  // behavior). For the evidence-enabled path, the gate has
-  // ALREADY passed by the time we get here; the post-gate
-  // `process_spawned` commit is the next critical boundary
-  // the supervisor must observe.
-  safeEmit({ kind: "process_spawn_started", processId: id });
+  // Emit process_spawn_started EXACTLY ONCE. The sync
+  // buildSupervisor() entry-point emits it (FOUNDATION02
+  // preservation). The async startSupervisor() path skips it
+  // because it has already emitted and awaited the ACK before
+  // calling buildStartedSupervisor().
+  if (input.emitSpawnStarted) {
+    safeEmit({ kind: "process_spawn_started", processId: id });
+  }
 
   let child: SpawnedChild;
   try {
@@ -364,13 +364,13 @@ export function buildSupervisor(args: CreateSupervisorArgs): Supervisor {
     deadlineController, closeWaitController, closeWaitTimeoutMs,
   });
 
-  const cancel = (): void => {
-    if (engine.hasTerminalCause()) return;
-    safeEmit({ kind: "cancellation_requested", processId: id });
-    engine.requestCleanup("cancelled");
-    deadlineController.abort();
-    resolveTermination("cancelled");
-  };
+  const cancel = makeCancelFn({
+    id,
+    engine,
+    safeEmit,
+    deadlineController,
+    resolveTermination,
+  });
 
   return buildSupervisorHandle(
     {

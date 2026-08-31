@@ -1,5 +1,5 @@
 /**
- * CORRECTION08 — Supervisor handle API.
+ * CORRECTION09 — Supervisor handle API.
  *
  * The handle returned to callers exposes the four lifecycle
  * methods (handle, cancel, await, awaitOuter) plus the
@@ -13,10 +13,9 @@
  * CORRECTION05: awaitOuter surfaces the UNMUTATED lifecycle
  * outcome plus the settlement verdict.
  *
- * CORRECTION08: no behavior change. The handle API is purely
- * a presentation layer; the spawn-gate fix lives in
- * supervisor-spawn-gate.ts and the orchestrator in
- * supervisor-builder.ts.
+ * CORRECTION09: cancel() returns a closure capturing the
+ * termination engine and channel — extracted here so the
+ * supervisor-builder.ts orchestrator stays small.
  */
 
 import type {
@@ -24,6 +23,7 @@ import type {
   ProcessHandle,
   ProcessId,
   ProcessResult,
+  RuntimeEvent,
 } from "./process-types.js";
 import type { OuterSupervisorResult } from "./outer-supervisor-result.js";
 import type { CreateSupervisorArgs } from "./supervisor-builder.js";
@@ -49,6 +49,31 @@ export type SupervisorHandle = {
   readonly await: () => Promise<ProcessResult>;
   readonly awaitOuter: () => Promise<OuterSupervisorResult>;
 };
+
+/**
+ * CORRECTION09: build a `cancel()` closure from the engine
+ * + termination channel + safe emit. Extracted so
+ * supervisor-builder.ts doesn't need to carry this 8-line
+ * block.
+ */
+export function makeCancelFn(args: {
+  readonly id: ProcessId;
+  readonly engine: {
+    hasTerminalCause: () => boolean;
+    requestCleanup: (cause: "deadline" | "cancelled") => void;
+  };
+  readonly safeEmit: (e: RuntimeEvent) => void;
+  readonly deadlineController: { abort: () => void };
+  readonly resolveTermination: (cause: "deadline" | "cancelled") => void;
+}): () => void {
+  return (): void => {
+    if (args.engine.hasTerminalCause()) return;
+    args.safeEmit({ kind: "cancellation_requested", processId: args.id });
+    args.engine.requestCleanup("cancelled");
+    args.deadlineController.abort();
+    args.resolveTermination("cancelled");
+  };
+}
 
 /**
  * Builds the supervisor handle (handle/cancel/await/awaitOuter)
@@ -77,7 +102,14 @@ export function buildSupervisorHandle(
           r.outcome.kind === "cleanup_failed" &&
           r.outcome.failure.kind === "evidence_persistence_failure" &&
           r.outcome.failure.stage === "ownership";
-        if (inputs.evidenceRuntime !== null && !isOwnershipFailure) {
+        // CORRECTION09 §13: a spawn_failed outcome carries no
+        // real OS process. The supervisor MUST NOT emit a
+        // synthetic process_close_observed or
+        // process_result_committed — those records would
+        // imply ownership of a process that never existed and
+        // would confuse the recovery projector.
+        const isSpawnFailed = r.outcome.kind === "spawn_failed";
+        if (inputs.evidenceRuntime !== null && !isOwnershipFailure && !isSpawnFailed) {
           await inputs.evidenceRuntime.tracker.waitAll();
           inputs.evidenceRuntime.safeEmit({
             kind: "process_close_observed",
@@ -184,4 +216,3 @@ export function buildSupervisorHandle(
 
   return { handle, cancel: cancelFn, await: wrappedAwait, awaitOuter };
 }
-

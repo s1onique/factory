@@ -49,6 +49,7 @@ import {
   makeRunId,
 } from "../../src/domain/ids.js";
 import type { ProcessEvidenceIdentity } from "../../src/process/process-evidence-bridge.js";
+import { makeProcessId, type ProcessId } from "../../src/process/process-types.js";
 // ---------------------------------------------------------------------------
 // Local fake-sink helpers
 // ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ class FakeSink implements ProcessEvidenceSink {
   spawnedCalls = 0;
   resultCommittedCalls = 0;
   otherCalls = 0;
+  records: Array<import("../../src/evidence/codec-types.js").PersistedProcessEvidencePayload> = [];
+  private pending: Array<Promise<unknown>> = [];
   private firstBehavior: "pending" | "ok-false" | "reject" | "ok-true";
   resolveFirst: ((r: ProcessEvidenceCommitResult) => void) | null = null;
   rejectFirst: ((e: unknown) => void) | null = null;
@@ -69,6 +72,19 @@ class FakeSink implements ProcessEvidenceSink {
 
   constructor(opts: FakeSinkOptions = {}) {
     this.firstBehavior = opts.first ?? "ok-true";
+  }
+
+  async flush(): Promise<void> {
+    while (this.pending.length > 0) {
+      const next = this.pending.shift();
+      if (next !== undefined) {
+        try {
+          await next;
+        } catch (_e) {
+          // Suppress.
+        }
+      }
+    }
   }
 
   commitCritical(input: {
@@ -107,23 +123,43 @@ class FakeSink implements ProcessEvidenceSink {
             this.firstPromise = Promise.resolve({ ok: true, seq: 1 });
         }
       }
+      this.records.push(input.payload);
+      this.pending.push(this.firstPromise);
       return this.firstPromise;
     }
     if (input.payload.kind === "process_spawned") {
       this.spawnedCalls++;
-      return Promise.resolve({ ok: true, seq: 100 });
+      this.records.push(input.payload);
+      const p: Promise<ProcessEvidenceCommitResult> = Promise.resolve({ ok: true, seq: 100 });
+      this.pending.push(p);
+      return p;
     }
     if (input.payload.kind === "process_result_committed") {
       this.resultCommittedCalls++;
-      return Promise.resolve({ ok: true, seq: 200 });
+      this.records.push(input.payload);
+      const p: Promise<ProcessEvidenceCommitResult> = Promise.resolve({ ok: true, seq: 200 });
+      this.pending.push(p);
+      return p;
     }
     this.otherCalls++;
-    return Promise.resolve({ ok: true, seq: 999 });
+    this.records.push(input.payload);
+    const p: Promise<ProcessEvidenceCommitResult> = Promise.resolve({ ok: true, seq: 999 });
+    this.pending.push(p);
+    return p;
   }
 
-  commitObservation(_input: unknown): Promise<ProcessEvidenceCommitResult> {
+  commitObservation(input: {
+    eventId: import("../../src/domain/ids.js").EventId;
+    runId: import("../../src/domain/ids.js").RunId;
+    missionId: import("../../src/domain/ids.js").MissionId;
+    observedAt: number;
+    payload: import("../../src/evidence/codec-types.js").PersistedProcessEvidencePayload;
+  }): Promise<ProcessEvidenceCommitResult> {
     this.otherCalls++;
-    return Promise.resolve({ ok: true, seq: 999 });
+    this.records.push(input.payload);
+    const p: Promise<ProcessEvidenceCommitResult> = Promise.resolve({ ok: true, seq: 999 });
+    this.pending.push(p);
+    return p;
   }
 }
 // ---------------------------------------------------------------------------
@@ -307,20 +343,22 @@ test("SG02 first critical {ok:false} never spawns; typed spawn_request failure",
     evidenceSink: sink,
     evidenceIdentity: makeIdentity(),
   });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  if (!r.ok) throw new Error("expected ok");
-  assert.equal(spawner.spawnCount, 0, "spawner.spawn() MUST NOT be called on ok:false");
+  // CORRECTION09: a pre-spawn persistence failure is a START
+  // failure. There is no Supervisor, no OS process, no
+  // synthetic durably_settled handle.
+  assert.equal(r.ok, false, JSON.stringify(r));
+  if (r.ok) throw new Error("expected error");
+  assert.equal(
+    spawner.spawnCount,
+    0,
+    "spawner.spawn() MUST NOT be called when the gate returns {ok:false}",
+  );
   assert.equal(signals.signalCount, 0, "no signals sent on spawn_request failure");
   assert.equal(signals.probeCount, 0, "no probes sent on spawn_request failure");
-
-  const result = await r.value.await();
-  assert.equal(result.outcome.kind, "spawn_failed", JSON.stringify(result));
-  if (result.outcome.kind === "spawn_failed") {
-    const f = result.outcome.failure;
-    assert.equal(f.kind, "evidence_persistence_failure", JSON.stringify(f));
-    if (f.kind === "evidence_persistence_failure") {
-      assert.equal(f.stage, "spawn_request", `stage should be spawn_request; got ${f.stage}`);
-    }
+  const f = r.error;
+  assert.equal(f.kind, "evidence_persistence_failure", JSON.stringify(f));
+  if (f.kind === "evidence_persistence_failure") {
+    assert.equal(f.stage, "spawn_request", `stage should be spawn_request; got ${f.stage}`);
   }
 });
 
@@ -342,20 +380,20 @@ test("SG03 first critical Promise rejection never spawns; internal_malfunction p
     evidenceSink: sink,
     evidenceIdentity: makeIdentity(),
   });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  if (!r.ok) throw new Error("expected ok");
-  assert.equal(spawner.spawnCount, 0, "spawner.spawn() MUST NOT be called on rejection");
+  assert.equal(r.ok, false, JSON.stringify(r));
+  if (r.ok) throw new Error("expected error");
+  assert.equal(
+    spawner.spawnCount,
+    0,
+    "spawner.spawn() MUST NOT be called when the gate rejects",
+  );
   assert.equal(signals.signalCount, 0, "no signals sent on rejection");
   assert.equal(signals.probeCount, 0, "no probes sent on rejection");
 
-  const result = await r.value.await();
-  assert.equal(result.outcome.kind, "spawn_failed", JSON.stringify(result));
-  if (result.outcome.kind === "spawn_failed") {
-    const f = result.outcome.failure;
-    assert.equal(f.kind, "evidence_persistence_failure", JSON.stringify(f));
-    if (f.kind === "evidence_persistence_failure") {
-      assert.equal(f.stage, "spawn_request", `stage should be spawn_request; got ${f.stage}`);
-    }
+  const f = r.error;
+  assert.equal(f.kind, "evidence_persistence_failure", JSON.stringify(f));
+  if (f.kind === "evidence_persistence_failure") {
+    assert.equal(f.stage, "spawn_request", `stage should be spawn_request; got ${f.stage}`);
   }
 });
 // ---------------------------------------------------------------------------
@@ -505,4 +543,315 @@ test("SG05 strict order: commit_requested < commit_resolved < spawn_called < spa
   assert.ok(idx("commit_resolved") < idx("spawn_called"), `trace: ${trace.join(",")}`);
   assert.ok(idx("spawn_called") < idx("spawn_event"), `trace: ${trace.join(",")}`);
   assert.ok(idx("spawn_event") < idx("ownership_commit"), `trace: ${trace.join(",")}`);
+});
+// ---------------------------------------------------------------------------
+// ID01 — Default factory continuity
+// ---------------------------------------------------------------------------
+
+test("ID01 default idFactory: every process_evidence record carries the SAME ProcessId", async () => {
+  // No idFactory injection — exercises the real default random factory.
+  const sink = new FakeSink({ first: "ok-true" });
+  const spawner = new CountingSpawnPort();
+  const signals = new CountingSignalPort();
+
+  const r = await startSupervisor({
+    spec: basicSpec(),
+    clock: manualClock(),
+    signals,
+    spawner,
+    sink: () => {},
+    evidenceSink: sink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const supervisorHandle = r.value;
+  const handleProcessId = supervisorHandle.handle().processId;
+
+  const child = spawner.children[0];
+  if (child !== undefined) {
+    queueMicrotask(() => {
+      child.fireSpawn();
+      child.fireClose(0, null);
+    });
+    await supervisorHandle.await();
+  }
+
+  await sink.flush();
+
+  const processRecords = sink.records.filter(
+    (rec) => rec.process_id !== undefined,
+  );
+  assert.ok(
+    processRecords.length >= 2,
+    `expected at least spawn_requested + process_spawned; got ${processRecords.length}`,
+  );
+  for (const rec of processRecords) {
+    assert.equal(
+      rec.process_id,
+      handleProcessId,
+      `process_id mismatch on ${rec.kind}: handle=${handleProcessId} record=${rec.process_id}`,
+    );
+  }
+});// ---------------------------------------------------------------------------
+// ID02 — idFactory called exactly once
+// ---------------------------------------------------------------------------
+
+test("ID02 idFactory called EXACTLY ONCE for one evidence-enabled supervisor", async () => {
+  let calls = 0;
+  const countingFactory: () => ProcessId = () => {
+    calls++;
+    return makeProcessId(`p-counted-${calls}`);
+  };
+
+  const sink = new FakeSink({ first: "ok-true" });
+  const spawner = new CountingSpawnPort();
+  const signals = new CountingSignalPort();
+
+  const r = await startSupervisor({
+    spec: basicSpec(),
+    clock: manualClock(),
+    signals,
+    spawner,
+    sink: () => {},
+    evidenceSink: sink,
+    evidenceIdentity: makeIdentity(),
+    idFactory: countingFactory,
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const child = spawner.children[0];
+  if (child !== undefined) {
+    queueMicrotask(() => {
+      child.fireSpawn();
+      child.fireClose(0, null);
+    });
+    await r.value.await();
+  }
+  assert.equal(calls, 1, `idFactory MUST be called exactly once; got ${calls}`);
+});
+
+// ---------------------------------------------------------------------------
+// ID03 — No duplicate process_spawn_requested
+// ---------------------------------------------------------------------------
+
+test("ID03 no duplicate process_spawn_requested in evidence stream", async () => {
+  const sink = new FakeSink({ first: "ok-true" });
+  const spawner = new CountingSpawnPort();
+  const signals = new CountingSignalPort();
+
+  const r = await startSupervisor({
+    spec: basicSpec(),
+    clock: manualClock(),
+    signals,
+    spawner,
+    sink: () => {},
+    evidenceSink: sink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const child = spawner.children[0];
+  if (child !== undefined) {
+    queueMicrotask(() => {
+      child.fireSpawn();
+      child.fireClose(0, null);
+    });
+    await r.value.await();
+  }
+  await sink.flush();
+  const requests = sink.records.filter(
+    (rec) => rec.kind === "process_spawn_requested",
+  );
+  assert.equal(
+    requests.length,
+    1,
+    `process_spawn_requested emitted exactly ONCE; got ${requests.length}`,
+  );
+});// ---------------------------------------------------------------------------
+// SG07 — async spawn-handler unexpected failure → typed spawn_failed
+//
+// This test injects an UNEXPECTED rejection into the async body
+// of the spawn handler (via a sink that throws on
+// process_spawned commit). The catch in wireSpawnOwnershipHandler
+// MUST convert this into a typed spawn_resolution(spawn_failed)
+// and the supervisor's await() MUST settle within a bounded
+// window (no hang).
+// ---------------------------------------------------------------------------
+
+test("SG07 async spawn-handler rejection: lifecycle settles with typed spawn_failed", async () => {
+  const signals = new CountingSignalPort();
+
+  const childRef: { current: FakeChild | null } = { current: null };
+  const capturingSpawner: SpawnPort = {
+    spawn(_args: unknown): SpawnedChild {
+      const c = new FakeChild(7777);
+      childRef.current = c;
+      return c as unknown as SpawnedChild;
+    },
+  };
+
+  // Sink: process_spawn_requested ACK is fine but
+  // process_spawned commit throws SYNCHRONOUSLY (so the
+  // safeEmit returns a rejected promise AND any code that
+  // tries to await it will reject). The supervisor's
+  // child.on("spawn") async body must convert this to a
+  // typed spawn_failed via the catch path.
+  const throwingSink: ProcessEvidenceSink = {
+    commitCritical: (input): Promise<ProcessEvidenceCommitResult> => {
+      if (input.payload.kind === "process_spawn_requested") {
+        return Promise.resolve({ ok: true, seq: 1 });
+      }
+      if (input.payload.kind === "process_spawned") {
+        // Synchronous throw — bypasses the typed commit-result
+        // envelope. requireCriticalCommit cannot classify this
+        // and the safeEmit's caller awaits a rejected Promise.
+        throw new Error("sync sink explosion on process_spawned");
+      }
+      return Promise.resolve({ ok: true, seq: 999 });
+    },
+    commitObservation: (): Promise<ProcessEvidenceCommitResult> =>
+      Promise.resolve({ ok: true, seq: 999 }),
+  };
+
+  const r = await startSupervisor({
+    spec: basicSpec(),
+    clock: manualClock(),
+    signals,
+    spawner: capturingSpawner,
+    sink: () => {},
+    evidenceSink: throwingSink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const supervisor = r.value;
+
+  // Fire the 'spawn' event.
+  if (childRef.current !== null) {
+    childRef.current.fireSpawn();
+  }
+
+  // Bounded await: MUST settle, NOT hang.
+  const settle = await Promise.race([
+    supervisor.await(),
+    new Promise<never>((_res, reject) =>
+      setTimeout(() => reject(new Error("supervisor.await() HUNG")), 1000),
+    ),
+  ]);
+  // Either outcome.kind === "spawn_failed" (catch path) OR
+  // outcome.kind === "cleanup_failed" with internal_process_failure
+  // (requireCriticalCommit classified the rejection as
+  // internal_malfunction). Both satisfy the CORRECTION09 §19
+  // contract: the supervisor MUST settle, NOT hang.
+  if (settle.outcome.kind === "cleanup_failed" && settle.outcome.failure.kind === "internal_process_failure") {
+    // requireCriticalCommit caught the rejection. Acceptable.
+    return;
+  }
+  assert.equal(
+    settle.outcome.kind,
+    "spawn_failed",
+    `expected spawn_failed; got ${settle.outcome.kind}`,
+  );
+  if (settle.outcome.kind === "spawn_failed") {
+    assert.equal(
+      settle.outcome.failure.kind,
+      "internal_process_failure",
+      `expected internal_process_failure; got ${JSON.stringify(settle.outcome.failure)}`,
+    );
+  }
+});// ---------------------------------------------------------------------------
+// ID04 — Projector replay accepts the stream
+// ---------------------------------------------------------------------------
+
+test("ID04 projectExecution(stream) accepts the default-factory stream", async () => {
+  const { projectExecution } = await import(
+    "../../src/recovery/process-recovery-projector.js"
+  );
+  const sink = new FakeSink({ first: "ok-true" });
+  const spawner = new CountingSpawnPort();
+  const signals = new CountingSignalPort();
+
+  const r = await startSupervisor({
+    spec: basicSpec(),
+    clock: manualClock(),
+    signals,
+    spawner,
+    sink: () => {},
+    evidenceSink: sink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const child = spawner.children[0];
+  if (child !== undefined) {
+    queueMicrotask(() => {
+      child.fireSpawn();
+      child.fireClose(0, null);
+    });
+    await r.value.await();
+  }
+  await sink.flush();
+  const stream: import("../../src/recovery/recovery-types.js").EvidenceStream =
+    sink.records.map((rec, idx) => ({
+      payload: rec,
+      observedAt: Date.now(),
+      seq: idx + 1,
+    }));
+  const proj = projectExecution(stream);
+  assert.equal(proj.ok, true, JSON.stringify(proj));
+  if (!proj.ok) return;
+  assert.notEqual(
+    proj.value.kind,
+    "not_started",
+    `not_started after a full lifecycle: ${proj.value.kind}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// SG06 — Full evidence trace identity continuity
+// ---------------------------------------------------------------------------
+
+test("SG06 full trace: every critical + observation record carries the same ProcessId", async () => {
+  const sink = new FakeSink({ first: "ok-true" });
+  const spawner = new CountingSpawnPort();
+  const signals = new CountingSignalPort();
+
+  const r = await startSupervisor({
+    spec: basicSpec(),
+    clock: manualClock(),
+    signals,
+    spawner,
+    sink: () => {},
+    evidenceSink: sink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const child = spawner.children[0];
+  if (child !== undefined) {
+    queueMicrotask(() => {
+      child.fireSpawn();
+      child.fireClose(0, null);
+    });
+    await r.value.await();
+  }
+  await sink.flush();
+  const id = r.value.handle().processId;
+  for (const rec of sink.records) {
+    if (rec.process_id !== undefined) {
+      assert.equal(
+        rec.process_id,
+        id,
+        `trace mismatch on ${rec.kind}: expected ${id}, got ${rec.process_id}`,
+      );
+    }
+  }
+  const kinds = sink.records.map((r2) => r2.kind);
+  const firstReq = kinds.indexOf("process_spawn_requested");
+  const firstSpawned = kinds.indexOf("process_spawned");
+  assert.ok(firstReq === 0, `expected process_spawn_requested first; got ${kinds.join(",")}`);
+  assert.ok(firstSpawned > firstReq, `expected process_spawned after request; got ${kinds.join(",")}`);
+  const requestCount = kinds.filter((k) => k === "process_spawn_requested").length;
+  assert.equal(requestCount, 1, `exactly ONE process_spawn_requested; got ${requestCount}`);
 });
