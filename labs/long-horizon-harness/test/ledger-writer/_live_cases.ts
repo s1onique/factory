@@ -397,45 +397,62 @@ const LWQ07: LiveCase = {
 // --------------------------------------------------------------------
 // LWQ08 — sole-writer exclusion (LW-LIVE08)
 //
-// (B0-QUALIFICATION05) Negative-delta evidence law:
+// (B0-QUALIFICATION06) Strict sole-authority law:
 //
-//   "To prove that an actor caused no durable
-//    mutation, establish a known authoritative
-//    baseline and prove the durable state did not
-//    change. Mere artifact absence is insufficient
-//    when the artifact may legitimately be lazily
-//    created."
+//   "Exactly one sequence-allocation authority may
+//    exist for the run."
 //
-// The earlier shapes of LWQ08 were both broken:
-//   - ENOENT interpreted as zero records (false-green)
-//   - ENOENT treated as failure (false-red — the
-//     ledger is lazily created on first append, so a
-//     sole-writer scenario with no append at all can
-//     legitimately have no ledger yet).
+// The lease + bind-time policy exist so that a
+// second LedgerWriter child cannot reach readiness
+// against a runDir already owned by a live writer.
+// A successful `bootHandle(tmp)` therefore means a
+// second writer has acquired the lease and bound the
+// UDS — the architectural invariant has already been
+// violated, regardless of whether a subsequent append
+// happens to fail.
 //
-// The corrected shape establishes a positive
-// authoritative baseline via W1, then attempts a
-// concurrent W2 against the same runDir, then proves
-// the durable state still contains ONLY W1's commit.
+// QUALIFICATION05's LWQ08 accepted two shapes:
+//
+//   A. W2 boot rejected (correct)
+//   B. W2 boot succeeded but append failed closed
+//      (INCORRECT — the invariant is broken the
+//      moment W2 reaches readiness; an append that
+//      happens to fail is not a substitute for the
+//      bind-time + lease rejection)
+//
+// QUALIFICATION06's LWQ08 requires:
+//
+//   1. W1 baseline append = PASS, seq = 1.
+//   2. Ledger exists with exactly 1 line.
+//   3. W2 boot attempt against the SAME runDir =
+//      REJECTED. No second WriterHandle may be
+//      returned.
+//   4. Ledger still has exactly 1 record, and that
+//      record is the W1 baseline (decoded via
+//      parsePersistedLine).
+//   5. W2 is never used for an append — the fact
+//      that W2 never acquired authority is the
+//      stronger evidence.
+//
+// The negative-delta evidence law from
+// QUALIFICATION05 is preserved as a secondary check.
 // --------------------------------------------------------------------
 
 const LWQ08: LiveCase = {
   id: "LWQ08",
   title:
-    "sole-writer exclusion: known W1 baseline remains unchanged by concurrent W2 (LW-LIVE08)",
+    "sole-writer exclusion: W2 boot against an authoritative runDir is rejected; W1 baseline preserved (LW-LIVE08)",
   async run(ctx) {
     const tmp = await ctx.mkTmp("lwq08");
     const BASELINE_COMMIT = "lwq08-owner-baseline";
-    const FORBIDDEN_COMMIT = "lwq08-forbidden-second-writer";
 
     const h1 = await ctx.bootHandle(tmp);
 
-    let r2Append: { ok?: boolean } = {};
-    let r2BootError: unknown = undefined;
     let h2: WriterHandle | undefined;
+    let w2BootRejected = false;
+    let w2BootError: unknown = undefined;
     let ledgerText = "";
     let baselineRecord: ParsedPersistedLine | undefined;
-    let forbiddenRecordCount = 0;
 
     try {
       // Step 1 — establish authoritative baseline via W1.
@@ -463,27 +480,18 @@ const LWQ08: LiveCase = {
           `LWQ08: baseline must produce exactly 1 ledger line; got ${baselineLines.length}`);
       }
 
-      // Step 3 — attempt a concurrent W2 while W1 is still
-      // authoritative. Both outcomes are acceptable:
-      //   A. boot of W2 rejected (live writer exclusion)
-      //   B. handle returned but append fails closed
-      // The forbidden outcome is W2 successfully
-      // committing an event into the ledger.
+      // Step 3 — attempt a concurrent W2 against the SAME
+      // runDir while W1 is still authoritative. The
+      // architectural invariant is: this boot MUST be
+      // rejected. A returned WriterHandle would mean a
+      // second lease + socket bind succeeded — the
+      // invariant is broken, regardless of subsequent
+      // append behavior.
       try {
         h2 = await ctx.bootHandle(tmp);
-        try {
-          const r = await ctx.appendCounting(h2, {
-            commitId: FORBIDDEN_COMMIT,
-            event: makeEvent(2, "lwq08-second"),
-          });
-          r2Append = r;
-        } catch (e) {
-          r2Append = { ok: false };
-          r2BootError = e;
-        }
       } catch (e) {
-        // Boot of W2 rejected — acceptable.
-        r2BootError = e;
+        w2BootRejected = true;
+        w2BootError = e;
       }
 
       // Step 4 — read durable state AFTER W2's attempt.
@@ -501,21 +509,42 @@ const LWQ08: LiveCase = {
       try { await h1.stop(); } catch { /* */ }
     }
 
-    // Step 6 — durable postconditions.
+    // Step 6 — strict sole-authority postconditions.
+
+    // (a) W2 boot must have been REJECTED. No second
+    //     WriterHandle may be returned. This is the
+    //     core architectural property.
+    assert.equal(h2, undefined,
+      "LWQ08: concurrent second LedgerWriter MUST NOT reach readiness against an authoritative runDir");
+    assert.equal(w2BootRejected, true,
+      "LWQ08: concurrent boot attempt must be rejected by the lease + bind-time policy");
+    // Surface the rejection kind for diagnostics. The
+    // expected shape is `startLedgerWriter` returning
+    // ok=false with a kind such as `socket_bind_failed`
+    // or similar; `startWriterInTmpDir` then throws.
+    if (w2BootError instanceof Error) {
+      assert.ok(w2BootError.message.length > 0,
+        `LWQ08: rejection message must be non-empty; got ${w2BootError.message}`);
+    } else {
+      throw new Error(
+        `LWQ08: w2BootError must be an Error instance; got ${typeof w2BootError}`,
+      );
+    }
+
+    // (b) Durable state: exactly one record, the W1
+    //     baseline. (Negative-delta evidence law from
+    //     QUALIFICATION05 preserved as a secondary
+    //     check.)
     const lines = ledgerText.split("\n").filter((l) => l.length > 0);
     assert.equal(lines.length, 1,
       `LWQ08: ledger must contain exactly W1's baseline commit; got ${lines.length} lines`);
 
-    // Decode every line; there must be exactly one
-    // record, and its commitId must be the baseline.
     for (const ln of lines) {
       const parsed = parsePersistedLine(ln);
       assert.equal(parsed.ok, true,
         `LWQ08: ledger line must decode; got reason=${parsed.ok ? "" : parsed.reason}`);
       if (!parsed.ok) continue;
-      if (parsed.commitId === FORBIDDEN_COMMIT) {
-        forbiddenRecordCount += 1;
-      } else if (parsed.commitId === BASELINE_COMMIT) {
+      if (parsed.commitId === BASELINE_COMMIT) {
         if (baselineRecord !== undefined) {
           throw new Error("LWQ08: duplicate baseline record in ledger");
         }
@@ -534,17 +563,6 @@ const LWQ08: LiveCase = {
         "LWQ08: baseline sequence must be 1");
       assert.equal(baselineRecord.commitId, BASELINE_COMMIT,
         "LWQ08: baseline commitId must equal the W1 baseline");
-    }
-    assert.equal(forbiddenRecordCount, 0,
-      `LWQ08: W2 must NOT have committed any record; found ${forbiddenRecordCount}`);
-
-    // Forbidden outcome at the client level: W2 reports a
-    // successful append. Boot may succeed (and append
-    // fails closed) or fail outright — both acceptable.
-    assert.notEqual(r2Append.ok, true,
-      "LWQ08: W2 must NOT have reported a successful append");
-    if (r2BootError !== undefined) {
-      void r2BootError; // surfacing only
     }
 
     await ctx.destroyRun(tmp);
