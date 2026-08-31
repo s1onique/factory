@@ -27,6 +27,7 @@
  *   F04-CORR01-D08 (writer restart recovers sequence solely
  *   from durable ledger state)
  *   F04-CORR01-D09 (only one LedgerWriter per run ledger)
+ *   B0-CORR01 §B0-C01-01..12 (acceptance contract)
  */
 
 import type { RunId, MissionId } from "../domain/ids.js";
@@ -97,30 +98,48 @@ export function makeLedgerWriterInstanceId(value: string): LedgerWriterInstanceI
 }
 
 /**
- * The on-disk durable dedup index.
+ * Per-commitId durable record kept in the dedup index.
  *
- * Each entry maps either:
- *   - commitId → sequence (caller-stable retry identity)
- *   - contentHash → sequence (content-addressed fallback)
+ * The LedgerWriter is the SOLE authority on the sequence
+ * number (B0-C01-01). The dedup index maps commitId → the
+ * sequence the writer actually committed, paired with the
+ * contentHash of the canonical envelope bytes so the writer
+ * can detect:
  *
- * The index is rewritten atomically (tmp + rename + dir fsync)
- * after every successful append so a crash never leaves a
- * half-written index. The index is the durability boundary
- * for ACK-loss recovery: if the writer crashes after fsync'ing
- * the JSONL append but before sending the ACK, the next
- * instance will read this index and the client's retry will
- * receive the original sequence.
+ *   - same commitId + same contentHash → replay (B0-C01-05)
+ *   - same commitId + different contentHash → CONFLICTING
+ *     commit (B0-C01-06). A commitId is the stable caller-
+ *     side identity of a logical evidence commit; its
+ *     content must not drift underneath the same identity.
+ *   - different commitId + identical content → distinct
+ *     logical commits (B0-C01-07). Two independently emitted
+ *     events can legitimately share bytes; the dedup key
+ *     is the commitId alone, not the contentHash.
+ *
+ * The contentHash is therefore an INTEGRITY field bound to
+ * the commitId, NOT an alternate commit identity.
+ *
+ * Derived-index law (B0-C01-04): a performance index may
+ * accelerate recovery, but losing it must never destroy
+ * semantic information required for correct recovery. The
+ * events.jsonl ledger is the authoritative source of
+ * commitId → sequence + contentHash; the dedup sidecar is
+ * a cache that the writer rebuilds from the ledger on
+ * startup.
  */
+export type DedupEntry = {
+  readonly sequence: number;
+  readonly contentHash: string;
+};
+
 export type DedupIndex = {
-  readonly byCommitId: Readonly<Record<string, number>>;
-  readonly byContentHash: Readonly<Record<string, number>>;
+  readonly byCommitId: Readonly<Record<string, DedupEntry>>;
   readonly maxSequence: number;
 };
 
 export function emptyDedupIndex(): DedupIndex {
   return {
     byCommitId: {},
-    byContentHash: {},
     maxSequence: 0,
   };
 }
@@ -134,8 +153,49 @@ export type AppendResult =
         | { readonly kind: "writer_busy" }
         | { readonly kind: "writer_crashed"; readonly message: string }
         | { readonly kind: "invalid_envelope"; readonly reason: string }
+        | { readonly kind: "conflicting_commit"; readonly message: string }
         | { readonly kind: "append_failed"; readonly message: string }
         | { readonly kind: "writer_rejected"; readonly reason: string };
+    };
+
+/**
+ * Outcome of a `who_are_you` identity handshake against a
+ * writer socket. Used both by the spawn-readiness gate (does
+ * the spawned instance own the socket we observed?) and by
+ * the stale-socket recovery protocol (does this socket still
+ * represent a live, compatible writer?).
+ */
+export type WhoAreYouResult =
+  | {
+      readonly ok: true;
+      readonly instanceId: LedgerWriterInstanceId;
+      readonly runId: string;
+      readonly missionId: string;
+      readonly socketPath: string;
+      readonly startedAt: number;
+      readonly maxSequence: number;
+    }
+  | {
+      readonly ok: false;
+      readonly error:
+        | { readonly kind: "no_response"; readonly message: string }
+        | { readonly kind: "protocol_error"; readonly message: string };
+    };
+
+/**
+ * Outcome of the bind-time path-collision probe. The
+ * LedgerWriter MUST NOT blindly unlink a path that already
+ * holds a socket: another live writer may own it.
+ */
+export type PathCollisionResult =
+  | { readonly ok: true; readonly observedKind: "absent" }
+  | { readonly ok: true; readonly observedKind: "stale_socket"; readonly whoAreYou: WhoAreYouResult }
+  | {
+      readonly ok: false;
+      readonly error:
+        | { readonly kind: "live_writer_present"; readonly instanceId?: string; readonly message: string }
+        | { readonly kind: "path_collision"; readonly observedKind: "regular" | "symlink" | "directory" }
+        | { readonly kind: "probe_failed"; readonly message: string };
     };
 
 export type LedgerWriterBinding = {

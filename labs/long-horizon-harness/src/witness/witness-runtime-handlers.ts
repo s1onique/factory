@@ -40,6 +40,12 @@ export type WitnessKey = ReturnType<typeof generateEd25519Keypair>;
 export type RuntimeHandleArgs = {
   readonly runDir: string;
   readonly controlDir: string;
+  /**
+   * B0-CORR01: the LedgerWriter socket path. Required for
+   * durable evidence appends. If absent, handleSignedCommand
+   * fails closed (B0-C01-11).
+   */
+  readonly ledgerWriterSocketPath: string | undefined;
 };
 
 export async function handleFrame(
@@ -156,11 +162,15 @@ export async function handleSignedCommand(
     return encodeCachedResponse(existing.responseBody, ctx, key, p.commandId);
   }
   const intentAck = await appendWitnessEvidence({
-    runDir: args.runDir,
+    binding: {
+      runDir: args.runDir,
+      socketPath: args.ledgerWriterSocketPath ?? "",
+    },
     runId: ctx.bootstrap.binding.runId,
     missionId: ctx.bootstrap.binding.missionId,
     eventId: eventId("w-cmd"),
     observedAt: Date.now(),
+    commitId: `w-cmd-${p.commandId}`,
     payload: {
       kind: "witness_command_requested",
       witness_id: ctx.bootstrap.binding.witnessId,

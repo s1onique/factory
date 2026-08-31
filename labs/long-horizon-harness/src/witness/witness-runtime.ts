@@ -40,6 +40,13 @@ export type WitnessProcessArgs = {
   readonly missionId: string;
   readonly attemptId: string;
   readonly processId: string;
+  /**
+   * B0-CORR01: the LedgerWriter socket path. The witness
+   * routes evidence appends through the writer; it does NOT
+   * write events.jsonl directly (B0-C01-11). If this is
+   * absent (legacy bootstrap), the witness fails closed.
+   */
+  readonly ledgerWriterSocketPath?: string;
 };
 
 export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void> {
@@ -52,14 +59,31 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
   const runId = args.runId as import("../domain/ids.js").RunId;
   const missionId = args.missionId as import("../domain/ids.js").MissionId;
 
+  // B0-C01-11: refuse to start without a writer binding. The
+  // witness MUST NOT write events.jsonl directly; the
+  // LedgerWriter owns the run's events.jsonl. If the
+  // supervisor forgot to provide a binding, fail closed
+  // rather than silently fall back to direct writes.
+  if (typeof args.ledgerWriterSocketPath !== "string" || args.ledgerWriterSocketPath.length === 0) {
+    process.stderr.write(
+      "witness: ledgerWriterSocketPath is required (B0-C01-11)\n",
+    );
+    process.exit(2);
+  }
+  const binding = {
+    runDir: args.runDir,
+    socketPath: args.ledgerWriterSocketPath,
+  };
+
   const key = generateEd25519Keypair();
   // F04-D33: durable witness_start_requested BEFORE spawn.
   const startAck = await appendWitnessEvidence({
-    runDir: args.runDir,
+    binding,
     runId,
     missionId,
     eventId: eventId("w-start"),
     observedAt: Date.now(),
+    commitId: `w-start-${witnessInstanceId}`,
     payload: {
       kind: "witness_start_requested",
       witness_id: witnessId,
@@ -107,7 +131,11 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
   const bindR = await listenOnUnixSocket({
     socketPath: args.socketPath,
     onFrame: (json) =>
-      handleFrame(json, key, { runDir: args.runDir, controlDir: args.controlDir }),
+      handleFrame(json, key, {
+        runDir: args.runDir,
+        controlDir: args.controlDir,
+        ledgerWriterSocketPath: args.ledgerWriterSocketPath,
+      }),
   });
   if (!bindR.ok) {
     process.stderr.write(`witness: bind failed: ${JSON.stringify(bindR.error)}\n`);
@@ -117,11 +145,12 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
 
   // F04-D32/D34: durable witness_ready
   const readyAck = await appendWitnessEvidence({
-    runDir: args.runDir,
+    binding,
     runId,
     missionId,
     eventId: eventId("w-ready"),
     observedAt: Date.now(),
+    commitId: `w-ready-${witnessInstanceId}`,
     payload: {
       kind: "witness_ready",
       witness_id: witnessId,

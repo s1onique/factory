@@ -1,110 +1,160 @@
 /**
- * FOUNDATION04 — witness evidence ledger appender.
+ * FOUNDATION04 — B0-CORR01 — witness evidence ledger appender.
  *
- * Reuses the existing JsonlLedger durability guarantees by
- * computing the next sequence from the authoritative file and
- * writing a witness_evidence envelope via the existing
- * `appendCommittedLineToFile` fsync helper.
+ * After B0-CORR01: this module is a CLIENT of the
+ * LedgerWriter. It does NOT touch events.jsonl directly
+ * (B0-C01-11: no direct events.jsonl writer remains in
+ * witness/supervisor paths). The LedgerWriter owns the
+ * authoritative sequence allocation, the durability
+ * boundary, and the on-disk commitId binding.
  *
- * This module does NOT write a second JSONL file. It only adds
- * witness_evidence envelopes to the existing events.jsonl (F04-D84).
+ * The witness submits an UNSEQUENCED typed witness_evidence
+ * payload plus a commitId; the writer constructs the
+ * canonical envelope, allocates the sequence, fsyncs the
+ * ledger, and ACKs the (sequence, contentHash). The
+ * caller treats `appended` and `replay` identically: both
+ * mean the witness's commitId is durably committed at that
+ * sequence.
  *
- * The JsonlLedger class itself is frozen at FOUNDATION03 §29; we
- * cannot modify its internals. We CAN call its exported fsync
- * helper directly because that helper is the existing
- * durability primitive.
+ * If a LedgerWriter binding is not provided, the helper
+ * fails closed: there is no fallback path that would let
+ * the witness write events.jsonl directly, because that
+ * would defeat the single-writer authority.
  */
 
-import { promises as fs } from "node:fs";
-import { LEDGER_FILENAME } from "../evidence/jsonl-ledger.js";
-import { appendCommittedLineToFile } from "../evidence/ledger-internals.js";
-import { encodeWitnessEvidenceEnvelope } from "../evidence/codec-encode.js";
-import { decodeJsonText } from "./witness-codec-decode.js";
 import type { EventId, MissionId, RunId } from "../domain/ids.js";
 import type { PersistedWitnessEvidence } from "./witness-types-persisted.js";
+import {
+  appendToLedgerWriter,
+  whoAreYouLedgerWriter,
+  type WhoAreYouClientResult,
+} from "../ledger-writer/ledger-writer-client.js";
+import { canonicalContentHash } from "../ledger-writer/ledger-writer-canonicalize.js";
+import {
+  ledgerWriterSocketPath,
+  type StartLedgerWriterOptions,
+} from "../ledger-writer/ledger-writer-process.js";
+import { startLedgerWriter } from "../ledger-writer/ledger-writer-process.js";
+import { makeCommitId } from "../ledger-writer/ledger-writer-types.js";
 
 export type WitnessLedgerError =
-  | { readonly kind: "read_failed"; readonly message: string }
-  | { readonly kind: "decode_failed"; readonly reason: string }
-  | { readonly kind: "append_failed"; readonly message: string };
+  | { readonly kind: "writer_unavailable"; readonly socketPath: string }
+  | { readonly kind: "writer_crashed"; readonly message: string }
+  | { readonly kind: "invalid_envelope"; readonly reason: string }
+  | { readonly kind: "conflicting_commit"; readonly message: string }
+  | { readonly kind: "append_failed"; readonly message: string }
+  | { readonly kind: "writer_rejected"; readonly reason: string };
 
 export type WitnessLedgerResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: WitnessLedgerError };
 
+export type WitnessLedgerBinding = {
+  readonly runDir: string;
+  readonly socketPath: string;
+};
+
 /**
- * Append a witness-evidence record to the run's events.jsonl.
+ * Append a witness-evidence record through the LedgerWriter.
  *
- * The witness MUST be a separate process from the supervisor
- * (F04-D20). Concurrent appends from supervisor + witness
- * contend on the same file; F04-D33/D48 require the witness to
- * observe the durability ACK before invoking any kernel action.
- *
- * In practice the witness is the SOLE writer during its own
- * bootstrap phases; the supervisor appends only between phases.
- * The ledger's per-process mutex is not visible to the witness
- * process — that is why this helper reads-then-appends under a
- * single fsync. The supervisor is responsible for not racing the
- * witness during bootstrap (F04-D33: start_requested durability
- * before spawn; F04-D34: ready durability before activate).
+ * The caller supplies either a `binding` (a known
+ * socketPath) or the spawn-time `opts` (to start a fresh
+ * writer — only for tests / first-run bootstrapping). In
+ * normal operation the supervisor owns the writer and the
+ * witness holds a binding to it.
  */
 export async function appendWitnessEvidence(args: {
-  readonly runDir: string;
+  readonly binding: WitnessLedgerBinding;
   readonly runId: RunId;
   readonly missionId: MissionId;
   readonly eventId: EventId;
   readonly observedAt: number;
   readonly payload: PersistedWitnessEvidence;
-}): Promise<WitnessLedgerResult<{ readonly seq: number }>> {
-  const filePath = args.runDir + "/" + LEDGER_FILENAME;
-  let nextSeq = 1;
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    // Extract just the sequence number from each envelope without
-    // doing full validation. We trust the previously-committed
-    // envelopes to be well-formed (the ledger has its own torn-
-    // tail recovery); we only need to know the next sequence
-    // number for our append.
-    let maxSeq = 0;
-    for (const line of raw.split("\n")) {
-      if (line.length === 0) continue;
-      let parsed: unknown;
-      try {
-        parsed = decodeJsonText(line);
-      } catch {
-        continue;
-      }
-      if (typeof parsed !== "object" || parsed === null) continue;
-      const seq = (parsed as { sequence?: unknown }).sequence;
-      if (typeof seq === "number" && Number.isInteger(seq) && seq > maxSeq) {
-        maxSeq = seq;
-      }
-    }
-    nextSeq = maxSeq + 1;
-  } catch (e: unknown) {
-    const code = (e as { code?: string }).code;
-    if (code !== "ENOENT") {
-      return {
-        ok: false,
-        error: { kind: "read_failed", message: e instanceof Error ? e.message : String(e) },
-      };
-    }
-  }
-  const envelope = encodeWitnessEvidenceEnvelope({
+  readonly commitId: string;
+}): Promise<WitnessLedgerResult<{ readonly seq: number; readonly contentHash: string }>> {
+  const event = {
+    kind: "witness_evidence" as const,
     eventId: args.eventId,
-    runId: args.runId,
-    missionId: args.missionId,
-    seq: nextSeq,
     observedAt: args.observedAt,
     payload: args.payload,
+  };
+  const clientContentHash = canonicalContentHash({
+    runId: args.runId,
+    missionId: args.missionId,
+    event,
   });
-  const line = JSON.stringify(envelope) + "\n";
-  const r = await appendCommittedLineToFile(filePath, line);
-  if (r.ok === false) {
+  const r = await appendToLedgerWriter(
+    { socketPath: args.binding.socketPath, timeoutMs: 10000 },
+    {
+      commitId: args.commitId,
+      clientContentHash,
+      event,
+    },
+  );
+  if (!r.ok) {
+    if (r.error.kind === "socket_missing" || r.error.kind === "connect_failed") {
+      return {
+        ok: false,
+        error: {
+          kind: "writer_unavailable",
+          socketPath: args.binding.socketPath,
+        },
+      };
+    }
+    if (r.error.kind === "protocol_error") {
+      const inner = r.error.error as { kind?: string; message?: string };
+      if (inner.kind === "conflicting_commit") {
+        return {
+          ok: false,
+          error: { kind: "conflicting_commit", message: inner.message ?? "" },
+        };
+      }
+      if (inner.kind === "invalid_envelope") {
+        return {
+          ok: false,
+          error: { kind: "invalid_envelope", reason: inner.message ?? "" },
+        };
+      }
+      if (inner.kind === "append_failed") {
+        return {
+          ok: false,
+          error: { kind: "append_failed", message: inner.message ?? "" },
+        };
+      }
+      return {
+        ok: false,
+        error: {
+          kind: "writer_crashed",
+          message: inner.message ?? "unknown protocol error",
+        },
+      };
+    }
     return {
       ok: false,
-      error: { kind: "append_failed", message: r.error.message },
+      error: { kind: "writer_crashed", message: r.error.kind },
     };
   }
-  return { ok: true, value: { seq: nextSeq } };
+  return {
+    ok: true,
+    value: {
+      seq: r.value.sequence,
+      contentHash: r.value.contentHash,
+    },
+  };
 }
+
+/**
+ * Re-export the LedgerWriter spawn primitives so callers can
+ * bootstrap a writer. The supervisor already calls these; the
+ * witness normally consumes a binding the supervisor hands it.
+ */
+export {
+  startLedgerWriter,
+  ledgerWriterSocketPath,
+  whoAreYouLedgerWriter,
+  type StartLedgerWriterOptions,
+  type WhoAreYouClientResult,
+};
+
+// Re-export the makeCommitId helper for tests / supervisors.
+export { makeCommitId };

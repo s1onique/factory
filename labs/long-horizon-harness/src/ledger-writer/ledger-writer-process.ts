@@ -66,9 +66,35 @@ export type StartLedgerWriterResult =
       readonly ok: false;
       readonly error:
         | { readonly kind: "spawn_failed"; readonly message: string }
-        | { readonly kind: "writer_not_ready"; readonly message: string };
+        | { readonly kind: "writer_not_ready"; readonly message: string }
+        | {
+            readonly kind: "identity_mismatch";
+            readonly message: string;
+          }
+        | {
+            readonly kind: "live_writer_present";
+            readonly message: string;
+          };
     };
 
+/**
+ * Start the LedgerWriter process and verify its identity.
+ *
+ * The readiness barrier (B0-C01-10) is:
+ *
+ *   spawn child
+ *   → wait for socket to appear (lstat)
+ *   → send `who_are_you`
+ *   → returned instanceId == expected instanceId
+ *   → returned runId == expected runId
+ *   → returned missionId == expected missionId
+ *   → READY
+ *
+ * Endpoint location is not identity: the socket appearing at
+ * the expected path is necessary but not sufficient. Only
+ * the who_are_you handshake proves the writer we spawned is
+ * the writer we are now talking to.
+ */
 export async function startLedgerWriter(
   opts: StartLedgerWriterOptions,
   readyTimeoutMs = 5000,
@@ -100,29 +126,8 @@ export async function startLedgerWriter(
       // harness surface any writer-side error message.
       stdio: ["ignore", "pipe", "pipe"],
     });
-    // Drain the child's stdio so the pipes don't keep the
-    // parent's event loop alive. We don't surface the bytes
-    // by default; tests can attach their own listeners via
-    // the returned ChildProcess if they want diagnostics.
     child.stdout?.resume();
     child.stderr?.resume();
-    // We DO NOT unref() the child: the supervisor keeps a
-    // reference to the writer for the entire run, and we
-    // want child.exit to be observable. unref()ing would
-    // also let the test process exit while the writer is
-    // still mid-flight, which would lose the writer's
-    // durability boundary.
-    // NOTE: we deliberately do NOT call child.unref() —
-    // unref'ing the writer would let the test process exit
-    // even if the writer still has buffered work, and the
-    // poll loop above relies on `child.exit` to surface
-    // early-failure of the writer.
-    //
-    // The lifetime guarantee is instead: the writer is
-    // reparented to init by `detached: true`; it survives
-    // S1's death; only S1 explicitly killing it (via the
-    // returned ChildProcess) or the run being torn down
-    // ends the writer.
   } catch (e: unknown) {
     return {
       ok: false,
@@ -133,52 +138,123 @@ export async function startLedgerWriter(
     };
   }
 
+  // First gate: socket must appear.
   const deadline = Date.now() + readyTimeoutMs;
+  let socketSeen = false;
   while (Date.now() < deadline) {
     try {
       const st = await fs.lstat(socketPath);
       if (st.isSocket()) {
-        return {
-          ok: true,
-          binding: {
-            runId: opts.runId as LedgerWriterBinding["runId"],
-            missionId: opts.missionId as LedgerWriterBinding["missionId"],
-            instanceId,
-            socketPath,
-            startedAt: Date.now(),
-          },
-          child,
-          socketPath,
-        };
+        socketSeen = true;
+        break;
       }
     } catch {
       // not yet
     }
     await new Promise((r) => setTimeout(r, 25));
   }
-  // For tests: log the situation so failures are debuggable.
-  let stErr = "ENOENT";
-  try {
-    const st = await fs.lstat(socketPath);
-    stErr = `present but not socket: ${JSON.stringify({
-      isSocket: st.isSocket(),
-      isFile: st.isFile(),
-      isDirectory: st.isDirectory(),
-      isSymbolicLink: st.isSymbolicLink(),
-      mode: st.mode,
-    })}`;
-  } catch (e: unknown) {
-    stErr = `${(e as { code?: string }).code ?? String(e)}`;
+  if (!socketSeen) {
+    let stErr = "ENOENT";
+    try {
+      const st = await fs.lstat(socketPath);
+      stErr = `present but not socket: ${JSON.stringify({
+        isSocket: st.isSocket(),
+        isFile: st.isFile(),
+        isDirectory: st.isDirectory(),
+        isSymbolicLink: st.isSymbolicLink(),
+        mode: st.mode,
+      })}`;
+    } catch (e: unknown) {
+      stErr = `${(e as { code?: string }).code ?? String(e)}`;
+    }
+    let exitInfo = "alive";
+    if (child.exitCode !== null) {
+      exitInfo = `exited code=${child.exitCode} signal=${child.signalCode}`;
+    }
+    // eslint-disable-next-line no-console
+    console.error(
+      `[ledger-writer] socket did not appear at ${socketPath}; ` +
+        `lstat=${stErr}; child=${exitInfo}`,
+    );
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // best-effort
+    }
+    return {
+      ok: false,
+      error: { kind: "writer_not_ready", message: "socket did not appear" },
+    };
   }
-  let exitInfo = "alive";
-  if (child.exitCode !== null) {
-    exitInfo = `exited code=${child.exitCode} signal=${child.signalCode}`;
+
+  // Second gate: identity handshake (B0-C01-10).
+  const { whoAreYouLedgerWriter } = await import("./ledger-writer-client.js");
+  const handshakeDeadline = Date.now() + readyTimeoutMs;
+  let lastErr = "no_response";
+  while (Date.now() < handshakeDeadline) {
+    const who = await whoAreYouLedgerWriter({
+      socketPath,
+      timeoutMs: 1500,
+    });
+    if (who.ok) {
+      if (who.instanceId !== instanceId) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // best-effort
+        }
+        return {
+          ok: false,
+          error: {
+            kind: "identity_mismatch",
+            message: `writer at ${socketPath} returned instanceId=${who.instanceId} but expected ${instanceId}`,
+          },
+        };
+      }
+      if (who.runId !== opts.runId) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // best-effort
+        }
+        return {
+          ok: false,
+          error: {
+            kind: "identity_mismatch",
+            message: `writer at ${socketPath} returned runId=${who.runId} but expected ${opts.runId}`,
+          },
+        };
+      }
+      if (who.missionId !== opts.missionId) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // best-effort
+        }
+        return {
+          ok: false,
+          error: {
+            kind: "identity_mismatch",
+            message: `writer at ${socketPath} returned missionId=${who.missionId} but expected ${opts.missionId}`,
+          },
+        };
+      }
+      return {
+        ok: true,
+        binding: {
+          runId: opts.runId as LedgerWriterBinding["runId"],
+          missionId: opts.missionId as LedgerWriterBinding["missionId"],
+          instanceId,
+          socketPath,
+          startedAt: who.startedAt,
+        },
+        child,
+        socketPath,
+      };
+    }
+    lastErr = who.error.message;
+    await new Promise((r) => setTimeout(r, 25));
   }
-  // eslint-disable-next-line no-console
-  console.error(
-    `[ledger-writer] socket did not appear at ${socketPath}; ` +
-      `lstat=${stErr}; child=${exitInfo}`,
-  );
   try {
     child.kill("SIGKILL");
   } catch {
@@ -186,6 +262,9 @@ export async function startLedgerWriter(
   }
   return {
     ok: false,
-    error: { kind: "writer_not_ready", message: "socket did not appear" },
+    error: {
+      kind: "writer_not_ready",
+      message: `identity handshake failed: ${lastErr}`,
+    },
   };
 }

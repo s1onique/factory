@@ -22,36 +22,26 @@
  * than maintaining a request queue with re-entrancy bugs.
  */
 
-import { promises as fs } from "node:fs";
-import { open as fsOpen } from "node:fs/promises";
-import * as path from "node:path";
 import { createServer, type Server, type Socket } from "node:net";
-import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 
-import { LEDGER_FILENAME } from "../evidence/jsonl-ledger.js";
-import { appendCommittedLineToFile } from "../evidence/ledger-internals.js";
-import { readAndValidate } from "../evidence/ledger-read-validate.js";
 import {
   decodeFrame,
   encodeFrame,
 } from "../witness/witness-codec-framing.js";
 import {
-  deserializeDedupIndex,
-  dedupLookup,
-  dedupRecord,
-  mergeRecoveredIndex,
-  reconcileWithLedger,
-  serializeDedupIndex,
-} from "./ledger-writer-dedup.js";
-import type { DedupIndex, LedgerWriterInstanceId } from "./ledger-writer-types.js";
-import { emptyDedupIndex } from "./ledger-writer-types.js";
-import {
-  type LedgerWriterRequest,
   type LedgerWriterResponse,
   parseLedgerWriterRequest,
   LEDGER_WRITER_PROTOCOL_VERSION,
 } from "./ledger-writer-protocol.js";
-import { LEDGER_WRITER_STATE_FILENAME } from "./ledger-writer-process.js";
+import { probeSocketPath } from "./ledger-writer-socket-probe.js";
+import { loadOrInitIndex } from "./ledger-writer-persistence.js";
+import {
+  handleRequest,
+  type WriterServerArgs,
+  type WriterState,
+  type WriterError,
+} from "./ledger-writer-request-handler.js";
 
 /**
  * Conservative portable UDS path length budget. Matches
@@ -62,87 +52,32 @@ import { LEDGER_WRITER_STATE_FILENAME } from "./ledger-writer-process.js";
  */
 const MAX_UDS_PATH_BYTES = 100;
 
-export type WriterServerArgs = {
-  readonly runDir: string;
-  readonly runId: string;
-  readonly missionId: string;
-  readonly socketPath: string;
-  readonly instanceId: string;
-};
+export type WriterServerError =
+  | { readonly kind: "socket_path_too_long"; readonly message: string }
+  | {
+      readonly kind: "path_collision";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "live_writer_present";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "bind_failed";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "permission_denied";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "directory_wrong_mode";
+      readonly observed: number;
+    };
 
 export type WriterServerResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: { readonly kind: string; readonly message: string } };
-
-function statePath(runDir: string): string {
-  return path.join(runDir, LEDGER_WRITER_STATE_FILENAME);
-}
-
-async function loadOrInitIndex(runDir: string): Promise<DedupIndex> {
-  const p = statePath(runDir);
-  let recovered: DedupIndex = emptyDedupIndex();
-  try {
-    const raw = await fs.readFile(p, "utf8");
-    recovered = deserializeDedupIndex(raw);
-  } catch (e: unknown) {
-    const code = (e as { code?: string }).code;
-    if (code !== "ENOENT") throw e;
-  }
-  const ledgerPath = path.join(runDir, LEDGER_FILENAME);
-  let ledgerMax = 0;
-  try {
-    const v = await readAndValidate(ledgerPath);
-    if (v.ok) ledgerMax = v.value.lastSeq;
-  } catch {
-    // ledger missing or unreadable — fine on first run
-  }
-  return reconcileWithLedger(
-    mergeRecoveredIndex(emptyDedupIndex(), recovered),
-    ledgerMax,
-  );
-}
-
-async function persistIndex(
-  runDir: string,
-  index: DedupIndex,
-): Promise<void> {
-  const p = statePath(runDir);
-  const tmp = `${p}.tmp.${process.pid}.${Date.now()}`;
-  const fh = await fsOpen(tmp, "wx", 0o600);
-  try {
-    await fh.writeFile(serializeDedupIndex(index), "utf8");
-    await fh.sync();
-    await fh.close();
-    await fs.rename(tmp, p);
-  } catch (e) {
-    try {
-      await fh.close();
-    } catch {
-      // best-effort
-    }
-    await fs.rm(tmp, { force: true });
-    throw e;
-  }
-  try {
-    const dirFh = await fsOpen(path.dirname(p), "r");
-    try {
-      await dirFh.sync();
-    } finally {
-      await dirFh.close();
-    }
-  } catch {
-    // best-effort: directory fsync not supported everywhere
-  }
-}
-
-function sha256Hex(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
-
-type WriterState = {
-  index: DedupIndex;
-  busy: boolean;
-};
+  | { readonly ok: false; readonly error: WriterServerError };
 
 export async function startWriterServer(
   args: WriterServerArgs,
@@ -174,35 +109,91 @@ export async function startWriterServer(
     });
   });
 
-  try {
-    await fs.rm(args.socketPath, { force: true });
-  } catch {
-    // best-effort
+  // B0-C01-09 / B0-C01-10: bind-time path-collision policy.
+  //
+  // We MUST NOT blindly unlink a path that already holds a
+  // socket — another live writer may own it (D09). The
+  // policy is:
+  //
+  //   1. lstat the path.
+  //      - missing → OK to bind.
+  //      - symlink → reject (we never accept symlinked sockets).
+  //      - directory → reject.
+  //      - regular file → reject.
+  //      - socket → go to step 2.
+  //
+  //   2. Connect to the socket and ask `who_are_you`.
+  //      - a live writer responds with its own instanceId →
+  //        reject (D09: only one writer per run).
+  //      - no response → stale socket; unlink and bind.
+  //
+  // The recovery from stale socket to bind involves a
+  // window where another process could observe the missing
+  // path and try to bind. We hold the bind call inside the
+  // same critical section as the probe so the window is the
+  // call duration of `unlink`+`listen`, both of which are
+  // serialized by the kernel on the runDir's parent.
+  const probe = await probeSocketPath(args.socketPath);
+  if (!probe.ok) {
+    server.close();
+    return probe;
+  }
+  if (probe.value === "stale_socket") {
+    try {
+      await fs.unlink(args.socketPath);
+    } catch (e: unknown) {
+      const code = (e as { code?: string }).code;
+      if (code !== "ENOENT") {
+        server.close();
+        return {
+          ok: false,
+          error: {
+            kind: "path_collision",
+            message: `could not unlink stale socket at ${args.socketPath}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          },
+        };
+      }
+    }
   }
 
-  await new Promise<void>((resolve, reject) => {
-    const onErr = (e: Error): void => {
-      server.removeListener("listening", onListen);
-      reject(e);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onErr = (e: Error): void => {
+        server.removeListener("listening", onListen);
+        reject(e);
+      };
+      const onListen = (): void => {
+        server.removeListener("error", onErr);
+        resolve();
+      };
+      server.once("error", onErr);
+      server.once("listening", onListen);
+      server.listen(args.socketPath);
+    });
+  } catch (e: unknown) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "EADDRINUSE") {
+      return {
+        ok: false,
+        error: {
+          kind: "path_collision",
+          message: `path ${args.socketPath} became bound by another writer while we were probing`,
+        },
+      };
+    }
+    return {
+      ok: false,
+      error: {
+        kind: "bind_failed",
+        message: err.message ?? String(e),
+      },
     };
-    const onListen = (): void => {
-      server.removeListener("error", onErr);
-      resolve();
-    };
-    server.once("error", onErr);
-    server.once("listening", onListen);
-    server.listen(args.socketPath);
-  });
+  }
 
   return { ok: true, value: server };
 }
-
-type WriterError =
-  | { readonly kind: "invalid_envelope"; readonly reason: string }
-  | { readonly kind: "append_failed"; readonly message: string }
-  | { readonly kind: "writer_busy"; readonly message: string }
-  | { readonly kind: "protocol_version_mismatch"; readonly observed: number }
-  | { readonly kind: "malformed_message"; readonly reason: string };
 
 async function handleConnection(
   socket: Socket,
@@ -216,7 +207,16 @@ async function handleConnection(
       socket.destroy();
       return;
     }
-    socket.end(Buffer.from(frame.bytes));
+    // Write the frame bytes THEN end the socket. Combining
+    // write+end into a single call (socket.end(buffer)) is
+    // documented but appears to race with the client's
+    // half-close on UDS — under contention the reply bytes
+    // are silently dropped. Separating the write and the
+    // close makes the delivery observable in the test
+    // harness.
+    socket.write(Buffer.from(frame.bytes), () => {
+      socket.end();
+    });
   };
   const replyErr = async (error: WriterError): Promise<void> => {
     await reply({
@@ -269,7 +269,18 @@ async function handleConnection(
         return;
       }
 
-      void handleRequest(req.request, args, state, reply, replyErr);
+      handleRequest(req.request, args, state, reply, replyErr).catch((e: unknown) => {
+        // If the async append handler throws, log the failure
+        // and tear down the socket so the client sees a
+        // disconnect rather than hanging.
+        const m = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`[writer] handler error: ${m}\n`);
+        try {
+          socket.destroy();
+        } catch {
+          // best-effort
+        }
+      });
       return; // one-shot per connection
     }
   });
@@ -278,92 +289,3 @@ async function handleConnection(
   });
 }
 
-async function handleRequest(
-  req: LedgerWriterRequest,
-  args: WriterServerArgs,
-  state: WriterState,
-  reply: (r: LedgerWriterResponse) => Promise<void>,
-  replyErr: (e: WriterError) => Promise<void>,
-): Promise<void> {
-  if (req.kind === "ping") {
-    await reply({
-      kind: "pong",
-      protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
-      instanceId: args.instanceId as LedgerWriterInstanceId,
-      maxSequence: state.index.maxSequence,
-    });
-    return;
-  }
-  if (req.kind === "who_are_you") {
-    await reply({
-      kind: "self",
-      protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
-      instanceId: args.instanceId as LedgerWriterInstanceId,
-      socketPath: args.socketPath,
-      runId: args.runId,
-      missionId: args.missionId,
-      startedAt: Date.now(),
-      maxSequence: state.index.maxSequence,
-    });
-    return;
-  }
-
-  if (state.busy) {
-    await replyErr({
-      kind: "writer_busy",
-      message: "writer is busy with another append",
-    });
-    return;
-  }
-  state.busy = true;
-  try {
-    const contentHash = sha256Hex(req.envelopeBytes);
-    const existing = dedupLookup(state.index, {
-      commitId: req.commitId,
-      contentHash,
-    });
-    if (existing !== null) {
-      await reply({
-        kind: "appended",
-        protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
-        commitId: req.commitId,
-        sequence: existing,
-      });
-      return;
-    }
-
-    const nextSeq = state.index.maxSequence + 1;
-    const line = req.envelopeBytes.endsWith("\n")
-      ? req.envelopeBytes
-      : req.envelopeBytes + "\n";
-    const io = await appendCommittedLineToFile(
-      path.join(args.runDir, LEDGER_FILENAME),
-      line,
-    );
-    if (!io.ok) {
-      await replyErr({ kind: "append_failed", message: io.error.message });
-      return;
-    }
-
-    const newIndex = dedupRecord(state.index, {
-      commitId: req.commitId,
-      contentHash,
-      sequence: nextSeq,
-    });
-    await persistIndex(args.runDir, newIndex);
-    state.index = newIndex;
-
-    await reply({
-      kind: "appended",
-      protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
-      commitId: req.commitId,
-      sequence: nextSeq,
-    });
-  } finally {
-    state.busy = false;
-  }
-}
-
-// LedgerWriterInstanceId is imported above from
-// ledger-writer-types.ts. The brand is enforced at the
-// writer-process layer via makeLedgerWriterInstanceId.

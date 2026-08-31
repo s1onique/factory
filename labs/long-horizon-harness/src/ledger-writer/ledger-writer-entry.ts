@@ -51,7 +51,12 @@ async function main(): Promise<void> {
     // non-zero with a descriptive message; the parent's
     // socket-poll will time out and the supervisor will see
     // `writer_not_ready`.
-    console.error(`ledger-writer: failed to start: ${result.error.message}`);
+    const e = result.error;
+    const msg =
+      e.kind === "directory_wrong_mode"
+        ? `${e.kind} mode=${e.observed}`
+        : `${e.kind} ${e.message}`;
+    console.error(`ledger-writer: failed to start: ${msg}`);
     process.exit(2);
   }
   // Stay alive. The supervisor may eventually kill us (clean

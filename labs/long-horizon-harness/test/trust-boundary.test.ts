@@ -94,7 +94,10 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // FOUNDATION04 CORRECTION01: LedgerWriter is its own
     // trust boundary. The server parses incoming framed
     // requests; the client parses incoming framed responses;
-    // the dedup module parses its own durable sidecar file.
+    // the dedup module parses its own durable sidecar file;
+    // the canonicalize module parses persisted lines back
+    // for dedup-index recovery; the socket-probe module
+    // parses who_are_you responses.
     // Adding them here matches the original
     // witness-codec-decode.ts precedent: each surface that
     // speaks to/from the wire or to/from durable storage
@@ -102,6 +105,8 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     "src/ledger-writer/ledger-writer-server.ts",
     "src/ledger-writer/ledger-writer-client.ts",
     "src/ledger-writer/ledger-writer-dedup.ts",
+    "src/ledger-writer/ledger-writer-canonicalize.ts",
+    "src/ledger-writer/ledger-writer-socket-probe.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

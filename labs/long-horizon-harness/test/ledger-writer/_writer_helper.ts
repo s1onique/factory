@@ -11,6 +11,14 @@
  * The harness deliberately does NOT generate its own
  * commitIds — that is the caller's responsibility, so
  * tests can exercise dedup correctly.
+ *
+ * B0-C01-09: this helper MUST NOT blindly rm the socket
+ * before starting a writer. The bind-time policy inside
+ * the writer is the only authority on path collisions;
+ * a test that pre-clears the socket defeats that policy.
+ * Therefore `startWriterInTmpDir` does NOT pre-rm; the
+ * caller is expected to provide a clean runDir (or to
+ * expect the bind-time path-collision policy to fire).
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -25,8 +33,15 @@ import {
 import {
   appendToLedgerWriter,
   pingLedgerWriter,
+  whoAreYouLedgerWriter,
 } from "../../src/ledger-writer/ledger-writer-client.js";
+import {
+  canonicalContentHash,
+} from "../../src/ledger-writer/ledger-writer-canonicalize.js";
 import { makeLedgerWriterInstanceId } from "../../src/ledger-writer/ledger-writer-types.js";
+import type {
+  WriterEvent,
+} from "../../src/ledger-writer/ledger-writer-protocol.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
@@ -40,7 +55,11 @@ export type WriterHandle = {
   readonly instanceId: ReturnType<typeof makeLedgerWriterInstanceId>;
   stop(): Promise<void>;
   ping(): ReturnType<typeof pingLedgerWriter>;
-  append(args: { commitId: string; envelopeBytes: string; contentHash: string }): ReturnType<typeof appendToLedgerWriter>;
+  whoAreYou(): ReturnType<typeof whoAreYouLedgerWriter>;
+  append(args: {
+    readonly commitId: string;
+    readonly event: WriterEvent;
+  }): ReturnType<typeof appendToLedgerWriter>;
 };
 
 export async function startWriterInTmpDir(
@@ -48,12 +67,12 @@ export async function startWriterInTmpDir(
   readyTimeoutMs = 5000,
 ): Promise<WriterHandle> {
   await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
-  // Always start from a clean socket + state.
-  try {
-    await fs.rm(ledgerWriterSocketPath(runDir), { force: true });
-  } catch {
-    // best-effort
-  }
+  // B0-C01-09: we DO NOT rm the socket here. If a previous
+  // writer died holding the socket, the new writer's
+  // bind-time policy will detect stale-vs-live and
+  // unlink appropriately; if a live writer holds it, the
+  // policy will reject the second bind. The harness must
+  // not silently defeat either path.
 
   const result = await startLedgerWriter(
     {
@@ -66,7 +85,10 @@ export async function startWriterInTmpDir(
     readyTimeoutMs,
   );
   if (!result.ok) {
-    throw new Error(`startLedgerWriter failed: ${result.error.message}`);
+    const e = result.error;
+    throw new Error(
+      `startLedgerWriter failed: ${e.kind} ${e.message ?? "(no message)"}`,
+    );
   }
 
   const handle: WriterHandle = {
@@ -80,16 +102,18 @@ export async function startWriterInTmpDir(
       } catch {
         // best-effort
       }
-      // Wait for socket to disappear; clean up if not.
+      // Wait for the process to actually exit. We poll
+      // exitCode; when it transitions from null to a value,
+      // the process is gone and any lingering UDS inode
+      // should now be unlinked by the OS.
       const deadline = Date.now() + 2000;
-      while (Date.now() < deadline) {
-        try {
-          await fs.lstat(ledgerWriterSocketPath(runDir));
-          await new Promise((r) => setTimeout(r, 25));
-        } catch {
-          return;
-        }
+      while (Date.now() < deadline && result.child.exitCode === null) {
+        await new Promise((r) => setTimeout(r, 25));
       }
+      // Belt-and-suspenders: explicitly unlink the socket
+      // path if it still exists. This handles the macOS case
+      // where the kernel sometimes holds the inode for a
+      // moment after the writer process exits.
       try {
         await fs.rm(ledgerWriterSocketPath(runDir), { force: true });
       } catch {
@@ -99,10 +123,25 @@ export async function startWriterInTmpDir(
     ping() {
       return pingLedgerWriter({ socketPath: result.socketPath, timeoutMs: 5000 });
     },
+    whoAreYou() {
+      return whoAreYouLedgerWriter({
+        socketPath: result.socketPath,
+        timeoutMs: 5000,
+      });
+    },
     append(args) {
+      const clientContentHash = canonicalContentHash({
+        runId: "test-run",
+        missionId: "test-mission",
+        event: args.event,
+      });
       return appendToLedgerWriter(
         { socketPath: result.socketPath, timeoutMs: 10000 },
-        args,
+        {
+          commitId: args.commitId,
+          clientContentHash,
+          event: args.event,
+        },
       );
     },
   };
