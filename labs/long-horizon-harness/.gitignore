@@ -6,3 +6,6 @@ coverage/
 .tmp/
 .tmp-home/
 .npm-cache/
+# LedgerWriter test scratch directories (FOUNDATION04 CORR01).
+.lw/
+.lw-probe/
