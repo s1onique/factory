@@ -273,9 +273,15 @@ export type PersistedSignalAttemptResult =
   | { readonly result_kind: "error"; readonly code?: string; readonly message: string };
 
 /** Persisted shape of {@link GroupProbe}. */
+/**
+ * PersistedGroupProbe — CORRECTION12 §1: `not_observed` is
+ * the truthful neutral for "we never asked". Absence law:
+ * `probe_kind === "absent"` IFF a real probe observed ESRCH.
+ */
 export type PersistedGroupProbe =
   | { readonly probe_kind: "alive" }
   | { readonly probe_kind: "absent" }
+  | { readonly probe_kind: "not_observed" }
   | { readonly probe_kind: "permission_denied"; readonly code?: string }
   | { readonly probe_kind: "probe_error"; readonly code?: string; readonly message: string };
 
@@ -307,6 +313,11 @@ export type PersistedProcessResult =
       readonly escalation: PersistedEscalationEvidence;
     }
   | { readonly outcome_kind: "spawn_failed"; readonly failure: PersistedProcessFailure }
+  | {
+      readonly outcome_kind: "identity_unavailable";
+      readonly failure: PersistedProcessFailure;
+      readonly escalation: PersistedEscalationEvidence;
+    }
   | {
       readonly outcome_kind: "cleanup_failed";
       readonly failure: PersistedProcessFailure;

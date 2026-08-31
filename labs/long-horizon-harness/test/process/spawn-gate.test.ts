@@ -998,26 +998,39 @@ test("SG08 malformed SpawnPort (spawn fired, pid/pgid undefined) → post_spawn_
   );
   assert.equal(
     settle.outcome.kind,
-    "cleanup_failed",
-    `expected cleanup_failed; got ${settle.outcome.kind}`,
+    "identity_unavailable",
+    `expected identity_unavailable (CORRECTION12 typed outcome); got ${settle.outcome.kind}`,
   );
-  if (settle.outcome.kind === "cleanup_failed") {
+  if (settle.outcome.kind === "identity_unavailable") {
     assert.equal(
       settle.outcome.failure.kind,
       "internal_process_failure",
       `expected internal_process_failure; got ${JSON.stringify(settle.outcome.failure)}`,
     );
     const e = settle.outcome.escalation;
-    // The supervisor MUST NOT have attempted TERM/KILL/probe
-    // because there was no usable pid/pgid.
+    // CORRECTION12 §3: the supervisor MUST NOT have
+    // attempted TERM/KILL/probe because there was no
+    // usable pid/pgid.
     assert.equal(e.termRequested, false, "TERM MUST NOT be requested without a pgid");
     assert.equal(e.termSent, false);
     assert.equal(e.killRequested, false, "KILL MUST NOT be requested without a pgid");
     assert.equal(e.killSent, false);
-    // Note: freshEscalation's default finalGroupProbe.kind is
-    // "absent" because that is the empty escalation. The
-    // REAL probe-absence guarantee is the signals.probeCount
-    // assertion below.
+    // CORRECTION12 §3: ABSENCE LAW. The escalation's
+    // finalGroupProbe MUST be `not_observed` — the truthful
+    // neutral. It MUST NOT be `absent` because no probe
+    // was performed and absence cannot be established.
+    assert.equal(
+      e.finalGroupProbe.kind,
+      "not_observed",
+      `SG08 absence-law: finalGroupProbe.kind MUST be not_observed; got ${e.finalGroupProbe.kind}`,
+    );
+    // CORRECTION12 §3: the result.escalation (top-level)
+    // carries the same finalGroupProbe.
+    assert.equal(
+      settle.escalation.finalGroupProbe.kind,
+      "not_observed",
+      `SG08 absence-law: result.escalation.finalGroupProbe.kind MUST be not_observed; got ${settle.escalation.finalGroupProbe.kind}`,
+    );
     // The signal port MUST have observed no activity.
     assert.equal(
       signals.signalCount,
@@ -1030,4 +1043,131 @@ test("SG08 malformed SpawnPort (spawn fired, pid/pgid undefined) → post_spawn_
       `probes MUST NOT have been touched; got probeCount=${signals.probeCount}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// SG09 — wording independence (CORRECTION12 §7)
+//
+// CORRECTION11 used `message.includes("pid=")` /
+// `message.includes('Node "spawn"')` to rediscover the
+// typed "identity lost" state from error prose. CORRECTION12
+// replaces this with a TYPED outcome kind
+// (`identity_unavailable`) and removes all substring
+// dependencies.
+//
+// SG09 re-runs the SG08 scenario and asserts:
+//   1. The settlement outcome is the TYPED
+//      `identity_unavailable` (not its message prose).
+//   2. The handle layer appends ZERO close/result records
+//      even though the underlying failure message COULD
+//      contain any prose — the message is not a control
+//      input.
+//   3. No `process_close_observed` or
+//      `process_result_committed` payload is committed.
+// ---------------------------------------------------------------------------
+
+test("SG09 wording-independence: identity_unavailable suppresses close/result evidence regardless of failure-message text", async () => {
+  const signals = new CountingSignalPort();
+  const childListeners: Array<{ event: string; listener: (...args: unknown[]) => void }> = [];
+  const malformedChild = {
+    pid: undefined as unknown as number,
+    pgid: undefined as unknown as number,
+    stdout: new Readable({ read() {} }),
+    stderr: new Readable({ read() {} }),
+    on(event: string, listener: (...args: unknown[]) => void) {
+      childListeners.push({ event, listener });
+      return malformedChild;
+    },
+    once(event: string, listener: (...args: unknown[]) => void) {
+      const wrap = (...args: unknown[]) => {
+        const idx = childListeners.findIndex((l) => l.event === event && l.listener === wrap);
+        if (idx >= 0) childListeners.splice(idx, 1);
+        listener(...args);
+      };
+      childListeners.push({ event, listener: wrap });
+      return malformedChild;
+    },
+    kill: () => false,
+  };
+
+  const malformedSpawner: SpawnPort = {
+    spawn() {
+      return malformedChild as unknown as SpawnedChild;
+    },
+  };
+
+  // Recording sink to observe whether close/result records
+  // were appended. CORRECTION12 §7: the typed outcome MUST
+  // suppress these regardless of message content.
+  const records: Array<{ kind: string }> = [];
+  const recordingSink: ProcessEvidenceSink = {
+    commitCritical: (input): Promise<ProcessEvidenceCommitResult> => {
+      records.push(input.payload);
+      return Promise.resolve({ ok: true, seq: 1 });
+    },
+    commitObservation: (input): Promise<ProcessEvidenceCommitResult> => {
+      records.push(input.payload);
+      return Promise.resolve({ ok: true, seq: 2 });
+    },
+  };
+
+  const spec: ProcessSpec = { ...basicSpec(), deadlineMs: 60_000 };
+  const r = await startSupervisor({
+    spec,
+    clock: realClock(),
+    signals,
+    spawner: malformedSpawner,
+    sink: () => {},
+    evidenceSink: recordingSink,
+    evidenceIdentity: makeIdentity(),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  if (!r.ok) throw new Error("expected ok");
+  const supervisor = r.value;
+
+  // Fire the malformed spawn.
+  for (const l of childListeners) {
+    if (l.event === "spawn") l.listener();
+  }
+
+  const settle = await Promise.race([
+    supervisor.await(),
+    new Promise<never>((_res, reject) =>
+      setTimeout(() => reject(new Error("supervisor.await() HUNG")), 1000),
+    ),
+  ]);
+
+  // CORRECTION12 §4: the typed outcome is what determines
+  // behavior — NOT the failure message.
+  assert.equal(
+    settle.outcome.kind,
+    "identity_unavailable",
+    `SG09: outcome MUST be identity_unavailable; got ${settle.outcome.kind}`,
+  );
+  // The failure message is unrelated to the suppression
+  // decision. It MAY or MAY NOT contain "pid="; the test
+  // asserts the typed path works either way.
+  if (settle.outcome.kind === "identity_unavailable") {
+    const m = settle.outcome.failure.message;
+    assert.equal(typeof m, "string", "failure.message is a string");
+  }
+
+  // CORRECTION12 §7: no process_close_observed or
+  // process_result_committed appended.
+  const closeObservedCount = records.filter(
+    (rec) => rec.kind === "process_close_observed",
+  ).length;
+  const resultCommittedCount = records.filter(
+    (rec) => rec.kind === "process_result_committed",
+  ).length;
+  assert.equal(
+    closeObservedCount,
+    0,
+    `SG09: process_close_observed MUST NOT be appended; got ${closeObservedCount}`,
+  );
+  assert.equal(
+    resultCommittedCount,
+    0,
+    `SG09: process_result_committed MUST NOT be appended; got ${resultCommittedCount}`,
+  );
 });

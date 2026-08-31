@@ -30,10 +30,31 @@ export function buildNormalOutcome(p: {
   };
 }
 
+/**
+ * freshEscalation — the truthful neutral for "we never
+ * escalated". CORRECTION12 §1: a clean process close is
+ * NOT the same as a probe-observed absent group; this
+ * uses `not_observed` so consumers can distinguish
+ * "we never asked" from "we asked and found nothing".
+ */
 export function freshEscalation(): EscalationEvidence {
   return {
     termRequested: false, termSent: false, termResult: null,
     killRequested: false, killSent: false, killResult: null,
-    finalGroupProbe: { kind: "absent" },
+    finalGroupProbe: { kind: "not_observed" },
+  };
+}
+
+/**
+ * identityUnavailableEscalation — CORRECTION12 §2:
+ * explicit constructor for `post_spawn_identity_unavailable`.
+ * Same shape as freshEscalation; isolated for documentation
+ * intent: this code path NEVER attempted TERM/KILL/probe.
+ */
+export function identityUnavailableEscalation(): EscalationEvidence {
+  return {
+    termRequested: false, termSent: false, termResult: null,
+    killRequested: false, killSent: false, killResult: null,
+    finalGroupProbe: { kind: "not_observed" },
   };
 }

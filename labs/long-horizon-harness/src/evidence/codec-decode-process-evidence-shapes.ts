@@ -191,6 +191,8 @@ export function decodePersistedGroupProbe(
       return ok({ probe_kind: "alive" });
     case "absent":
       return ok({ probe_kind: "absent" });
+    case "not_observed":
+      return ok({ probe_kind: "not_observed" });
     case "permission_denied": {
       const r: PersistedGroupProbe = { probe_kind: "permission_denied" };
       if (typeof v["code"] === "string") (r as { code?: string }).code = v["code"];
@@ -341,6 +343,16 @@ export function decodePersistedProcessResult(
     case "spawn_failed":
       return andThen(decodePersistedProcessFailure(v["failure"]), (failure) =>
         ok({ outcome_kind: "spawn_failed", failure } as PersistedProcessResult),
+      );
+    case "identity_unavailable":
+      return andThen(decodePersistedProcessFailure(v["failure"]), (failure) =>
+        andThen(decodePersistedEscalation(v["escalation"]), (escalation) =>
+          ok({
+            outcome_kind: "identity_unavailable",
+            failure,
+            escalation,
+          } as PersistedProcessResult),
+        ),
       );
     case "cleanup_failed":
       return andThen(decodePersistedProcessFailure(v["failure"]), (failure) =>

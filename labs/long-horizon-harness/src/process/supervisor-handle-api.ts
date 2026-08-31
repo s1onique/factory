@@ -102,25 +102,11 @@ export function buildSupervisorHandle(
           r.outcome.kind === "cleanup_failed" &&
           r.outcome.failure.kind === "evidence_persistence_failure" &&
           r.outcome.failure.stage === "ownership";
-        // CORRECTION11: a `spawn_failed` outcome is STRICTLY
-        // pre-spawn-only (Node "spawn" event never fired;
-        // OS child never existed). The supervisor MUST NOT
-        // emit a synthetic process_close_observed or
-        // process_result_committed for it — those records
-        // would imply ownership of a process that never
-        // existed and would confuse the recovery projector.
-        //
-        // CORRECTION11 ALSO adds a second pre-close category:
-        // `post_spawn_identity_unavailable`. Creation did
-        // happen (we observed "spawn") but we do NOT have a
-        // usable pid/pgid, so we cannot truthfully claim
-        // close/result observations. Append nothing.
+        // CORRECTION12 §4: identity loss is a TYPED outcome
+        // kind. Never infer from ProcessFailure.message.
+        // The handle layer pattern-matches on outcome.kind.
         const isSpawnFailed = r.outcome.kind === "spawn_failed";
-        const isIdentityLost =
-          r.outcome.kind === "cleanup_failed" &&
-          r.outcome.failure.kind === "internal_process_failure" &&
-          (r.outcome.failure.message.includes("pid=") ||
-            r.outcome.failure.message.includes("Node \"spawn\""));
+        const isIdentityLost = r.outcome.kind === "identity_unavailable";
         if (
           inputs.evidenceRuntime !== null &&
           !isOwnershipFailure &&

@@ -78,6 +78,8 @@ export type TerminationEngine = {
 };
 
 function emptyEscalation(): EscalationEvidence {
+  // CORRECTION12 §1: truthful neutral is `not_observed`.
+  // We have not run any probe yet.
   return {
     termRequested: false,
     termSent: false,
@@ -85,7 +87,7 @@ function emptyEscalation(): EscalationEvidence {
     killRequested: false,
     killSent: false,
     killResult: null,
-    finalGroupProbe: { kind: "absent" },
+    finalGroupProbe: { kind: "not_observed" },
   };
 }
 

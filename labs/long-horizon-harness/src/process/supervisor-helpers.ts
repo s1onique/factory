@@ -73,6 +73,7 @@ export function emptyCaptured(): ProcessResult["stdout"] {
 }
 
 export function emptyEscalation(): EscalationEvidence {
+  // CORRECTION12 §1: truthful neutral is `not_observed`.
   return {
     termRequested: false,
     termSent: false,
@@ -80,7 +81,7 @@ export function emptyEscalation(): EscalationEvidence {
     killRequested: false,
     killSent: false,
     killResult: null,
-    finalGroupProbe: { kind: "absent" },
+    finalGroupProbe: { kind: "not_observed" },
   };
 }
 

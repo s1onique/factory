@@ -117,6 +117,12 @@ export type RecoveryDecision =
       readonly historicalPgid: number;
       readonly message: string;
       readonly code?: string;
+    }
+  | {
+      readonly kind: "historical_group_probe_unknown";
+      readonly processId: ProcessId;
+      readonly historicalPid: number | null;
+      readonly historicalPgid: number;
     };
 
 export type RecoveryError =

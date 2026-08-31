@@ -91,6 +91,8 @@ export function encodeProbe(
       return { probe_kind: "alive" };
     case "absent":
       return { probe_kind: "absent" };
+    case "not_observed":
+      return { probe_kind: "not_observed" };
     case "permission_denied":
       return {
         probe_kind: "permission_denied",
@@ -156,6 +158,12 @@ export function encodeResult(r: ProcessResult): PersistedProcessResult {
       return {
         outcome_kind: "spawn_failed",
         failure: encodeFailure(o.failure),
+      };
+    case "identity_unavailable":
+      return {
+        outcome_kind: "identity_unavailable",
+        failure: encodeFailure(o.failure),
+        escalation: encodeEscalation(o.escalation),
       };
     case "cleanup_failed":
       return {

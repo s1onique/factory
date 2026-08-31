@@ -137,7 +137,8 @@ export function spawnRequestFailureResult(args: {
       killRequested: false,
       killSent: false,
       killResult: null,
-      finalGroupProbe: { kind: "absent" as const },
+      // CORRECTION12 §1: truthful neutral is `not_observed`.
+      finalGroupProbe: { kind: "not_observed" as const },
     },
   };
 }

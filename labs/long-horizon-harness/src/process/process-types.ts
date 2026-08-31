@@ -71,9 +71,30 @@ export type SignalAttemptResult =
   | { readonly kind: "permission_denied"; readonly code?: string }
   | { readonly kind: "error"; readonly code?: string; readonly message: string };
 
+/**
+ * GroupProbe is the typed result of one kill(-0) attempt
+ * (or equivalent) on a target process group.
+ *
+ * Truthfulness law (CORRECTION12 §1):
+ *   - `absent`             ⇒ an actual probe observed ESRCH.
+ *   - `not_observed`       ⇒ NO probe was performed. This is
+ *     epistemic UNCERTAINTY and is the correct neutral
+ *     state for "we never asked". It MUST NOT be conflated
+ *     with absence.
+ *   - `alive`              ⇒ an actual probe observed at least
+ *     one live process.
+ *   - `permission_denied`  ⇒ EPERM/EACCES on the probe syscall.
+ *   - `probe_error`        ⇒ any other probe failure.
+ *
+ * Absence law (CORRECTION12 §8):
+ *   `finalGroupProbe.kind === "absent"` IFF a real or fake
+ *   probe returned absent. Never encode "we never probed"
+ *   as absent.
+ */
 export type GroupProbe =
   | { readonly kind: "alive" }
   | { readonly kind: "absent" }
+  | { readonly kind: "not_observed" }
   | { readonly kind: "permission_denied"; readonly code?: string }
   | { readonly kind: "probe_error"; readonly code?: string; readonly message: string };
 
@@ -100,6 +121,7 @@ export type ProcessOutcome =
   | { readonly kind: "deadline"; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
   | { readonly kind: "cancelled"; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
   | { readonly kind: "spawn_failed"; readonly failure: ProcessFailure }
+  | { readonly kind: "identity_unavailable"; readonly failure: ProcessFailure; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null }
   | { readonly kind: "cleanup_failed"; readonly failure: ProcessFailure; readonly escalation: EscalationEvidence; readonly stdoutFailure: ProcessFailure | null; readonly stderrFailure: ProcessFailure | null };
 
 /**

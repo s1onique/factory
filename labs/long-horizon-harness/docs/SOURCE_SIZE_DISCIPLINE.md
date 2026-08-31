@@ -36,9 +36,10 @@ WAIVER_REINFORCED_AT=<sha of CORRECTION11 commit — see git log>
 > Note: the SHA of the commit that introduces/updates this
 > block IS itself content of this block, which creates a
 > chicken-and-egg. The authoritative SHA is the git-log
-> `CORRECTION11:` commit immediately following the
-> `CORRECTION10:` commit on `main`. The mechanical SHA-256
-> gate below is the actual lock; this value is informational.
+> `CORRECTION11:` and `CORRECTION12:` commits immediately
+> following the `CORRECTION10:` commit on `main`. The
+> mechanical SHA-256 gate below is the actual lock; this
+> value is informational.
 ```
 
 ### Mechanical verification

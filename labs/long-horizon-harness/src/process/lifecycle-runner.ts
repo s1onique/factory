@@ -22,7 +22,7 @@ import type {
 import type { Clock, SpawnedChild } from "./process-ports.js";
 import type { CreateSupervisorArgs } from "./supervisor-builder.js";
 import { classifyCleanupFailure } from "./lifecycle-classify.js";
-import { buildNormalOutcome, freshEscalation, type SinkLike } from "./lifecycle-outcome.js";
+import { buildNormalOutcome, freshEscalation, identityUnavailableEscalation, type SinkLike } from "./lifecycle-outcome.js";
 
 export type LifecycleInput = {
   args: CreateSupervisorArgs;
@@ -362,10 +362,12 @@ async function waitForCompletionOrBound(
 }
 
 /**
- * CORRECTION11: SpawnPort emitted "spawn" without pid/pgid.
- * We CANNOT claim spawn_failed (creation did happen) and
- * CANNOT claim group absence (no pgid). cleanup_failed +
- * empty escalation; no close/result evidence.
+ * CORRECTION11/12: SpawnPort emitted "spawn" without
+ * pid/pgid. We CANNOT claim spawn_failed (creation did
+ * happen) and CANNOT claim group absence (no pgid). Emits
+ * the typed `identity_unavailable` outcome + a dedicated
+ * `not_observed` escalation record (never `absent`); no
+ * close/result evidence is appended.
  */
 function identityUnavailableOutcome(a: {
   id: ProcessId; spec: ProcessSpec;
@@ -374,11 +376,11 @@ function identityUnavailableOutcome(a: {
   startedAtMs: number; clock: Clock;
   failure: ProcessFailure;
 }): ProcessResult {
-  const empty = freshEscalation();
+  const empty = identityUnavailableEscalation();
   a.safeEmit({ kind: "process_spawn_identity_unavailable", processId: a.id, cause: a.failure });
   return {
     processId: a.id, spec: a.spec,
-    outcome: { kind: "cleanup_failed", failure: a.failure, escalation: empty, stdoutFailure: null, stderrFailure: null },
+    outcome: { kind: "identity_unavailable", failure: a.failure, escalation: empty, stdoutFailure: null, stderrFailure: null },
     stdout: a.stdoutSink.captured(), stderr: a.stderrSink.captured(),
     startedAtMs: a.startedAtMs, finishedAtMs: a.clock.nowMs(), escalation: empty,
   };

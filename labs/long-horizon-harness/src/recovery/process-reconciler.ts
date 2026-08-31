@@ -59,6 +59,18 @@ function probeOne(
         historicalPid,
         historicalPgid: pgid,
       };
+    case "not_observed":
+      // CORRECTION12 §1: a recovery probe that did not
+      // run (or returned not_observed) cannot be settled
+      // as absent or alive. Reclassify to a dedicated
+      // decision so the projector neither resurrects nor
+      // forgets the attempt.
+      return {
+        kind: "historical_group_probe_unknown",
+        processId,
+        historicalPid,
+        historicalPgid: pgid,
+      };
     case "permission_denied":
       return {
         kind: "historical_group_probe_denied",
