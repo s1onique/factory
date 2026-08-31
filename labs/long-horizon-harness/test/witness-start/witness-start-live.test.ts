@@ -223,6 +223,9 @@ after(async () => {
   if (STRICT && residue > 0) {
     fail += 1;
   }
+  const disposition =
+    fail === 0 && skip === 0 && residue === 0 && pass === REQUIRED
+      ? "OK" : "FAIL";
   emit({
     kind: "witness_start_live_matrix",
     strict: STRICT,
@@ -232,10 +235,18 @@ after(async () => {
     failed: fail,
     skipped: skip,
     residue,
-    disposition:
-      fail === 0 && skip === 0 && residue === 0 && pass === REQUIRED
-        ? "OK" : "FAIL",
+    disposition,
   });
+  // eslint-disable-next-line no-console
+  console.log(`WITNESS_START_LIVE_DISPOSITION=${disposition}`);
+  if (STRICT && disposition !== "OK") {
+    throw new Error(
+      "WITNESS_START_LIVE_DISPOSITION=FAIL: " +
+        "passed=" + pass + " required=" + REQUIRED +
+        "; failed=" + fail + "; skipped=" + skip +
+        "; residue=" + residue,
+    );
+  }
 });
 
 void assert;
