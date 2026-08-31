@@ -148,3 +148,42 @@ export function encodeBudgetObservation(
 ): PersistedBudgetObservation {
   return { kind: o.kind, limit: o.limit, observed: o.observed };
 }
+
+// --------------------------------------------------------------------------
+// FOUNDATION04 — witness evidence envelope
+// --------------------------------------------------------------------------
+
+import type { CommittedWitnessEvidence } from "../witness/witness-evidence-bridge.js";
+import type { PersistedWitnessEvidence } from "../witness/witness-types-persisted.js";
+
+/**
+ * Encode a committed witness-evidence record into a v2 envelope.
+ *
+ * The envelope uses `kind === "witness_evidence"` and a
+ * `witness_evidence` payload (snake_case). The schema_version is 2.
+ *
+ * Witness evidence records participate in the same global
+ * monotonic sequence as lifecycle and process_evidence records
+ * (FOUNDATION04 §84).
+ */
+export function encodeWitnessEvidenceEnvelope(
+  evidence: CommittedWitnessEvidence,
+): import("./codec-types.js").EventEnvelope {
+  return {
+    schema_version: 2,
+    event_id: evidence.eventId,
+    run_id: evidence.runId,
+    mission_id: evidence.missionId,
+    sequence: evidence.seq,
+    observed_at: evidence.observedAt,
+    kind: "witness_evidence",
+    witness_evidence: encodePersistedWitnessEvidence(evidence.payload),
+  };
+}
+
+export function encodePersistedWitnessEvidence(
+  p: PersistedWitnessEvidence,
+): PersistedWitnessEvidence {
+  return p;
+}
+

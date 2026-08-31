@@ -90,6 +90,7 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     "src/evidence/codec-decode-envelope.ts",
     "src/evidence/ledger-internals.ts",
     "src/evidence/jsonl-ledger.ts",
+    "src/witness/witness-codec-decode.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

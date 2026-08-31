@@ -74,6 +74,21 @@ export type EventEnvelope =
       readonly observed_at: number;
       readonly kind: "process_evidence";
       readonly process_evidence: PersistedProcessEvidencePayload;
+    }
+  // FOUNDATION04 — witness evidence envelopes. They share the
+  // same run-level metadata as process_evidence but carry
+  // witness_id / witness_instance_id instead of attempt_id /
+  // process_id. The schema_version remains 2 for backwards
+  // compatibility with the existing ledger decoder.
+  | {
+      readonly schema_version: 2;
+      readonly event_id: EventId;
+      readonly run_id: RunId;
+      readonly mission_id: MissionId;
+      readonly sequence: number;
+      readonly observed_at: number;
+      readonly kind: "witness_evidence";
+      readonly witness_evidence: import("../witness/witness-types-persisted.js").PersistedWitnessEvidence;
     };;
 
 /**

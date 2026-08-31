@@ -522,3 +522,45 @@ Sandbox caveat: the Cline IDE shell on macOS prevents
 `process.kill(2)` from reaching children we spawn. Tests that
 require real signal delivery are SKIPPED in this environment.
 Production supervisor code is unchanged.
+
+## FOUNDATION04 — Durable Execution Witness
+
+A persistent authenticated witness process is the
+**portable restart-safe execution authority** for FOUNDATION04.
+
+The witness:
+
+- runs as a separate Node process spawned by the supervisor
+- holds the live `ChildProcess` handle and the PGID authority for
+  the candidate
+- generates a fresh Ed25519 keypair at startup; the private key
+  never leaves memory
+- persists only the **public key** and a fingerprint to the
+  run's `events.jsonl`
+- exposes a Unix-domain stream socket requiring signed commands
+- rejects PID/PGID-only authority requests at every level
+
+A restarted supervisor authenticates the witness by reading
+`witness_ready` from the ledger, verifying a signed `HELLO` over
+a client nonce, and sending signed commands (`QUERY`, `PING`,
+`CANCEL`, `TERMINATE`).
+
+Doctrine (F04):
+
+- Endpoint location is **not** identity — a socket path is just
+  a location; the witness proves its identity cryptographically
+- PID is **not** identity — it can be recycled by the kernel
+- A cryptographically bound live witness **is** identity plus
+  continuity
+- Destructive commands are **transactions**: durable intent
+  before send, idempotent execution, durable result after reply
+
+See:
+
+- `docs/FOUNDATION04-AUTHORITY-MECHANISMS.md` — the full
+  mechanism comparison and security statement
+- `src/witness/` — the witness module
+- `test/witness/pure.test.ts` — pure protocol/state tests
+  (`npm run test:witness`)
+- `test/witness/witness-live.test.ts` — live qualification lane
+  (`npm run qualify:witness-live`)

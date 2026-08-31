@@ -17,6 +17,8 @@
     "test:fixture-contract": "node --import tsx --test --test-reporter=spec test/process/fixture-contract.test.ts",
     "test:recovery": "node --import tsx --test --test-reporter=spec test/recovery/recovery-types.test.ts test/recovery/reconciler.test.ts test/recovery/reconciler-readonly-check.test.ts test/recovery/process-evidence-sink.test.ts test/recovery/cp-crash.test.ts",
     "qualify:recovery-live": "FACTORY_STRICT_RECOVERY_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/recovery/cp-crash.test.ts",
+    "test:witness": "node --import tsx --test --test-reporter=spec test/witness/pure.test.ts test/witness/codec.test.ts",
+    "qualify:witness-live": "FACTORY_STRICT_WITNESS_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=90000 test/witness/witness-live.test.ts",
     "check:domain-purity": "node --import tsx --test --test-reporter=spec test/domain-purity.test.ts",
     "check:trust-boundary": "node --import tsx --test --test-reporter=spec test/trust-boundary.test.ts",
     "check:eof": "node --import tsx --test --test-reporter=spec test/ledger-evidence.test.ts",
