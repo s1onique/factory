@@ -7,5 +7,6 @@ export * from "./ledger-writer-socket-probe.js";
 export * from "./ledger-writer-persistence.js";
 export * from "./ledger-writer-process.js";
 export * from "./ledger-writer-request-handler.js";
+export * from "./ledger-writer-lease.js";
 export * from "./ledger-writer-server.js";
 export * from "./ledger-writer-client.js";

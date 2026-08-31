@@ -26,6 +26,13 @@ import {
   ENV_RUN_ID,
   ENV_SOCKET_PATH,
 } from "./ledger-writer-process.js";
+import {
+  releaseLedgerWriterLease,
+} from "./ledger-writer-lease.js";
+import {
+  makeLedgerWriterInstanceId,
+} from "./ledger-writer-types.js";
+import type { Server } from "node:net";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -67,20 +74,10 @@ async function main(): Promise<void> {
   // the closure of the createServer callback; the only handle
   // keeping the event loop alive is the server itself.
   process.on("SIGTERM", () => {
-    try {
-      result.value.close();
-    } catch {
-      // best-effort
-    }
-    process.exit(0);
+    void shutdownGracefully(result.value, args);
   });
   process.on("SIGINT", () => {
-    try {
-      result.value.close();
-    } catch {
-      // best-effort
-    }
-    process.exit(0);
+    void shutdownGracefully(result.value, args);
   });
 }
 
@@ -88,3 +85,33 @@ main().catch((e: unknown) => {
   console.error(`ledger-writer: fatal: ${e instanceof Error ? e.message : String(e)}`);
   process.exit(3);
 });
+
+/**
+ * Graceful shutdown: close the server, release the lease,
+ * exit. Idempotent against repeated signals.
+ */
+async function shutdownGracefully(
+  server: Server,
+  args: {
+    readonly runDir: string;
+    readonly runId: string;
+    readonly missionId: string;
+    readonly socketPath: string;
+    readonly instanceId: string;
+  },
+): Promise<void> {
+  try {
+    server.close();
+  } catch {
+    // best-effort
+  }
+  try {
+    await releaseLedgerWriterLease({
+      runDir: args.runDir,
+      expectedInstanceId: makeLedgerWriterInstanceId(args.instanceId),
+    });
+  } catch {
+    // best-effort
+  }
+  process.exit(0);
+}

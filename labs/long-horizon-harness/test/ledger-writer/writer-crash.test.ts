@@ -78,7 +78,7 @@ function mkTmp(): Promise<string> {
   const base = path.join(process.cwd(), ".lw");
   return fs.mkdir(base, { recursive: true }).then(async () => {
     for (let i = 0; i < 100; i++) {
-      const id = Math.random().toString(36).slice(2, 10);
+      const id = Math.random().toString(36).slice(2, 8);
       const p = path.join(base, id);
       try {
         await fs.mkdir(p, { mode: 0o700 });
@@ -247,5 +247,192 @@ test("LW-CRASH_PURE01 rebuildIndexFromLedger does not require the sidecar", asyn
     assert.ok(r.index.byCommitId["cid-3"]);
   } finally {
     try { await fs.rm(runDir, { recursive: true, force: true }); } catch { /* */ }
+  }
+});
+
+live("LW-CRASH02 crash BEFORE sidecar + ACK → retry returns original seq", async () => {
+  const { spawnWriterEntry, waitForWriterSocket } = await import(
+    "./_writer_helper.js"
+  );
+  const crashTmp = await mkTmp();
+  const event = makeEvent(2, "attempt-crash02");
+  const commitId = "lwcrash02";
+  const clientContentHash = await import(
+    "../../src/ledger-writer/ledger-writer-canonicalize.js"
+  ).then((m) =>
+    m.canonicalContentHash({
+      runId: "test-run",
+      missionId: "test-mission",
+      event,
+    }),
+  );
+
+  const { child } = spawnWriterEntry({
+    runDir: crashTmp,
+    crashCut: true,
+  });
+  try {
+    await waitForWriterSocket(path.join(crashTmp, "s"), 5000);
+  } catch (e: unknown) {
+    try { child.kill("SIGKILL"); } catch { /* */ }
+    try { await fs.rm(crashTmp, { recursive: true, force: true }); } catch { /* */ }
+    throw e;
+  }
+
+  const appendClient = await import(
+    "../../src/ledger-writer/ledger-writer-client.js"
+  );
+  let appendErrored = false;
+  try {
+    const r = await appendClient.appendToLedgerWriter(
+      { socketPath: path.join(crashTmp, "s"), timeoutMs: 5000 },
+      { commitId, clientContentHash, event },
+    );
+    if (r.ok && (r.value.committed === "appended" || r.value.committed === "replay")) {
+      throw new Error(
+        `append unexpectedly succeeded despite crash cut: ${JSON.stringify(r)}`,
+      );
+    }
+    appendErrored = true;
+  } catch {
+    appendErrored = true;
+  }
+  assert.equal(appendErrored, true, "client must NOT see success from the crashed writer");
+
+  await new Promise<void>((resolve) => {
+    const deadline = Date.now() + 5000;
+    const tick = (): void => {
+      if (child.exitCode !== null || Date.now() > deadline) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+  try { await fs.rm(path.join(crashTmp, "ledger-writer-owner"), { recursive: true, force: true }); } catch { /* */ }
+  try { await fs.rm(path.join(crashTmp, "s"), { force: true }); } catch { /* */ }
+
+  const fresh = await startWriterInTmpDir(crashTmp);
+  try {
+    const r2 = await fresh.append({ commitId, event });
+    if (!r2.ok) {
+      throw new Error(`retry append failed: ${JSON.stringify(r2)}`);
+    }
+    assert.equal(r2.value.committed, "replay", "retry must replay the crashed commit");
+    assert.equal(r2.value.sequence, 1);
+
+    const ledgerRaw = await fs.readFile(
+      path.join(crashTmp, LEDGER_FILENAME),
+      "utf8",
+    );
+    let count = 0;
+    for (const line of ledgerRaw.split("\n")) {
+      if (line.length === 0) continue;
+      let parsed: unknown;
+      try { parsed = JSON.parse(line); } catch { continue; }
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        (parsed as { commit_id?: unknown }).commit_id === commitId
+      ) {
+        count++;
+      }
+    }
+    assert.equal(count, 1, "exactly one durable line for the crashed commit");
+  } finally {
+    try { await fresh.stop(); } catch { /* */ }
+    try { await fs.rm(crashTmp, { recursive: true, force: true }); } catch { /* */ }
+  }
+});
+
+live("LW-CRASH03 same commitId but different event after lost ACK → conflicting_commit", async () => {
+  const { spawnWriterEntry, waitForWriterSocket } = await import(
+    "./_writer_helper.js"
+  );
+  const crashTmp = await mkTmp();
+  const originalEvent = makeEvent(3, "attempt-crash03");
+  const commitId = "lwcrash03";
+  const originalHash = await import(
+    "../../src/ledger-writer/ledger-writer-canonicalize.js"
+  ).then((m) =>
+    m.canonicalContentHash({
+      runId: "test-run",
+      missionId: "test-mission",
+      event: originalEvent,
+    }),
+  );
+
+  const { child } = spawnWriterEntry({
+    runDir: crashTmp,
+    crashCut: true,
+  });
+  try {
+    await waitForWriterSocket(path.join(crashTmp, "s"), 5000);
+  } catch (e: unknown) {
+    try { child.kill("SIGKILL"); } catch { /* */ }
+    try { await fs.rm(crashTmp, { recursive: true, force: true }); } catch { /* */ }
+    throw e;
+  }
+
+  const appendClient = await import(
+    "../../src/ledger-writer/ledger-writer-client.js"
+  );
+  try {
+    await appendClient.appendToLedgerWriter(
+      { socketPath: path.join(crashTmp, "s"), timeoutMs: 5000 },
+      { commitId, clientContentHash: originalHash, event: originalEvent },
+    );
+  } catch {
+    // expected
+  }
+  await new Promise<void>((resolve) => {
+    const deadline = Date.now() + 5000;
+    const tick = (): void => {
+      if (child.exitCode !== null || Date.now() > deadline) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+  try { await fs.rm(path.join(crashTmp, "ledger-writer-owner"), { recursive: true, force: true }); } catch { /* */ }
+  try { await fs.rm(path.join(crashTmp, "s"), { force: true }); } catch { /* */ }
+
+  const fresh = await startWriterInTmpDir(crashTmp);
+  try {
+    const differentEvent = makeEvent(3, "attempt-crash03-DIFFERENT");
+    const differentHash = await import(
+      "../../src/ledger-writer/ledger-writer-canonicalize.js"
+    ).then((m) =>
+      m.canonicalContentHash({
+        runId: "test-run",
+        missionId: "test-mission",
+        event: differentEvent,
+      }),
+    );
+    const r = await fresh.append({
+      commitId,
+      clientContentHash: differentHash,
+      event: differentEvent,
+    });
+    if (r.ok) {
+      throw new Error(`retry with different event unexpectedly succeeded: ${JSON.stringify(r)}`);
+    }
+    // The append layer wraps non-busy protocol errors as
+    // `protocol_error`. The inner error kind (conflicting_commit
+    // or content_hash_mismatch) is the discriminating signal.
+    assert.equal(r.error.kind, "protocol_error");
+    const inner = (r.error as { error?: { kind?: string } }).error;
+    assert.ok(
+      inner !== null &&
+        typeof inner === "object" &&
+        (inner.kind === "conflicting_commit" || inner.kind === "content_hash_mismatch"),
+      `expected conflicting_commit / content_hash_mismatch, got ${JSON.stringify(r)}`,
+    );
+  } finally {
+    try { await fresh.stop(); } catch { /* */ }
+    try { await fs.rm(crashTmp, { recursive: true, force: true }); } catch { /* */ }
   }
 });

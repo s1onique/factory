@@ -59,6 +59,7 @@ export type WriterHandle = {
   append(args: {
     readonly commitId: string;
     readonly event: WriterEvent;
+    readonly clientContentHash?: string;
   }): ReturnType<typeof appendToLedgerWriter>;
 };
 
@@ -97,25 +98,36 @@ export async function startWriterInTmpDir(
     child: result.child,
     instanceId: result.binding.instanceId,
     async stop(): Promise<void> {
+      // Kill the writer child. We send SIGKILL and wait
+      // synchronously for exit (do not unref). The test
+      // harness owns the child lifecycle; a leak here
+      // exhausts UDS / fd resources across sequential test
+      // files.
       try {
         result.child.kill("SIGKILL");
       } catch {
         // best-effort
       }
-      // Wait for the process to actually exit. We poll
-      // exitCode; when it transitions from null to a value,
-      // the process is gone and any lingering UDS inode
-      // should now be unlinked by the OS.
       const deadline = Date.now() + 2000;
       while (Date.now() < deadline && result.child.exitCode === null) {
         await new Promise((r) => setTimeout(r, 25));
       }
       // Belt-and-suspenders: explicitly unlink the socket
-      // path if it still exists. This handles the macOS case
-      // where the kernel sometimes holds the inode for a
-      // moment after the writer process exits.
+      // path if it still exists. macOS sometimes holds the
+      // inode for a moment after the writer exits.
       try {
         await fs.rm(ledgerWriterSocketPath(runDir), { force: true });
+      } catch {
+        // best-effort
+      }
+      // Also clear the lease directory — SIGKILL does not
+      // run the graceful shutdown handler. The test harness
+      // is the operator here.
+      try {
+        await fs.rm(path.join(runDir, "ledger-writer-owner"), {
+          recursive: true,
+          force: true,
+        });
       } catch {
         // best-effort
       }
@@ -130,7 +142,7 @@ export async function startWriterInTmpDir(
       });
     },
     append(args) {
-      const clientContentHash = canonicalContentHash({
+      const clientContentHash = args.clientContentHash ?? canonicalContentHash({
         runId: "test-run",
         missionId: "test-mission",
         event: args.event,
@@ -160,6 +172,7 @@ export function spawnWriterEntry(args: {
   readonly missionId?: string;
   readonly socketPath?: string;
   readonly instanceId?: string;
+  readonly crashCut?: boolean;
 }): { readonly child: ChildProcess } {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -171,17 +184,31 @@ export function spawnWriterEntry(args: {
     FACTORY_LEDGER_WRITER_INSTANCE_ID:
       args.instanceId ??
       makeLedgerWriterInstanceId(`lw-test-${process.pid}-${Date.now()}`),
+    FACTORY_LEDGER_WRITER_CRASH_CUT: args.crashCut ? "1" : "0",
   };
   const child = spawn(
     process.execPath,
     ["--import", "tsx", ENTRY_SCRIPT],
-    { env, detached: true, stdio: "ignore" },
+    {
+      env,
+      stdio: process.env["FACTORY_LEDGER_WRITER_DEBUG"] === "1" ? "pipe" : "ignore",
+    },
   );
-  try {
-    child.unref();
-  } catch {
-    // best-effort
+  if (process.env["FACTORY_LEDGER_WRITER_DEBUG"] === "1") {
+    child.stderr?.on("data", (d: Buffer) => {
+      process.stderr.write(`[writer-child] ${d.toString()}`);
+    });
+    child.on("exit", (code, signal) => {
+      process.stderr.write(
+        `[writer-child-exit] code=${code} signal=${signal}\n`,
+      );
+    });
   }
+  // Do NOT detach/unref. The test harness owns the child
+  // lifecycle: SIGKILL in handle.stop() must reach the child.
+  // Detaching orphans the child to launchd on parent exit,
+  // which leaks writers and exhausts UDS / fd resources
+  // across sequential test files.
   return { child };
 }
 

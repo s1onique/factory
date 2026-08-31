@@ -68,7 +68,7 @@ function mkTmp(): Promise<string> {
   const base = path.join(process.cwd(), ".lw");
   return fs.mkdir(base, { recursive: true }).then(async () => {
     for (let i = 0; i < 100; i++) {
-      const id = Math.random().toString(36).slice(2, 10);
+      const id = Math.random().toString(36).slice(2, 8);
       const p = path.join(base, id);
       try {
         await fs.mkdir(p, { mode: 0o700 });

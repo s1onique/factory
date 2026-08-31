@@ -1,5 +1,5 @@
 /**
- * FOUNDATION04 — B0-CORR01 — bind-time socket probe.
+ * FOUNDATION04 — B0-CORR02 — bind-time socket probe.
  *
  * Splits the bind-time path-collision policy out of
  * `ledger-writer-server.ts` so that file stays under the
@@ -17,8 +17,19 @@
  *
  *   2. Connect to the socket and ask `who_are_you`.
  *      - live writer answers → reject (sole-writer guard,
- *        B0-C01-09)
- *      - no response / error → stale socket, can be unlinked
+ *        B0-CORR02 §4)
+ *      - no response / error → UNKNOWN (do NOT classify
+ *        as stale and do NOT unlink — that is the
+ *        unresponsive-is-not-stale law from B0-CORR02 §4.
+ *        Unlinking the pathname does not kill a writer that
+ *        still holds an open listening socket; the
+ *        pathname can subsequently be reused. The lease is
+ *        the only authority on stale-socket removal; the
+ *        lease holder MAY remove the socket if the
+ *        `who_are_you` handshake proves the listener is
+ *        not the lease holder, but this module does not
+ *        enforce that — the server does, after acquiring
+ *        the lease.)
  *
  * The bind-time policy is the only authority on path
  * collisions. Tests that pre-rm the socket path (the
@@ -44,7 +55,7 @@ export type WriterServerProbeError =
 
 export type SocketPathProbe =
   | { readonly ok: true; readonly value: "absent" }
-  | { readonly ok: true; readonly value: "stale_socket" }
+  | { readonly ok: true; readonly value: "unknown_socket" }
   | { readonly ok: false; readonly error: WriterServerProbeError };
 
 /**
@@ -178,7 +189,9 @@ export async function probeSocketPath(p: string): Promise<SocketPathProbe> {
   }
   const who = await whoAreYou(p);
   if (who === "no_response" || who === "error_response") {
-    return { ok: true, value: "stale_socket" };
+    // B0-CORR02 §4: unresponsive is NOT stale. The caller
+    // must hold the lease to make that determination.
+    return { ok: true, value: "unknown_socket" };
   }
   return {
     ok: false,

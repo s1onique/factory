@@ -91,22 +91,26 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     "src/evidence/ledger-internals.ts",
     "src/evidence/jsonl-ledger.ts",
     "src/witness/witness-codec-decode.ts",
-    // FOUNDATION04 CORRECTION01: LedgerWriter is its own
+    // FOUNDATION04 CORRECTION02: LedgerWriter is its own
     // trust boundary. The server parses incoming framed
     // requests; the client parses incoming framed responses;
     // the dedup module parses its own durable sidecar file;
     // the canonicalize module parses persisted lines back
     // for dedup-index recovery; the socket-probe module
-    // parses who_are_you responses.
-    // Adding them here matches the original
-    // witness-codec-decode.ts precedent: each surface that
-    // speaks to/from the wire or to/from durable storage
-    // gets exactly one JSON.parse site.
+    // parses who_are_you responses; the recovery module
+    // re-parses durable ledger lines for the B0 side-channel
+    // (commit_id / content_hash); the lease module parses
+    // the lease owner.json metadata.
     "src/ledger-writer/ledger-writer-server.ts",
     "src/ledger-writer/ledger-writer-client.ts",
+    "src/ledger-writer/ledger-writer-client-transport.ts",
+    "src/ledger-writer/ledger-writer-client-append.ts",
+    "src/ledger-writer/ledger-writer-client-identity.ts",
     "src/ledger-writer/ledger-writer-dedup.ts",
     "src/ledger-writer/ledger-writer-canonicalize.ts",
     "src/ledger-writer/ledger-writer-socket-probe.ts",
+    "src/ledger-writer/ledger-writer-recovery.ts",
+    "src/ledger-writer/ledger-writer-lease.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

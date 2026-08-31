@@ -1,44 +1,37 @@
 /**
- * FOUNDATION04 — B0-CORR01 — LedgerWriter persistence helpers.
+ * FOUNDATION04 — B0-CORR02 — LedgerWriter persistence helpers.
  *
  * Owns the on-disk persistence of the dedup index and the
- * start-time index load. Extracted from
- * `ledger-writer-server.ts` so that file stays under the
- * 400-LOC source-size discipline (FOUNDATION03 §29).
+ * start-time index load.
  *
- * Lifecycle:
+ * B0-CORR02 §3: the sidecar is treated as a DERIVED CACHE.
+ * The ledger is authoritative; the sidecar is not consulted
+ * for correctness. Whatever the sidecar says, the ledger
+ * wins. The previous design optionally merged the sidecar
+ * into the rebuilt index; that introduced the phantom-replay
+ * path (P1-2 in the B0-CORR02 review). The sidecar may
+ * accelerate later versions, but for B0 it is rewritten
+ * strictly from the authoritative state after every append.
  *
- *   loadOrInitIndex(runDir)
- *     - always rebuild an authoritative index from the
- *       ledger (B0-C01-04 derived-index law).
- *     - optionally merge with whatever sidecar survived;
- *       the ledger-rebuilt index always wins on commitId
- *       sequence disputes because it is derived from the
- *       authoritative durable history.
- *     - reconcile with the ledger's max sequence.
- *
- *   persistIndex(runDir, index)
- *     - serialize the new index atomically (tmp + rename).
- *     - attempt a directory fsync with the explicit
- *       unsupported-errno policy (FOUNDATION01 lesson):
- *       ok or unsupported → success; any other error →
- *       fail closed.
+ * B0-CORR02 §2: load failures are fail-closed; the writer
+ * refuses to start if the ledger has interior corruption,
+ * a torn tail, or is unreadable for any non-ENOENT reason.
  */
 
 import { promises as fs } from "node:fs";
 import { open as fsOpen } from "node:fs/promises";
 import * as path from "node:path";
 
+import { fsyncDir } from "../evidence/ledger-internals.js";
 import {
-  deserializeDedupIndex,
-  mergeRecoveredIndex,
-  reconcileWithLedger,
   serializeDedupIndex,
+  deserializeDedupIndex,
   type DedupIndex,
 } from "./ledger-writer-dedup.js";
-import { rebuildIndexFromLedger } from "./ledger-writer-recovery.js";
+import {
+  recoverLedgerWriterState,
+} from "./ledger-writer-recovery.js";
 import { LEDGER_WRITER_STATE_FILENAME } from "./ledger-writer-process.js";
-import { fsyncDir } from "../evidence/ledger-internals.js";
 
 export function statePath(runDir: string): string {
   return path.join(runDir, LEDGER_WRITER_STATE_FILENAME);
@@ -47,40 +40,27 @@ export function statePath(runDir: string): string {
 /**
  * Load (or rebuild) the dedup index at startup.
  *
- * The ledger is the source of truth (B0-C01-04). We always
- * scan it for the authoritative index; we then merge with
- * whatever sidecar survived for a fast-path cache hit. The
- * merged index is then reconciled against the ledger's max
- * sequence.
+ * B0-CORR02 §3: the sidecar is NOT consulted. The recovered
+ * authoritative state is the index. Sidecar merging was the
+ * phantom-replay source flagged in P1-2.
+ *
+ * Failure modes propagate as exceptions; the writer's start
+ * path fails closed.
  */
 export async function loadOrInitIndex(runDir: string): Promise<DedupIndex> {
-  const rebuiltRes = await rebuildIndexFromLedger(runDir);
-  if (!rebuiltRes.ok) {
+  const r = await recoverLedgerWriterState(runDir);
+  if (r.ok === false) {
+    if (r.error.kind === "invalid_evidence") {
+      throw new Error(
+        `cannot start LedgerWriter: ledger is invalid: ${r.error.reason}. ` +
+          `Repair the ledger (FOUNDATION01 torn-tail workflow) before retrying.`,
+      );
+    }
     throw new Error(
-      `cannot rebuild dedup index from ledger: ${rebuiltRes.error.message}`,
+      `cannot recover LedgerWriter state: ${r.error.message ?? "(no message)"}`,
     );
   }
-  const rebuilt = rebuiltRes.index;
-
-  const p = statePath(runDir);
-  let sidecar: DedupIndex | null = null;
-  try {
-    const raw = await fs.readFile(p, "utf8");
-    sidecar = deserializeDedupIndex(raw);
-  } catch (e: unknown) {
-    const code = (e as { code?: string }).code;
-    if (code !== "ENOENT") {
-      // Sidecar is present but corrupt. Throw the sidecar
-      // away: the rebuilt index wins (B0-C01-04). This is
-      // safe precisely because the rebuilt index is
-      // derived from the authoritative ledger.
-      sidecar = null;
-    }
-  }
-
-  if (sidecar === null) return rebuilt;
-  const merged = mergeRecoveredIndex(rebuilt, sidecar);
-  return reconcileWithLedger(merged, rebuilt.maxSequence);
+  return r.state;
 }
 
 /**
@@ -116,4 +96,49 @@ export async function persistIndex(
       `directory fsync returned a non-unsupported error after index persist at ${path.dirname(p)}`,
     );
   }
+}
+
+/**
+ * Test-only seam: verify that the sidecar on disk (if any)
+ * is byte-equivalent to the authoritative index. Used by
+ * CACHE01..08 to prove that the sidecar contains no semantic
+ * entries absent from the ledger reconstruction.
+ */
+export type SidecarMatch =
+  | { readonly kind: "absent" }
+  | { readonly kind: "equal" }
+  | { readonly kind: "drifted"; readonly reason: string };
+
+export async function verifySidecarMatch(
+  runDir: string,
+  index: DedupIndex,
+): Promise<SidecarMatch> {
+  const p = statePath(runDir);
+  let raw: string;
+  try {
+    raw = await fs.readFile(p, "utf8");
+  } catch (e: unknown) {
+    const code = (e as { code?: string }).code;
+    if (code === "ENOENT") return { kind: "absent" };
+    return {
+      kind: "drifted",
+      reason: `cannot read sidecar: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  let parsed: DedupIndex;
+  try {
+    parsed = deserializeDedupIndex(raw);
+  } catch (e: unknown) {
+    return {
+      kind: "drifted",
+      reason: `sidecar not parseable: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  const expected = serializeDedupIndex(index);
+  const actual = serializeDedupIndex(parsed);
+  if (expected === actual) return { kind: "equal" };
+  return {
+    kind: "drifted",
+    reason: "sidecar serialization disagrees with authoritative index",
+  };
 }

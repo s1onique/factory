@@ -42,6 +42,12 @@ import {
   type WriterState,
   type WriterError,
 } from "./ledger-writer-request-handler.js";
+import {
+  acquireLedgerWriterLease,
+  releaseLedgerWriterLease,
+  LEDGER_WRITER_LEASE_DIRNAME,
+} from "./ledger-writer-lease.js";
+import type { LedgerWriterInstanceId } from "./ledger-writer-types.js";
 
 /**
  * Conservative portable UDS path length budget. Matches
@@ -97,6 +103,9 @@ export async function startWriterServer(
   const state: WriterState = {
     index: await loadOrInitIndex(args.runDir),
     busy: false,
+    crashCutHook: process.env["FACTORY_LEDGER_WRITER_CRASH_CUT"] === "1"
+      ? { onCommit: () => "crash" }
+      : null,
   };
 
   const server = createServer((socket: Socket) => {
@@ -109,49 +118,99 @@ export async function startWriterServer(
     });
   });
 
-  // B0-C01-09 / B0-C01-10: bind-time path-collision policy.
+  // B0-CORR02 §4: bind-time path-collision policy.
   //
-  // We MUST NOT blindly unlink a path that already holds a
-  // socket — another live writer may own it (D09). The
-  // policy is:
+  // The pathname UNIX socket is NOT sole-writer authority.
+  // The lease IS. We acquire the lease first; only after
+  // we hold the lease do we have the right to inspect and
+  // (if necessary) remove the socket path.
   //
-  //   1. lstat the path.
-  //      - missing → OK to bind.
-  //      - symlink → reject (we never accept symlinked sockets).
-  //      - directory → reject.
-  //      - regular file → reject.
-  //      - socket → go to step 2.
+  //   1. Acquire the run-scoped lease. If it is held by
+  //      another process, fail closed — we MUST NOT displace
+  //      an unknown lease holder based on socket liveness
+  //      alone.
   //
-  //   2. Connect to the socket and ask `who_are_you`.
-  //      - a live writer responds with its own instanceId →
-  //        reject (D09: only one writer per run).
-  //      - no response → stale socket; unlink and bind.
+  //   2. Probe the socket path (purely informational).
+  //      - missing → bind.
+  //      - symlink / directory / regular file → reject.
+  //      - socket + who_are_you returns live instanceId →
+  //        reject (the only acceptable occupant is the
+  //        lease holder, and if a live writer is answering
+  //        it cannot be us since we are not yet bound).
+  //      - socket + who_are_you returns no_response /
+  //        error_response → unknown; as lease holder we
+  //        MAY unlink the path. We do so only after the
+  //        probe concludes.
   //
-  // The recovery from stale socket to bind involves a
-  // window where another process could observe the missing
-  // path and try to bind. We hold the bind call inside the
-  // same critical section as the probe so the window is the
-  // call duration of `unlink`+`listen`, both of which are
-  // serialized by the kernel on the runDir's parent.
+  // The recovery from unlink to bind is not atomic. Two
+  // writers who both hold the lease (which cannot happen
+  // because mkdir is atomic) cannot race here.
+  const lease = await acquireLedgerWriterLease({
+    runDir: args.runDir,
+    instanceId: args.instanceId as LedgerWriterInstanceId,
+    runId: args.runId,
+    missionId: args.missionId,
+  });
+  if (!lease.ok) {
+    server.close();
+    if (lease.error.kind === "lease_held") {
+      return {
+        ok: false,
+        error: {
+          kind: "path_collision",
+          message:
+            `cannot bind LedgerWriter: lease at ` +
+            `${args.runDir}/${LEDGER_WRITER_LEASE_DIRNAME} is held by ` +
+            `instanceId=${lease.error.existing?.instanceId ?? "?"}; ` +
+            `refusing to displace unknown holder`,
+        },
+      };
+    }
+    return {
+      ok: false,
+      error: {
+        kind: "bind_failed",
+        message:
+          lease.error.kind === "io_error"
+            ? lease.error.message
+            : `cannot acquire lease`,
+      },
+    };
+  }
+
   const probe = await probeSocketPath(args.socketPath);
   if (!probe.ok) {
     server.close();
+    await releaseLedgerWriterLease({
+      runDir: args.runDir,
+      expectedInstanceId: args.instanceId as LedgerWriterInstanceId,
+    }).catch(() => undefined);
     return probe;
   }
-  if (probe.value === "stale_socket") {
+  if (probe.value === "unknown_socket") {
+    // B0-CORR02 §4: we are the lease holder. We MAY unlink
+    // the socket path — the listener (if any) is not us.
+    // If it is a live writer that briefly failed to
+    // respond, the worst-case outcome is that writer sees a
+    // subsequent bind error and the operator investigates.
     try {
       await fs.unlink(args.socketPath);
     } catch (e: unknown) {
       const code = (e as { code?: string }).code;
       if (code !== "ENOENT") {
         server.close();
+        await releaseLedgerWriterLease({
+          runDir: args.runDir,
+          expectedInstanceId: args.instanceId as LedgerWriterInstanceId,
+        }).catch(() => undefined);
         return {
           ok: false,
           error: {
             kind: "path_collision",
-            message: `could not unlink stale socket at ${args.socketPath}: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
+            message:
+              `could not unlink unknown socket at ${args.socketPath}: ${
+                e instanceof Error ? e.message : String(e)
+              }`,
           },
         };
       }

@@ -50,9 +50,35 @@ import {
 } from "./ledger-writer-protocol.js";
 import { persistIndex } from "./ledger-writer-persistence.js";
 
+/**
+ * Test-only fault-injection hook fired at the EXACT
+ * boundary the crash-cut claim is asserted on:
+ *
+ *     appendCommittedLineToFile() == durable success
+ *             ↓
+ *       CRASH POINT
+ *             ↓
+ *     persist optional sidecar
+ *             ↓
+ *     send ACK
+ *
+ * B0-CORR02 §5: the hook MUST fire after fsync and before
+ * any sidecar write or client ACK. Returning `crash` makes
+ * the writer child exit abruptly (process.exit(137)) so
+ * the test can prove the cut is at the asserted boundary,
+ * not at a later point.
+ *
+ * Production code MUST NOT set this. The child main never
+ * sets it.
+ */
+export type CrashCutHook = {
+  readonly onCommit: () => "continue" | "crash";
+};
+
 export type WriterState = {
   index: DedupIndex;
   busy: boolean;
+  readonly crashCutHook: CrashCutHook | null;
 };
 
 export type WriterServerArgs = {
@@ -177,6 +203,24 @@ export async function handleRequest(
     if (!io.ok) {
       await replyErr({ kind: "append_failed", message: io.error.message });
       return;
+    }
+
+    // B0-CORR02 §5: the crash-cut seam. The ledger is
+    // fsync'd; everything past this point — including the
+    // sidecar and the ACK — is unsafe under crash. A test
+    // hook may abort the process here to prove that no
+    // commitId mapping can resurrect from the sidecar if
+    // the sidecar is lost (the sidecar is a cache; the
+    // ledger is authoritative).
+    if (state.crashCutHook !== null) {
+      const verdict = state.crashCutHook.onCommit();
+      if (verdict === "crash") {
+        // Abrupt exit. Process.exit(137) = SIGKILL-equivalent
+        // for tests. We do NOT release the lease or
+        // persist the sidecar — the test asserts that the
+        // recovery path can rebuild from the ledger alone.
+        process.exit(137);
+      }
     }
 
     const newIndex = dedupRecord(state.index, {

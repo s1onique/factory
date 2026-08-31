@@ -219,40 +219,84 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null;
 }
 
-function validateWriterEvent(o: Record<string, unknown>): string | null {
+function validateWriterEvent(o: Record<string, unknown>):
+  | { readonly ok: true; readonly event: WriterEvent }
+  | { readonly ok: false; readonly reason: string } {
+  // B0-CORR02 §6: at the wire boundary, all required
+  // fields of WriterEvent are enforced — eventId must be
+  // a present string with the IDENTIFIER_GRAMMAR,
+  // observedAt must be a present finite integer inside the
+  // legal timestamp domain, and the payload must be a
+  // recorded object.
   const kind = o["kind"];
-  const eventId = o["eventId"];
-  const observedAt = o["observedAt"];
-  if (eventId !== undefined && !isString(eventId)) {
-    return "event.eventId must be a string";
+  if (kind !== "lifecycle" && kind !== "process_evidence" && kind !== "witness_evidence") {
+    return { ok: false, reason: `unknown event kind ${String(kind)}` };
   }
-  if (
-    observedAt !== undefined &&
-    (typeof observedAt !== "number" || !Number.isInteger(observedAt))
-  ) {
-    return "event.observedAt must be an integer";
+  const eventId = o["eventId"];
+  if (typeof eventId !== "string" || eventId.length === 0) {
+    return { ok: false, reason: "event.eventId must be a present string" };
+  }
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(eventId)) {
+    return { ok: false, reason: "event.eventId violates identifier grammar" };
+  }
+  const observedAt = o["observedAt"];
+  if (typeof observedAt !== "number") {
+    return { ok: false, reason: "event.observedAt must be a number" };
+  }
+  if (!Number.isInteger(observedAt)) {
+    return { ok: false, reason: "event.observedAt must be an integer" };
+  }
+  if (!Number.isFinite(observedAt)) {
+    return { ok: false, reason: "event.observedAt must be finite" };
+  }
+  // Legal timestamp domain: positive, not absurdly large.
+  // We use 1e15 (≈ year 33658 in ms) as the upper bound.
+  if (observedAt < 0 || observedAt > 1e15) {
+    return { ok: false, reason: "event.observedAt outside legal domain" };
   }
   if (kind === "lifecycle") {
     const event = o["event"];
-    if (!isRecord(event)) return "lifecycle event.event must be an object";
+    if (!isRecord(event)) return { ok: false, reason: "lifecycle event.event must be an object" };
     if (!isString(event["type"])) {
-      return "lifecycle event.type must be a string";
+      return { ok: false, reason: "lifecycle event.type must be a string" };
     }
-    return null;
+    return {
+      ok: true,
+      event: {
+        kind: "lifecycle",
+        eventId,
+        observedAt,
+        event: event as unknown as Extract<WriterEvent, { readonly kind: "lifecycle" }>["event"],
+      },
+    };
   }
   if (kind === "process_evidence") {
     if (!isRecord(o["payload"])) {
-      return "process_evidence payload must be an object";
+      return { ok: false, reason: "process_evidence payload must be an object" };
     }
-    return null;
+    return {
+      ok: true,
+      event: {
+        kind: "process_evidence",
+        eventId,
+        observedAt,
+        payload: o["payload"] as unknown as Extract<WriterEvent, { readonly kind: "process_evidence" }>["payload"],
+      },
+    };
   }
-  if (kind === "witness_evidence") {
-    if (!isRecord(o["payload"])) {
-      return "witness_evidence payload must be an object";
-    }
-    return null;
+  // witness_evidence
+  if (!isRecord(o["payload"])) {
+    return { ok: false, reason: "witness_evidence payload must be an object" };
   }
-  return `unknown event kind ${String(kind)}`;
+  return {
+    ok: true,
+    event: {
+      kind: "witness_evidence",
+      eventId,
+      observedAt,
+      payload: o["payload"] as unknown as Extract<WriterEvent, { readonly kind: "witness_evidence" }>["payload"],
+    },
+  };
 }
 
 export function parseLedgerWriterRequest(
@@ -286,9 +330,9 @@ export function parseLedgerWriterRequest(
     if (!isRecord(eventRaw)) {
       return { ok: false, reason: "append.event must be an object" };
     }
-    const eventReason = validateWriterEvent(eventRaw);
-    if (eventReason !== null) {
-      return { ok: false, reason: `append.${eventReason}` };
+    const eventResult = validateWriterEvent(eventRaw);
+    if (!eventResult.ok) {
+      return { ok: false, reason: `append.${eventResult.reason}` };
     }
     return {
       ok: true,
@@ -297,7 +341,7 @@ export function parseLedgerWriterRequest(
         protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
         commitId: cid as CommitId,
         clientContentHash: o["clientContentHash"] as string,
-        event: eventRaw as unknown as WriterEvent,
+        event: eventResult.event,
       },
     };
   }
