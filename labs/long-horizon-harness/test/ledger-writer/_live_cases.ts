@@ -1,6 +1,6 @@
 /**
  * _live_cases.ts
- * (B0-QUALIFICATION02)
+ * (B0-QUALIFICATION04)
  *
  * SINGLE MAINTAINED implementation of the LedgerWriter
  * B0 qualification matrix (LWQ01..LWQ15). Both the
@@ -13,6 +13,16 @@
  * Each case is `{ id, title, run(ctx) }`. The strict
  * lane asserts the array length and registers tests
  * from it.
+ *
+ * B0-QUALIFICATION04 evidence-lifetime contract:
+ *   - Each case reads durable evidence BEFORE
+ *     writer.stop() and BEFORE ctx.destroyRun().
+ *   - ENOENT on a required artefact is FAIL.
+ *   - Production LedgerWriter semantics are not
+ *     exercised through this module; only the
+ *     production client APIs (ping, append,
+ *     probeSocketPath, handleRequest, handleConnection)
+ *     are reused.
  */
 
 import { promises as fs } from "node:fs";
@@ -46,10 +56,34 @@ export type LiveCaseCtx = {
   /** Creates a unique tmp directory under the harness base. */
   readonly mkTmp: (prefix: string) => Promise<string>;
   /**
-   * Boots a writer in tmp, registering child + socket
-   * + runDir + leaseDir with the live fixture registry.
+   * Boots a writer in tmp. Registers child + socket
+   * + lease dir with the live fixture registry; the
+   * runDir is NOT registered — the case body must
+   * either destroy it explicitly (after reading
+   * evidence) or register it for tracking.
+   *
+   * Returns the WriterHandle whose `stop()` kills the
+   * writer child but does NOT touch the runDir
+   * contents. This is the central evidence-lifetime
+   * invariant enforced at B0-QUALIFICATION04.
    */
   readonly bootHandle: (tmp: string) => Promise<WriterHandle>;
+  /**
+   * (B0-QUALIFICATION04) Destroy the runDir used by a
+   * given case after evidence reads are complete.
+   * Calls `destroyRunDir` in the registry, which
+   * unlinks the path AND unregisters the tracking
+   * entry. Throws on failure (residue accounting is
+   * honest).
+   */
+  readonly destroyRun: (runDir: string) => Promise<void>;
+  /**
+   * (B0-QUALIFICATION04) Register a runDir for residue
+   * tracking without destroying it. Used by cases that
+   * read evidence and intend the after-suite sweep to
+   * clean up.
+   */
+  readonly trackRun: (runDir: string) => void;
   /**
    * Appends via the production client.
    *
@@ -132,16 +166,25 @@ function makeEvent(seq: number, suffix: string): import("../../src/ledger-writer
 
 const LWQ01: LiveCase = {
   id: "LWQ01",
-  title: "startup + identity (LW-LIVE01)",
+  title: "startup + identity (LW-LIVE01): ping returns {instanceId, maxSequence:0}",
   async run(ctx) {
     const tmp = await ctx.mkTmp("lwq01");
     const h = await ctx.bootHandle(tmp);
     try {
       const r = await h.ping();
       assert.equal(r.ok, true);
-      if (r.ok) assert.equal(r.value, h.instanceId);
+      if (r.ok) {
+        // (B0-QUALIFICATION04) PingClientResult.value is
+        // {instanceId, maxSequence}, NOT a bare string.
+        assert.equal(typeof r.value.instanceId, "string");
+        assert.equal(r.value.instanceId, h.instanceId,
+          "ping.instanceId must equal the spawned writer's instanceId");
+        assert.equal(r.value.maxSequence, 0,
+          "fresh writer must report maxSequence === 0");
+      }
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -161,6 +204,7 @@ const LWQ02: LiveCase = {
       if (r.ok) assert.equal(r.value.sequence, 1);
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -185,6 +229,7 @@ const LWQ03: LiveCase = {
       if (b.ok) assert.equal(b.value.sequence, 2);
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -210,6 +255,7 @@ const LWQ04: LiveCase = {
       if (b.ok) assert.equal(b.value.sequence, 1);
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -238,6 +284,7 @@ const LWQ05: LiveCase = {
       }
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -248,6 +295,8 @@ const LWQ06: LiveCase = {
   async run(ctx) {
     const tmp = await ctx.mkTmp("lwq06");
     const h = await ctx.bootHandle(tmp);
+    let lineCount = -1;
+    let ledgerExists = false;
     try {
       for (let i = 1; i <= 3; i++) {
         const r = await ctx.appendCounting(h, {
@@ -256,13 +305,21 @@ const LWQ06: LiveCase = {
         });
         assert.equal(r.ok, true);
       }
+      // (B0-QUALIFICATION04) Read evidence BEFORE
+      // writer stop + runDir destruction.
+      const ledger = path.join(tmp, LEDGER_FILENAME);
+      ledgerExists = true;
+      const text = await fs.readFile(ledger, "utf8");
+      lineCount = text.split("\n").filter((l) => l.length > 0).length;
     } finally {
       await h.stop();
     }
-    const ledger = path.join(tmp, LEDGER_FILENAME);
-    const text = await fs.readFile(ledger, "utf8");
-    const lines = text.split("\n").filter((l) => l.length > 0);
-    assert.equal(lines.length, 3, `expected 3 lines, got ${lines.length}`);
+    // Evidence assertions: ENOENT is FAIL, not zero.
+    assert.equal(ledgerExists, true,
+      "LWQ06: events.jsonl must exist before destruction");
+    assert.equal(lineCount, 3,
+      `LWQ06: expected 3 ledger lines, got ${lineCount}`);
+    await ctx.destroyRun(tmp);
   },
 };
 
@@ -275,35 +332,52 @@ const LWQ07: LiveCase = {
   title: "restart preserves dedup state and emits no duplicate lines (LW-LIVE09/10)",
   async run(ctx) {
     const tmp = await ctx.mkTmp("lwq07");
-    const h1 = await ctx.bootHandle(tmp);
     const commitId = "lwq07";
+    let lineCount = -1;
+    let ledgerExists = false;
+    let h2: WriterHandle | undefined;
     try {
+      const h1 = await ctx.bootHandle(tmp);
       const a = await ctx.appendCounting(h1, {
         commitId,
         event: makeEvent(1, "lwq07"),
       });
       assert.equal(a.ok, true);
       if (a.ok) assert.equal(a.value.sequence, 1);
-    } finally {
+      // (B0-QUALIFICATION04) Writer stop MUST NOT
+      // destroy the runDir; durable evidence is read
+      // AFTER both writers have been stopped.
       await h1.stop();
-    }
-    const h2 = await ctx.bootHandle(tmp);
-    try {
+
+      // Second writer against the SAME runDir: must
+      // re-bind the durable history, not allocate a
+      // fresh ledger.
+      h2 = await ctx.bootHandle(tmp);
       const b = await ctx.appendCounting(h2, {
         commitId,
         event: makeEvent(1, "lwq07"),
       });
       assert.equal(b.ok, true);
       if (b.ok) {
-        assert.equal(b.value.sequence, 1, "replay returns original seq");
+        assert.equal(b.value.sequence, 1,
+          "replay returns original seq after restart");
       }
+      // Inspect evidence before any cleanup.
+      const ledger = path.join(tmp, LEDGER_FILENAME);
+      ledgerExists = true;
+      const text = await fs.readFile(ledger, "utf8");
+      lineCount = text.split("\n").filter((l) => l.length > 0).length;
     } finally {
-      await h2.stop();
+      if (h2 !== undefined) {
+        try { await h2.stop(); } catch { /* */ }
+      }
     }
-    const ledger = path.join(tmp, LEDGER_FILENAME);
-    const text = await fs.readFile(ledger, "utf8");
-    const lines = text.split("\n").filter((l) => l.length > 0);
-    assert.equal(lines.length, 1, `expected 1 line, got ${lines.length}`);
+    // Evidence assertions: ENOENT is FAIL.
+    assert.equal(ledgerExists, true,
+      "LWQ07: events.jsonl must exist before destruction");
+    assert.equal(lineCount, 1,
+      `LWQ07: replay must NOT add a second durable line; got ${lineCount}`);
+    await ctx.destroyRun(tmp);
   },
 };
 
@@ -319,37 +393,49 @@ const LWQ08: LiveCase = {
     const h1 = await ctx.bootHandle(tmp);
     let r2Append: { ok?: boolean } = {};
     let h2: WriterHandle | undefined;
+    let ledgerExists = false;
+    let lineCount = -1;
     try {
-      h2 = await ctx.bootHandle(tmp);
       try {
-        const r = await ctx.appendCounting(h2, {
-          commitId: "lwq08-second",
-          event: makeEvent(2, "lwq08-second"),
-        });
-        r2Append = r;
-      } catch (e) {
-        r2Append = { ok: false };
-        void e;
+        h2 = await ctx.bootHandle(tmp);
+        try {
+          const r = await ctx.appendCounting(h2, {
+            commitId: "lwq08-second",
+            event: makeEvent(2, "lwq08-second"),
+          });
+          r2Append = r;
+        } catch (e) {
+          r2Append = { ok: false };
+          void e;
+        }
+      } catch {
+        // boot of second writer rejected — acceptable
       }
-    } catch {
-      // boot of second writer rejected — acceptable
-    }
-    await h1.stop();
-    if (h2 !== undefined) {
-      try { await h2.stop(); } catch { /* */ }
-    }
-    const ledger = path.join(tmp, LEDGER_FILENAME);
-    let lineCount = 0;
-    try {
+      await h1.stop();
+      if (h2 !== undefined) {
+        try { await h2.stop(); } catch { /* */ }
+      }
+      // (B0-QUALIFICATION04) Missing-evidence
+      // non-equivalence law: ENOENT is FAIL, not
+      // "zero records". The ledger must exist and
+      // either be empty OR contain records from
+      // h1's writes only (none in this case).
+      const ledger = path.join(tmp, LEDGER_FILENAME);
       const text = await fs.readFile(ledger, "utf8");
+      ledgerExists = true;
       lineCount = text.split("\n").filter((l) => l.length > 0).length;
-    } catch {
-      lineCount = 0;
+    } finally {
+      // If h2 boot was rejected, we still need to
+      // ensure h1 is stopped. The stop above already
+      // covers that.
     }
+    assert.equal(ledgerExists, true,
+      "LWQ08: events.jsonl must exist (missing evidence ≠ zero records)");
     assert.equal(lineCount, 0,
-      `second writer must NOT have committed any line; ledger has ${lineCount}`);
+      `LWQ08: second writer must NOT have committed any line; ledger has ${lineCount}`);
     assert.notEqual(r2Append.ok, true,
-      "second writer must NOT have reported a successful append");
+      "LWQ08: second writer must NOT have reported a successful append");
+    await ctx.destroyRun(tmp);
   },
 };
 
@@ -376,6 +462,7 @@ const LWQ09: LiveCase = {
       if (r.ok) assert.equal(r.value.sequence, 1);
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -403,6 +490,7 @@ const LWQ10: LiveCase = {
       }
     } finally {
       await h.stop();
+      await ctx.destroyRun(tmp);
     }
   },
 };
@@ -421,6 +509,8 @@ const LWQ11: LiveCase = {
   async run(ctx) {
     const tmp = await ctx.mkTmp("rpc03");
     const h = await ctx.bootHandle(tmp);
+    let lineCount = -1;
+    let ledgerExists = false;
     try {
       const evA = makeEvent(1, "rpc03A");
       const evB = makeEvent(2, "rpc03B");
@@ -450,16 +540,23 @@ const LWQ11: LiveCase = {
           `RPC03 inner.kind must be conflicting_commit, got ${JSON.stringify(b.error)}`,
         );
       }
+      // (B0-QUALIFICATION04) Read evidence inside the
+      // guarantee that the runDir is still present
+      // (writer has not been stopped yet, no
+      // destruction has happened).
+      const ledger = path.join(tmp, LEDGER_FILENAME);
+      const text = await fs.readFile(ledger, "utf8");
+      ledgerExists = true;
+      lineCount = text.split("\n").filter((l) => l.length > 0).length;
     } finally {
       await h.stop();
     }
-    // Ledger must still have exactly ONE line for the
-    // conflicted commitId.
-    const ledger = path.join(tmp, LEDGER_FILENAME);
-    const text = await fs.readFile(ledger, "utf8");
-    const lines = text.split("\n").filter((l) => l.length > 0);
-    assert.equal(lines.length, 1,
-      `expected exactly 1 line after RPC03 conflict, got ${lines.length}`);
+    // Evidence assertions: ENOENT is FAIL.
+    assert.equal(ledgerExists, true,
+      "LWQ11: events.jsonl must exist before destruction");
+    assert.equal(lineCount, 1,
+      `LWQ11: conflict must NOT add a second durable line; got ${lineCount}`);
+    await ctx.destroyRun(tmp);
   },
 };
 

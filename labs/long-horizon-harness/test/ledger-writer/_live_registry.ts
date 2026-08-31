@@ -42,6 +42,87 @@ export function unregisterLiveFixture(entry: LiveFixtureEntry): void {
   if (idx >= 0) registry.splice(idx, 1);
 }
 
+/**
+ * Unregister every entry whose `path` matches the
+ * given path exactly. Returns the number of entries
+ * removed. Used by the strict lane after a proven
+ * cleanup so the registry reflects ground truth.
+ *
+ * (B0-QUALIFICATION04) Lifecycle separation: this is
+ * only safe AFTER `proveUnlink` succeeded; residue
+ * classification depends on registry truth matching
+ * filesystem truth.
+ */
+export function unregisterLiveFixtureByPath(p: string): number {
+  let removed = 0;
+  for (let i = registry.length - 1; i >= 0; i--) {
+    const e = registry[i];
+    if (e !== undefined && e.path === p) {
+      registry.splice(i, 1);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+/**
+ * (B0-QUALIFICATION04) Register a runDir as a
+ * NON-OWNED fixture. The strict lane tracks runDirs
+ * for residue accounting but the per-case lifecycle
+ * explicitly distinguishes writer-stop from
+ * evidence-preservation from runDir-cleanup.
+ *
+ * `destroyRunDir()` is the ONLY operation permitted
+ * to remove this entry; child termination MUST NOT
+ * touch it.
+ */
+export function registerRunDirForTracking(args: {
+  readonly runDir: string;
+  readonly note: string;
+}): LiveFixtureEntry {
+  const entry: LiveFixtureEntry = {
+    kind: "run_dir",
+    ref: undefined,
+    path: args.runDir,
+    note: args.note,
+  };
+  registerLiveFixture(entry);
+  return entry;
+}
+
+/**
+ * (B0-QUALIFICATION04) Destroy a runDir and prove
+ * its absence; on success, unregister the registry
+ * entry. Returns true iff the path was proven absent
+ * after the operation.
+ *
+ * Failure semantics:
+ *   - Throws if the path STILL exists after `fs.rm`,
+ *     OR if the registry has no matching entry.
+ *   - Swallowed fs.rm errors are NOT acceptable:
+ *     they leave ground truth < registry truth,
+ *     which the strict lane counts as residue.
+ */
+export async function destroyRunDir(p: string): Promise<boolean> {
+  await fs.rm(p, { recursive: true, force: true });
+  // Prove absence: lstat must raise ENOENT.
+  let absent = false;
+  try {
+    await fs.lstat(p);
+  } catch (e: unknown) {
+    const code = (e as { code?: string }).code;
+    if (code === "ENOENT") absent = true;
+  }
+  if (!absent) {
+    throw new Error(`destroyRunDir: path still present after rm: ${p}`);
+  }
+  const removed = unregisterLiveFixtureByPath(p);
+  if (removed === 0) {
+    throw new Error(`destroyRunDir: no registered run_dir entry for ${p}`);
+  }
+  return true;
+}
+
 export function liveFixtureRegistrySize(): number {
   return registry.length;
 }
@@ -69,6 +150,11 @@ export async function probePathAbsent(p: string): Promise<boolean> {
  * Best-effort unlink of a path with no throw.
  * Returns true iff the path was absent at exit time
  * (proved by ENOENT on lstat after the operation).
+ *
+ * Use this for sockets / lease dirs where missing
+ * is acceptable. For runDir evidence lifecycle, use
+ * `destroyRunDir` instead — it THROWS on failure so
+ * residue accounting cannot be silently bypassed.
  */
 export async function proveUnlink(p: string): Promise<boolean> {
   try {
@@ -131,10 +217,24 @@ export async function sweepAndProve(): Promise<ReadonlyArray<LiveFixtureEntry>> 
 }
 
 /**
- * Register a writer child + its socket + its runDir +
- * its lease dir atomically. Returns the entries so the
- * caller can unregister explicitly after proven
- * cleanup.
+ * Register a writer child + its socket + its lease
+ * dir + its runDir atomically.
+ *
+ * (B0-QUALIFICATION04) The runDir IS registered
+ * here for residue accounting, but it is NOT touched
+ * by writer termination. The qualification wrapper
+ * no longer calls `fs.rm(runDir)` inside
+ * `WriterHandle.stop()`. The runDir is destroyed
+ * ONLY by `destroyRunDir(runDir)`, which the case
+ * body invokes explicitly after evidence reads.
+ *
+ * Evidence-preservation invariant enforced:
+ *
+ *   stopping the writer MUST NOT delete the ledger
+ *   before the case finishes reading it.
+ *
+ * Returns the registered entries so the caller can
+ * unregister them explicitly if needed.
  */
 export function registerWriterSpawn(args: {
   readonly child: import("node:child_process").ChildProcess;
@@ -154,12 +254,6 @@ export function registerWriterSpawn(args: {
     path: args.socketPath,
     note: `writer child pid=${args.child.pid ?? "?"}`,
   };
-  const runDirEntry: LiveFixtureEntry = {
-    kind: "run_dir",
-    ref: undefined,
-    path: args.runDir,
-    note: `run dir ${args.runDir}`,
-  };
   const sockEntry: LiveFixtureEntry = {
     kind: "socket_path",
     ref: undefined,
@@ -172,11 +266,17 @@ export function registerWriterSpawn(args: {
     path: leaseDir,
     note: `lease dir ${leaseDir}`,
   };
+  const runDirEntry: LiveFixtureEntry = {
+    kind: "run_dir",
+    ref: undefined,
+    path: args.runDir,
+    note: `run dir ${args.runDir}`,
+  };
   registerLiveFixture(childEntry);
-  registerLiveFixture(runDirEntry);
   registerLiveFixture(sockEntry);
   registerLiveFixture(leaseEntry);
-  return [childEntry, runDirEntry, sockEntry, leaseEntry] as const;
+  registerLiveFixture(runDirEntry);
+  return [childEntry, sockEntry, leaseEntry, runDirEntry] as const;
 }
 
 export function registerHelperSpawn(args: {

@@ -1,6 +1,6 @@
 /**
  * ledger-writer-live-qualification.test.ts
- * (B0-QUALIFICATION03)
+ * (B0-QUALIFICATION04)
  *
  * Strict LedgerWriter live qualification oracle.
  *
@@ -20,6 +20,18 @@
  * array. QLW* tests are pure-function tests of the
  * `qualifies()` classifier — they do not touch
  * process state.
+ *
+ * B0-QUALIFICATION04 evidence-lifetime contract:
+ *
+ *   - WriterHandle.stop() kills + reaps the child
+ *     ONLY; it never touches the runDir.
+ *   - Each case reads evidence BEFORE invoking
+ *     ctx.destroyRun(tmp).
+ *   - Missing-evidence is FAIL: ENOENT on a
+ *     required durable artefact is not interpreted
+ *     as "zero records".
+ *   - destroyRunDir throws on failure so residue
+ *     accounting cannot be silently bypassed.
  */
 
 import { test, after } from "node:test";
@@ -42,6 +54,7 @@ import {
   registerWriterSpawn,
   sweepAndProve,
   liveFixtureRegistrySize,
+  destroyRunDir,
 } from "./_live_registry.js";
 
 const STRICT = process.env.FACTORY_STRICT_LEDGER_WRITER_LIVE === "1";
@@ -131,6 +144,8 @@ function emitMatrix(): void {
   // eslint-disable-next-line no-console
   console.log(`LEDGER_WRITER_QUALIFICATION_STRICT=${STRICT ? "1" : "0"}`);
   // eslint-disable-next-line no-console
+  console.log(`QUALIFICATION_TMP_BASE=${tmpBase()}`);
+  // eslint-disable-next-line no-console
   console.log(`LEDGER_WRITER_LIVE_REQUIRED=${counters.required}`);
   // eslint-disable-next-line no-console
   console.log(`LEDGER_WRITER_LIVE_EXECUTED=${counters.executed}`);
@@ -165,32 +180,21 @@ async function bootHandle(tmp: string): Promise<WriterHandle> {
 }
 
 /**
- * Wrap a WriterHandle so its `stop()` also unlinks
- * the runDir. This is the test harness's residue
- * contract: every spawned writer MUST leave no path
- * behind after its case finishes. The registry's
- * `sweepAndProve` then observes zero residue.
+ * (B0-QUALIFICATION04) Explicit fixture lifecycle:
+ *
+ *   bootHandle()         — start writer, register fixtures
+ *   h.stop()              — kill + reap child ONLY
+ *   ctx.destroyRun()      — explicit runDir cleanup (proves
+ *                          absence, unregisters fixture,
+ *                          throws on failure so residue is
+ *                          not silently bypassed)
+ *
+ * Previously `WriterHandle.stop()` was wrapped to also
+ * `fs.rm(runDir)` — that destroyed evidence before the
+ * case finished reading it. The strict oracle now
+ * exposes two separate operations and disallows
+ * implicit runDir destruction on writer stop.
  */
-function wrapHandleForResidue(h: WriterHandle, runDir: string): WriterHandle {
-  const originalStop = h.stop.bind(h);
-  return {
-    ...h,
-    async stop(): Promise<void> {
-      await originalStop();
-      try {
-        await fs.rm(runDir, { recursive: true, force: true });
-      } catch {
-        // best-effort; the registry sweep will retry
-      }
-    },
-  };
-}
-
-// Override ctx.bootHandle to return the wrapped handle.
-async function bootHandleWithCleanup(tmp: string): Promise<WriterHandle> {
-  const h = await bootHandle(tmp);
-  return wrapHandleForResidue(h, tmp);
-}
 
 const appendCounting: AppendCountingFn = async (h, args) => {
   // (B0-QUALIFICATION03) The wrapper used to return
@@ -206,12 +210,26 @@ const appendCounting: AppendCountingFn = async (h, args) => {
   });
 };
 
+const destroyRun = async (runDir: string): Promise<void> => {
+  await destroyRunDir(runDir);
+};
+
+const trackRun = (_runDir: string): void => {
+  // Reserved for cases that prefer after-suite cleanup.
+  // The default qualification lane already registers
+  // the runDir via bootHandle → registerWriterSpawn,
+  // so no extra call is needed there. This stub keeps
+  // the ctx API symmetric.
+};
+
 function makeCtx(): LiveCaseCtx {
   return {
     strict: STRICT,
     spawnable: SPAWNABLE,
     mkTmp,
-    bootHandle: bootHandleWithCleanup,
+    bootHandle,
+    destroyRun,
+    trackRun,
     appendCounting: STRICT ? appendCounting : UNINITIALISED_APPEND_COUNTING,
   };
 }

@@ -98,18 +98,31 @@ export async function startWriterInTmpDir(
     child: result.child,
     instanceId: result.binding.instanceId,
     async stop(): Promise<void> {
-      // Kill the writer child. We send SIGKILL and wait
-      // synchronously for exit (do not unref). The test
-      // harness owns the child lifecycle; a leak here
-      // exhausts UDS / fd resources across sequential test
-      // files.
-      try {
-        result.child.kill("SIGKILL");
-      } catch {
-        // best-effort
+      // (B0-QUALIFICATION04) Kill the writer child. We
+      // send SIGKILL and wait synchronously for exit
+      // (do not unref). The test harness owns the child
+      // lifecycle; a leak here exhausts UDS / fd
+      // resources across sequential test files.
+      //
+      // Important: a child terminated by signal has
+      // exitCode === null AND signalCode === "<sig>".
+      // Polling only exitCode will burn the full 2s
+      // timeout even when the process is already dead,
+      // which is why the qualification lane was running
+      // at ~2.2s per writer case. Observe BOTH.
+      if (result.child.exitCode === null && result.child.signalCode === null) {
+        try {
+          result.child.kill("SIGKILL");
+        } catch {
+          // best-effort
+        }
       }
       const deadline = Date.now() + 2000;
-      while (Date.now() < deadline && result.child.exitCode === null) {
+      while (
+        Date.now() < deadline &&
+        result.child.exitCode === null &&
+        result.child.signalCode === null
+      ) {
         await new Promise((r) => setTimeout(r, 25));
       }
       // Belt-and-suspenders: explicitly unlink the socket
