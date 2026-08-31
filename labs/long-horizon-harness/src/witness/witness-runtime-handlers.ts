@@ -324,4 +324,3 @@ export async function shutdown(
   await safeRemoveSocketFile(socketPath);
   process.exit(code);
 }
-

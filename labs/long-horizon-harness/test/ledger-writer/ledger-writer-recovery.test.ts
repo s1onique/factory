@@ -631,4 +631,3 @@ test("REC-SNAP02 parse anomaly in authoritative history fails closed", async () 
     await rmTmp(tmp);
   }
 });
-

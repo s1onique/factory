@@ -246,4 +246,3 @@ export function parsePersistedLine(line: string): ParsedPersistedLine {
     line,
   };
 }
-

@@ -186,4 +186,3 @@ export function encodePersistedWitnessEvidence(
 ): PersistedWitnessEvidence {
   return p;
 }
-

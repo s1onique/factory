@@ -167,4 +167,3 @@ test("LEASE_CAP04 single release authority: LeaseHandle only (B0-CORR05 §5)", a
     "releaseLedgerWriterLease must not be a runtime export",
   );
 });
-

@@ -200,4 +200,3 @@ void main().catch((e: unknown) => {
   emit({ kind: "error", message: e instanceof Error ? e.message : String(e) });
   process.exit(1);
 });
-

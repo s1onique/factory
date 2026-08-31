@@ -175,4 +175,3 @@ export type CommandOutcome =
   | { readonly kind: "already_settled"; readonly result: WitnessPersistedResult }
   | { readonly kind: "cleanup_failed"; readonly result: WitnessPersistedResult }
   | { readonly kind: "authority_unavailable"; readonly reason: string };
-

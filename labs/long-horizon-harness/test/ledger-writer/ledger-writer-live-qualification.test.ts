@@ -1,6 +1,6 @@
 /**
  * ledger-writer-live-qualification.test.ts
- * (B0-QUALIFICATION02)
+ * (B0-QUALIFICATION03)
  *
  * Strict LedgerWriter live qualification oracle.
  *
@@ -193,14 +193,17 @@ async function bootHandleWithCleanup(tmp: string): Promise<WriterHandle> {
 }
 
 const appendCounting: AppendCountingFn = async (h, args) => {
-  const result = await h.append({
+  // (B0-QUALIFICATION03) The wrapper used to return
+  // `{result, wireAttempts:1}` — that was a constant,
+  // not instrumentation. We delegate to the production
+  // append client and return only the result.
+  return await h.append({
     commitId: args.commitId,
     event: args.event,
     ...(args.clientContentHash !== undefined
       ? { clientContentHash: args.clientContentHash }
       : {}),
   });
-  return { result, wireAttempts: 1 };
 };
 
 function makeCtx(): LiveCaseCtx {

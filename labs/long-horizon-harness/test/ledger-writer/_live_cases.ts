@@ -51,8 +51,25 @@ export type LiveCaseCtx = {
    */
   readonly bootHandle: (tmp: string) => Promise<WriterHandle>;
   /**
-   * Appends via the production client; tracks per-call
-   * wire attempts via the ctx counter (RPC01..03).
+   * Appends via the production client.
+   *
+   * (B0-QUALIFICATION03) The earlier `appendCounting`
+   * returned `{result, wireAttempts:1}` where
+   * wireAttempts was a constant, not a measurement.
+   * The reviewer correctly identified that as fake
+   * evidence: a client could perform two RPCs
+   * internally while the wrapper still reported
+   * wireAttempts=1. Transport round-trip count is
+   * NOT a B0 freeze invariant — the safety invariant
+   * we actually care about is:
+   *
+   *   one semantic commitId → no duplicate
+   *   durable effect
+   *
+   * which is covered by LWQ03/LWQ04/LWQ06/LWQ10.
+   * The transport-attempt count is an
+   * efficiency/protocol-shape property. We therefore
+   * drop the counter and only return the result.
    */
   readonly appendCounting: AppendCountingFn;
 };
@@ -72,13 +89,11 @@ function tmpBase(): string {
 }
 
 /**
- * Wire-attempt counter: wraps the production append
- * client so we can assert exactly one wire request
- * per logical call (RPC01..03).
- *
- * The implementation is supplied by the caller (the
- * strict oracle) because it owns the counter
- * allocation. This file declares only the shape.
+ * (B0-QUALIFICATION03) The wrapper used to return
+ * `{result, wireAttempts:1}` and asserted
+ * `wireAttempts === 1` per logical append. That was
+ * a constant, not instrumentation. We drop the
+ * counter; only the result is returned.
  */
 export type AppendCountingFn = (
   h: WriterHandle,
@@ -87,15 +102,14 @@ export type AppendCountingFn = (
     readonly event: import("../../src/ledger-writer/ledger-writer-protocol.js").WriterEvent;
     readonly clientContentHash?: string;
   },
-) => Promise<{ readonly result: Awaited<ReturnType<typeof appendToLedgerWriter>>; readonly wireAttempts: number }>;
+) => Promise<Awaited<ReturnType<typeof appendToLedgerWriter>>>;
 
-// A no-op stub used when the caller has not provided a
-// real instrument. Returns wireAttempts=0 so misuse is
-// loudly off-baseline.
+// Uninitialised stub used when the caller has not
+// provided a real implementation.
 export const UNINITIALISED_APPEND_COUNTING: AppendCountingFn = (_h, _args) =>
   Promise.resolve({
-    result: { ok: false, error: { kind: "writer_busy", message: "uninitialised" } },
-    wireAttempts: 0,
+    ok: false,
+    error: { kind: "writer_busy", message: "uninitialised" },
   });
 
 // --------------------------------------------------------------------
@@ -139,12 +153,12 @@ const LWQ02: LiveCase = {
     const tmp = await ctx.mkTmp("lwq02");
     const h = await ctx.bootHandle(tmp);
     try {
-      const { result } = await ctx.appendCounting(h, {
+      const r = await ctx.appendCounting(h, {
         commitId: "lwq02",
         event: makeEvent(1, "lwq02"),
       });
-      assert.equal(result.ok, true);
-      if (result.ok) assert.equal(result.value.sequence, 1);
+      assert.equal(r.ok, true);
+      if (r.ok) assert.equal(r.value.sequence, 1);
     } finally {
       await h.stop();
     }
@@ -162,13 +176,13 @@ const LWQ03: LiveCase = {
         commitId: "lwq03a",
         event: makeEvent(1, "lwq03a"),
       });
-      assert.equal(a.result.ok, true);
+      assert.equal(a.ok, true);
       const b = await ctx.appendCounting(h, {
         commitId: "lwq03b",
         event: makeEvent(2, "lwq03b"),
       });
-      assert.equal(b.result.ok, true);
-      if (b.result.ok) assert.equal(b.result.value.sequence, 2);
+      assert.equal(b.ok, true);
+      if (b.ok) assert.equal(b.value.sequence, 2);
     } finally {
       await h.stop();
     }
@@ -186,14 +200,14 @@ const LWQ04: LiveCase = {
         commitId: "lwq04",
         event: makeEvent(1, "lwq04"),
       });
-      assert.equal(a.result.ok, true);
-      if (a.result.ok) assert.equal(a.result.value.sequence, 1);
+      assert.equal(a.ok, true);
+      if (a.ok) assert.equal(a.value.sequence, 1);
       const b = await ctx.appendCounting(h, {
         commitId: "lwq04",
         event: makeEvent(1, "lwq04"),
       });
-      assert.equal(b.result.ok, true);
-      if (b.result.ok) assert.equal(b.result.value.sequence, 1);
+      assert.equal(b.ok, true);
+      if (b.ok) assert.equal(b.value.sequence, 1);
     } finally {
       await h.stop();
     }
@@ -216,11 +230,11 @@ const LWQ05: LiveCase = {
         commitId: "lwq05b",
         event: ev,
       });
-      assert.equal(a.result.ok, true);
-      assert.equal(b.result.ok, true);
-      if (a.result.ok && b.result.ok) {
-        assert.equal(a.result.value.sequence, 1);
-        assert.equal(b.result.value.sequence, 2);
+      assert.equal(a.ok, true);
+      assert.equal(b.ok, true);
+      if (a.ok && b.ok) {
+        assert.equal(a.value.sequence, 1);
+        assert.equal(b.value.sequence, 2);
       }
     } finally {
       await h.stop();
@@ -236,11 +250,11 @@ const LWQ06: LiveCase = {
     const h = await ctx.bootHandle(tmp);
     try {
       for (let i = 1; i <= 3; i++) {
-        const { result } = await ctx.appendCounting(h, {
+        const r = await ctx.appendCounting(h, {
           commitId: `lwq06-${i}`,
           event: makeEvent(i, `lwq06-${i}`),
         });
-        assert.equal(result.ok, true);
+        assert.equal(r.ok, true);
       }
     } finally {
       await h.stop();
@@ -268,8 +282,8 @@ const LWQ07: LiveCase = {
         commitId,
         event: makeEvent(1, "lwq07"),
       });
-      assert.equal(a.result.ok, true);
-      if (a.result.ok) assert.equal(a.result.value.sequence, 1);
+      assert.equal(a.ok, true);
+      if (a.ok) assert.equal(a.value.sequence, 1);
     } finally {
       await h1.stop();
     }
@@ -279,9 +293,9 @@ const LWQ07: LiveCase = {
         commitId,
         event: makeEvent(1, "lwq07"),
       });
-      assert.equal(b.result.ok, true);
-      if (b.result.ok) {
-        assert.equal(b.result.value.sequence, 1, "replay returns original seq");
+      assert.equal(b.ok, true);
+      if (b.ok) {
+        assert.equal(b.value.sequence, 1, "replay returns original seq");
       }
     } finally {
       await h2.stop();
@@ -312,7 +326,7 @@ const LWQ08: LiveCase = {
           commitId: "lwq08-second",
           event: makeEvent(2, "lwq08-second"),
         });
-        r2Append = r.result;
+        r2Append = r;
       } catch (e) {
         r2Append = { ok: false };
         void e;
@@ -345,19 +359,21 @@ const LWQ08: LiveCase = {
 
 const LWQ09: LiveCase = {
   id: "LWQ09",
-  title: "RPC01 new commit → one logical append, one wire round-trip",
+  title: "RPC01 new commit → one logical append → seq 1",
   async run(ctx) {
     const tmp = await ctx.mkTmp("rpc01");
     const h = await ctx.bootHandle(tmp);
     try {
+      // (B0-QUALIFICATION03) No wireAttempts assertion:
+      // transport round-trip count is not a B0 freeze
+      // invariant. We only assert the semantic
+      // outcome: a fresh commitId commits at seq 1.
       const r = await ctx.appendCounting(h, {
         commitId: "rpc01",
         event: makeEvent(1, "rpc01"),
       });
-      assert.equal(r.result.ok, true);
-      if (r.result.ok) assert.equal(r.result.value.sequence, 1);
-      assert.equal(r.wireAttempts, 1,
-        "RPC01 must make exactly one wire attempt per logical append");
+      assert.equal(r.ok, true);
+      if (r.ok) assert.equal(r.value.sequence, 1);
     } finally {
       await h.stop();
     }
@@ -366,7 +382,7 @@ const LWQ09: LiveCase = {
 
 const LWQ10: LiveCase = {
   id: "LWQ10",
-  title: "RPC02 replay → one logical append, one wire round-trip",
+  title: "RPC02 replay → second logical append returns same sequence (no duplicate durable effect)",
   async run(ctx) {
     const tmp = await ctx.mkTmp("rpc02");
     const h = await ctx.bootHandle(tmp);
@@ -375,18 +391,16 @@ const LWQ10: LiveCase = {
         commitId: "rpc02",
         event: makeEvent(1, "rpc02"),
       });
-      assert.equal(a.result.ok, true);
+      assert.equal(a.ok, true);
       const b = await ctx.appendCounting(h, {
         commitId: "rpc02",
         event: makeEvent(1, "rpc02"),
       });
-      assert.equal(b.result.ok, true);
-      if (a.result.ok && b.result.ok) {
-        assert.equal(a.result.value.sequence, b.result.value.sequence,
+      assert.equal(b.ok, true);
+      if (a.ok && b.ok) {
+        assert.equal(a.value.sequence, b.value.sequence,
           "replay returns same sequence");
       }
-      assert.equal(a.wireAttempts, 1, "first call: one wire attempt");
-      assert.equal(b.wireAttempts, 1, "replay call: one wire attempt");
     } finally {
       await h.stop();
     }
@@ -414,26 +428,26 @@ const LWQ11: LiveCase = {
         commitId: "rpc03",
         event: evA,
       });
-      assert.equal(a.result.ok, true);
-      if (a.result.ok) assert.equal(a.result.value.sequence, 1);
+      assert.equal(a.ok, true);
+      if (a.ok) assert.equal(a.value.sequence, 1);
       const b = await ctx.appendCounting(h, {
         commitId: "rpc03",
         event: evB,
       });
       // RPC03 conflict: must report an error.
-      assert.equal(b.result.ok, false,
+      assert.equal(b.ok, false,
         "RPC03 conflict must report ok=false");
-      if (!b.result.ok) {
-        const k = (b.result.error as { kind?: string }).kind;
+      if (!b.ok) {
+        const k = (b.error as { kind?: string }).kind;
         assert.equal(k, "protocol_error",
           `RPC03 client wraps conflict as protocol_error, got ${k}`);
-        const inner = (b.result.error as {
+        const inner = (b.error as {
           error?: { kind?: string };
         }).error;
         assert.ok(
           inner !== null && typeof inner === "object" &&
           inner.kind === "conflicting_commit",
-          `RPC03 inner.kind must be conflicting_commit, got ${JSON.stringify(b.result.error)}`,
+          `RPC03 inner.kind must be conflicting_commit, got ${JSON.stringify(b.error)}`,
         );
       }
     } finally {

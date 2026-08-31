@@ -211,4 +211,3 @@ test("LEASE08 symlink at lease path rejected by lstat? (informational)", async (
     await rmTmp(tmp);
   }
 });
-
