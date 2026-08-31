@@ -113,6 +113,10 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     "src/ledger-writer/ledger-writer-recovery.ts",
     "src/ledger-writer/ledger-writer-lease.ts",
     "src/ledger-writer/ledger-writer-response-decode.ts",
+    // B0-CORR06: per-connection handler parses the
+    // framed request payload at the socket trust
+    // boundary.
+    "src/ledger-writer/ledger-writer-connection.ts",
     "src/witness/witness-evidence-decode.ts",
   ]);
   const hits: string[] = [];

@@ -22,25 +22,15 @@
  * than maintaining a request queue with re-entrancy bugs.
  */
 
-import { createServer, type Server, type Socket } from "node:net";
+import { createServer, type Server } from "node:net";
 
-import {
-  decodeFrame,
-  encodeFrame,
-} from "../witness/witness-codec-framing.js";
-import {
-  type LedgerWriterResponse,
-  parseLedgerWriterRequest,
-  LEDGER_WRITER_PROTOCOL_VERSION,
-} from "./ledger-writer-protocol.js";
 import { probeSocketPath } from "./ledger-writer-socket-probe.js";
 import { loadOrInitIndex } from "./ledger-writer-persistence.js";
 import {
-  handleRequest,
   type WriterServerArgs,
   type WriterState,
-  type WriterError,
 } from "./ledger-writer-request-handler.js";
+import { handleConnection } from "./ledger-writer-connection.js";
 import {
   acquireLedgerWriterLease,
   type LeaseHandle,
@@ -84,6 +74,15 @@ export type WriterServerHandle = {
   readonly server: Server;
   readonly leaseHandle: LeaseHandle;
   readonly waitForInFlight: () => Promise<void>;
+  /**
+   * Current count of in-flight request handlers (durable
+   * append/replay/path). Connection lifecycle does not
+   * contribute; only the request dispatch path does.
+   *
+   * B0-CORR06: in-flight accounting is bound to the
+   * request lifecycle, not the connection lifecycle.
+   */
+  readonly inFlightCount: () => number;
 };
 
 export type WriterServerResult<T> =
@@ -116,22 +115,23 @@ export async function startWriterServer(
     inFlight: 0,
   };
 
-  const server = createServer((socket: Socket) => {
-    // B0-CORR03 §2: count in-flight handler work so the
-    // lease release can wait for all accepted connections
-    // to settle.
-    state.inFlight++;
-    handleConnection(socket, args, state)
-      .catch(() => {
-        try {
-          socket.destroy();
-        } catch {
-          // best-effort
-        }
-      })
-      .finally(() => {
-        state.inFlight--;
-      });
+  const server = createServer((socket) => {
+    // B0-CORR06: handleConnection returns as soon as the
+    // socket listeners are installed. The actual request
+    // handler is dispatched from the "data" callback. We
+    // therefore bind the in-flight accounting to the
+    // request lifecycle, not the connection lifecycle.
+    //
+    // handleConnection() handles listener-registration
+    // errors and socket teardown. It does NOT participate
+    // in the drain count.
+    handleConnection(socket, args, state).catch(() => {
+      try {
+        socket.destroy();
+      } catch {
+        // best-effort
+      }
+    });
   });
 
   // B0-CORR02 §4: bind-time path-collision policy.
@@ -291,101 +291,8 @@ export async function startWriterServer(
           await new Promise((r) => setTimeout(r, 10));
         }
       },
+      inFlightCount: (): number => state.inFlight,
     },
   };
-}
-
-async function handleConnection(
-  socket: Socket,
-  args: WriterServerArgs,
-  state: WriterState,
-): Promise<void> {
-  let buf: Buffer = Buffer.alloc(0);
-  const reply = async (r: LedgerWriterResponse): Promise<void> => {
-    const frame = encodeFrame(JSON.stringify(r));
-    if (!frame.ok) {
-      socket.destroy();
-      return;
-    }
-    // Write the frame bytes THEN end the socket. Combining
-    // write+end into a single call (socket.end(buffer)) is
-    // documented but appears to race with the client's
-    // half-close on UDS — under contention the reply bytes
-    // are silently dropped. Separating the write and the
-    // close makes the delivery observable in the test
-    // harness.
-    socket.write(Buffer.from(frame.bytes), () => {
-      socket.end();
-    });
-  };
-  const replyErr = async (error: WriterError): Promise<void> => {
-    await reply({
-      kind: "error",
-      protocolVersion: LEDGER_WRITER_PROTOCOL_VERSION,
-      error,
-    });
-  };
-
-  socket.on("data", (chunk: Buffer) => {
-    buf = Buffer.concat([buf, chunk]);
-    let offset = 0;
-    while (true) {
-      const decoded = decodeFrame(buf, offset);
-      if (!decoded.ok) {
-        if (decoded.error.kind === "oversize_frame") {
-          socket.destroy();
-          return;
-        }
-        if (
-          decoded.error.kind === "malformed_json" &&
-          decoded.consumed === 0
-        ) {
-          // "need more" — wait for next chunk
-          return;
-        }
-        offset += decoded.consumed;
-        if (offset >= buf.length) {
-          buf = Buffer.alloc(0);
-          return;
-        }
-        continue;
-      }
-      const json = decoded.json;
-      buf = buf.subarray(offset + decoded.consumed);
-      offset = 0;
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(json);
-      } catch (e: unknown) {
-        const m = e instanceof Error ? e.message : String(e);
-        void replyErr({ kind: "malformed_message", reason: m });
-        return;
-      }
-
-      const req = parseLedgerWriterRequest(parsed);
-      if (!req.ok) {
-        void replyErr({ kind: "malformed_message", reason: req.reason });
-        return;
-      }
-
-      handleRequest(req.request, args, state, reply, replyErr).catch((e: unknown) => {
-        // If the async append handler throws, log the failure
-        // and tear down the socket so the client sees a
-        // disconnect rather than hanging.
-        const m = e instanceof Error ? e.message : String(e);
-        process.stderr.write(`[writer] handler error: ${m}\n`);
-        try {
-          socket.destroy();
-        } catch {
-          // best-effort
-        }
-      });
-      return; // one-shot per connection
-    }
-  });
-  socket.on("error", () => {
-    socket.destroy();
-  });
 }
 
