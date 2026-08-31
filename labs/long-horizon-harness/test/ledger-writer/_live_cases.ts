@@ -1,6 +1,6 @@
 /**
  * _live_cases.ts
- * (B0-QUALIFICATION04)
+ * (B0-QUALIFICATION05)
  *
  * SINGLE MAINTAINED implementation of the LedgerWriter
  * B0 qualification matrix (LWQ01..LWQ15). Both the
@@ -14,14 +14,23 @@
  * lane asserts the array length and registers tests
  * from it.
  *
- * B0-QUALIFICATION04 evidence-lifetime contract:
+ * B0-QUALIFICATION05 evidence-lifetime contract:
  *   - Each case reads durable evidence BEFORE
  *     writer.stop() and BEFORE ctx.destroyRun().
- *   - ENOENT on a required artefact is FAIL.
+ *   - ENOENT on a required artefact is FAIL unless
+ *     the case legitimately produces no durable
+ *     state (LWQ08 establishes a baseline so this
+ *     exception never triggers in practice).
+ *   - Negative-delta evidence: to prove that an
+ *     actor caused no durable mutation, the case
+ *     establishes a known authoritative baseline
+ *     first and proves the durable state did not
+ *     change.
  *   - Production LedgerWriter semantics are not
  *     exercised through this module; only the
  *     production client APIs (ping, append,
  *     probeSocketPath, handleRequest, handleConnection)
+ *     and the canonicalize parser (parsePersistedLine)
  *     are reused.
  */
 
@@ -38,6 +47,10 @@ import type { WriterHandle } from "./_writer_helper.js";
 import {
   appendToLedgerWriter,
 } from "../../src/ledger-writer/ledger-writer-client.js";
+import {
+  parsePersistedLine,
+  type ParsedPersistedLine,
+} from "../../src/ledger-writer/ledger-writer-canonicalize.js";
 import { probeSocketPath } from "../../src/ledger-writer/ledger-writer-socket-probe.js";
 import {
   registerHelperSpawn,
@@ -383,58 +396,157 @@ const LWQ07: LiveCase = {
 
 // --------------------------------------------------------------------
 // LWQ08 — sole-writer exclusion (LW-LIVE08)
+//
+// (B0-QUALIFICATION05) Negative-delta evidence law:
+//
+//   "To prove that an actor caused no durable
+//    mutation, establish a known authoritative
+//    baseline and prove the durable state did not
+//    change. Mere artifact absence is insufficient
+//    when the artifact may legitimately be lazily
+//    created."
+//
+// The earlier shapes of LWQ08 were both broken:
+//   - ENOENT interpreted as zero records (false-green)
+//   - ENOENT treated as failure (false-red — the
+//     ledger is lazily created on first append, so a
+//     sole-writer scenario with no append at all can
+//     legitimately have no ledger yet).
+//
+// The corrected shape establishes a positive
+// authoritative baseline via W1, then attempts a
+// concurrent W2 against the same runDir, then proves
+// the durable state still contains ONLY W1's commit.
 // --------------------------------------------------------------------
 
 const LWQ08: LiveCase = {
   id: "LWQ08",
-  title: "second writer for same runDir cannot commit concurrently (LW-LIVE08)",
+  title:
+    "sole-writer exclusion: known W1 baseline remains unchanged by concurrent W2 (LW-LIVE08)",
   async run(ctx) {
     const tmp = await ctx.mkTmp("lwq08");
+    const BASELINE_COMMIT = "lwq08-owner-baseline";
+    const FORBIDDEN_COMMIT = "lwq08-forbidden-second-writer";
+
     const h1 = await ctx.bootHandle(tmp);
+
     let r2Append: { ok?: boolean } = {};
+    let r2BootError: unknown = undefined;
     let h2: WriterHandle | undefined;
-    let ledgerExists = false;
-    let lineCount = -1;
+    let ledgerText = "";
+    let baselineRecord: ParsedPersistedLine | undefined;
+    let forbiddenRecordCount = 0;
+
     try {
+      // Step 1 — establish authoritative baseline via W1.
+      const baseline = await ctx.appendCounting(h1, {
+        commitId: BASELINE_COMMIT,
+        event: makeEvent(1, "lwq08-baseline"),
+      });
+      assert.equal(baseline.ok, true,
+        "LWQ08: baseline append must succeed");
+      if (baseline.ok) {
+        assert.equal(baseline.value.sequence, 1,
+          "LWQ08: baseline must commit at sequence 1");
+      }
+
+      // Step 2 — verify the ledger now exists with exactly
+      // one record (the baseline). Read this BEFORE
+      // touching h2 so any failure here is unambiguous.
+      {
+        const baselineLedger = path.join(tmp, LEDGER_FILENAME);
+        const baselineText = await fs.readFile(baselineLedger, "utf8");
+        const baselineLines = baselineText
+          .split("\n")
+          .filter((l) => l.length > 0);
+        assert.equal(baselineLines.length, 1,
+          `LWQ08: baseline must produce exactly 1 ledger line; got ${baselineLines.length}`);
+      }
+
+      // Step 3 — attempt a concurrent W2 while W1 is still
+      // authoritative. Both outcomes are acceptable:
+      //   A. boot of W2 rejected (live writer exclusion)
+      //   B. handle returned but append fails closed
+      // The forbidden outcome is W2 successfully
+      // committing an event into the ledger.
       try {
         h2 = await ctx.bootHandle(tmp);
         try {
           const r = await ctx.appendCounting(h2, {
-            commitId: "lwq08-second",
+            commitId: FORBIDDEN_COMMIT,
             event: makeEvent(2, "lwq08-second"),
           });
           r2Append = r;
         } catch (e) {
           r2Append = { ok: false };
-          void e;
+          r2BootError = e;
         }
-      } catch {
-        // boot of second writer rejected — acceptable
+      } catch (e) {
+        // Boot of W2 rejected — acceptable.
+        r2BootError = e;
       }
-      await h1.stop();
+
+      // Step 4 — read durable state AFTER W2's attempt.
+      // Evidence is retained: writer stop and runDir
+      // destruction happen LATER.
+      const ledger = path.join(tmp, LEDGER_FILENAME);
+      ledgerText = await fs.readFile(ledger, "utf8");
+    } finally {
+      // Step 5 — cleanup ordering. Evidence has already
+      // been read; now reap children and destroy the
+      // runDir.
       if (h2 !== undefined) {
         try { await h2.stop(); } catch { /* */ }
       }
-      // (B0-QUALIFICATION04) Missing-evidence
-      // non-equivalence law: ENOENT is FAIL, not
-      // "zero records". The ledger must exist and
-      // either be empty OR contain records from
-      // h1's writes only (none in this case).
-      const ledger = path.join(tmp, LEDGER_FILENAME);
-      const text = await fs.readFile(ledger, "utf8");
-      ledgerExists = true;
-      lineCount = text.split("\n").filter((l) => l.length > 0).length;
-    } finally {
-      // If h2 boot was rejected, we still need to
-      // ensure h1 is stopped. The stop above already
-      // covers that.
+      try { await h1.stop(); } catch { /* */ }
     }
-    assert.equal(ledgerExists, true,
-      "LWQ08: events.jsonl must exist (missing evidence ≠ zero records)");
-    assert.equal(lineCount, 0,
-      `LWQ08: second writer must NOT have committed any line; ledger has ${lineCount}`);
+
+    // Step 6 — durable postconditions.
+    const lines = ledgerText.split("\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 1,
+      `LWQ08: ledger must contain exactly W1's baseline commit; got ${lines.length} lines`);
+
+    // Decode every line; there must be exactly one
+    // record, and its commitId must be the baseline.
+    for (const ln of lines) {
+      const parsed = parsePersistedLine(ln);
+      assert.equal(parsed.ok, true,
+        `LWQ08: ledger line must decode; got reason=${parsed.ok ? "" : parsed.reason}`);
+      if (!parsed.ok) continue;
+      if (parsed.commitId === FORBIDDEN_COMMIT) {
+        forbiddenRecordCount += 1;
+      } else if (parsed.commitId === BASELINE_COMMIT) {
+        if (baselineRecord !== undefined) {
+          throw new Error("LWQ08: duplicate baseline record in ledger");
+        }
+        baselineRecord = parsed;
+      } else {
+        throw new Error(
+          `LWQ08: unexpected commitId in ledger: ${parsed.commitId}`,
+        );
+      }
+    }
+
+    assert.ok(baselineRecord !== undefined,
+      "LWQ08: baseline record must be present in the durable ledger");
+    if (baselineRecord !== undefined && baselineRecord.ok) {
+      assert.equal(baselineRecord.sequence, 1,
+        "LWQ08: baseline sequence must be 1");
+      assert.equal(baselineRecord.commitId, BASELINE_COMMIT,
+        "LWQ08: baseline commitId must equal the W1 baseline");
+    }
+    assert.equal(forbiddenRecordCount, 0,
+      `LWQ08: W2 must NOT have committed any record; found ${forbiddenRecordCount}`);
+
+    // Forbidden outcome at the client level: W2 reports a
+    // successful append. Boot may succeed (and append
+    // fails closed) or fail outright — both acceptable.
     assert.notEqual(r2Append.ok, true,
-      "LWQ08: second writer must NOT have reported a successful append");
+      "LWQ08: W2 must NOT have reported a successful append");
+    if (r2BootError !== undefined) {
+      void r2BootError; // surfacing only
+    }
+
     await ctx.destroyRun(tmp);
   },
 };

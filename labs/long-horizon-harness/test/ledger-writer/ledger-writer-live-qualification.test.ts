@@ -1,6 +1,6 @@
 /**
  * ledger-writer-live-qualification.test.ts
- * (B0-QUALIFICATION04)
+ * (B0-QUALIFICATION05)
  *
  * Strict LedgerWriter live qualification oracle.
  *
@@ -21,15 +21,21 @@
  * `qualifies()` classifier — they do not touch
  * process state.
  *
- * B0-QUALIFICATION04 evidence-lifetime contract:
+ * B0-QUALIFICATION05 evidence-lifetime contract:
  *
  *   - WriterHandle.stop() kills + reaps the child
  *     ONLY; it never touches the runDir.
  *   - Each case reads evidence BEFORE invoking
  *     ctx.destroyRun(tmp).
- *   - Missing-evidence is FAIL: ENOENT on a
- *     required durable artefact is not interpreted
- *     as "zero records".
+ *   - Negative-delta evidence: LWQ08 establishes a
+ *     known W1 baseline first; the durable state is
+ *     then asserted to contain ONLY that baseline.
+ *   - Missing-evidence is FAIL: ENOENT on a required
+ *     durable artefact is not interpreted as "zero
+ *     records". The exception is a case that
+ *     legitimately produces no durable state; in
+ *     practice LWQ08 establishes a baseline so this
+ *     exception never triggers.
  *   - destroyRunDir throws on failure so residue
  *     accounting cannot be silently bypassed.
  */
