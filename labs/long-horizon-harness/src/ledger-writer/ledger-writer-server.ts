@@ -23,7 +23,6 @@
  */
 
 import { createServer, type Server, type Socket } from "node:net";
-import { promises as fs } from "node:fs";
 
 import {
   decodeFrame,
@@ -202,30 +201,31 @@ export async function startWriterServer(
     return probe;
   }
   if (probe.value === "unknown_socket") {
-    // B0-CORR02 §4: we are the lease holder. We MAY unlink
-    // the socket path — the listener (if any) is not us.
-    // If it is a live writer that briefly failed to
-    // respond, the worst-case outcome is that writer sees a
-    // subsequent bind error and the operator investigates.
-    try {
-      await fs.unlink(args.socketPath);
-    } catch (e: unknown) {
-      const code = (e as { code?: string }).code;
-      if (code !== "ENOENT") {
-        server.close();
-        await lease.handle.release().catch(() => undefined);
-        return {
-          ok: false,
-          error: {
-            kind: "path_collision",
-            message:
-              `could not unlink unknown socket at ${args.socketPath}: ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-          },
-        };
-      }
-    }
+    // B0-CORR05 §8: unknown_socket means we could not
+    // establish WHO the listener is. Possession of the
+    // filesystem lease does NOT prove the previously-bound
+    // socket's listener is dead — pathname lifecycle and
+    // socket lifetime are distinct. The safe policy is to
+    // fail closed and refuse to bind.
+    //
+    // Doctrine:
+    //   **Endpoint-uncertainty law:** possession of
+    //   filesystem authority does not prove death of an
+    //   independently live kernel endpoint.
+    //
+    // Explicit operator recovery may remove a stale socket
+    // only after an independent proof that the old writer
+    // is gone.
+    server.close();
+    await lease.handle.release().catch(() => undefined);
+    return {
+      ok: false,
+      error: {
+        kind: "path_collision",
+        message:
+          `unknown socket at ${args.socketPath}; WHO did not respond; refusing to unlink or bind (operator recovery required)`,
+      },
+    };
   }
 
   try {

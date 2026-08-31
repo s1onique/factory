@@ -45,8 +45,8 @@ import {
 } from "../witness/witness-codec-framing.js";
 import {
   LEDGER_WRITER_PROTOCOL_VERSION,
-  type LedgerWriterResponse,
 } from "./ledger-writer-protocol.js";
+import { decodeLedgerWriterResponse } from "./ledger-writer-response-decode.js";
 
 export type WriterServerProbeError =
   | { readonly kind: "bind_failed"; readonly message: string }
@@ -125,13 +125,13 @@ async function whoAreYou(
           finish("error_response");
           return;
         }
-        const resp = parsed as Partial<LedgerWriterResponse>;
-        if (
-          resp.kind === "self" &&
-          typeof resp.instanceId === "string"
-        ) {
+        // B0-CORR05 §13: WHO responses are routed through
+        // the authoritative response decoder. No
+        // structural cast at the socket trust boundary.
+        const decoded2 = decodeLedgerWriterResponse(parsed);
+        if (decoded2.ok && decoded2.value.kind === "self") {
           clearTimeout(timer);
-          finish(resp.instanceId);
+          finish(decoded2.value.instanceId);
           return;
         }
         clearTimeout(timer);

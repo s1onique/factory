@@ -33,11 +33,12 @@
  *
  * Recovery: the lease is fail-closed manual. If a previous
  * writer dies and leaves the lease behind, the operator
- * MUST explicitly release it (releaseLedgerWriterLease) or
- * remove the directory before a new writer can start.
- * Automatic lease reclamation based on PID absence is
- * UNSAFE: PID reuse means a fresh unrelated process could
- * inherit the lease.
+ * MUST explicitly release it (via the in-memory LeaseHandle
+ * acquired during process startup, or by removing the
+ * directory before a new writer can start). Automatic
+ * lease reclamation based on PID absence is UNSAFE: PID
+ * reuse means a fresh unrelated process could inherit the
+ * lease.
  *
  * This module is pure fs and is the only authority on the
  * lease. The server calls it at startup; the spawn-side
@@ -305,59 +306,16 @@ export async function readLeaseMetadata(
 }
 
 /**
- * Release the lease by removing the directory.
+ * B0-CORR05 §5: the runtime release authority is exclusively
+ * LeaseHandle.release(). A descriptive instanceId-only
+ * release primitive is NOT exposed from this module —
+ * instanceId is mutable on-disk metadata, not a capability.
  *
- * This MUST only be called by the lease holder. To prevent
- * accidental cross-process release, the caller passes the
- * expected instanceId; if the on-disk metadata disagrees,
- * the release is rejected.
+ * Doctrine:
+ *   **Single-release-authority law:** once an acquisition
+ *   capability exists, descriptive identity must never
+ *   provide an alternative runtime release authority.
  */
-export async function releaseLedgerWriterLease(args: {
-  readonly runDir: string;
-  readonly expectedInstanceId: LedgerWriterInstanceId;
-}): Promise<LeaseReleaseResult> {
-  const dir = leaseDir(args.runDir);
-  try {
-    const st = await fs.lstat(dir);
-    if (!st.isDirectory()) {
-      return { ok: false, error: { kind: "lease_not_held" } };
-    }
-  } catch (e: unknown) {
-    const code = (e as { code?: string }).code;
-    if (code === "ENOENT") {
-      return { ok: false, error: { kind: "lease_not_held" } };
-    }
-    return {
-      ok: false,
-      error: {
-        kind: "io_error",
-        message: e instanceof Error ? e.message : String(e),
-      },
-    };
-  }
-  const meta = await readLeaseMetadata(args.runDir);
-  if (meta === null || meta.instanceId !== args.expectedInstanceId) {
-    return {
-      ok: false,
-      error: {
-        kind: "lease_held_by_other",
-        existing: meta,
-      },
-    };
-  }
-  try {
-    await fs.rm(dir, { recursive: true, force: true });
-    return { ok: true };
-  } catch (e: unknown) {
-    return {
-      ok: false,
-      error: {
-        kind: "io_error",
-        message: e instanceof Error ? e.message : String(e),
-      },
-    };
-  }
-}
 
 /**
  * Check whether the lease is currently held. Returns true

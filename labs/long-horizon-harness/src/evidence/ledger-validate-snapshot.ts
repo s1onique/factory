@@ -24,7 +24,7 @@
  */
 
 import {
-  decodeEnvelopeFromJsonLine,
+  decodeEnvelopeAndRawFromJsonLine,
 } from "./ledger-internals.js";
 import {
   type LedgerError,
@@ -77,9 +77,9 @@ export function validateLedgerSnapshot(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line === undefined || line.length === 0) continue;
-    const parsed = decodeEnvelopeFromJsonLine(line);
+    const parsed = decodeEnvelopeAndRawFromJsonLine(line);
     if (parsed.ok === false) return err(parsed.error);
-    const env = parsed.value;
+    const env = parsed.value.envelope;
     if (env.sequence <= lastSeq) {
       return err({
         kind: "invalid_evidence",
@@ -94,22 +94,10 @@ export function validateLedgerSnapshot(
     }
     envelopes.push(env);
     lastSeq = env.sequence;
-    // Retain the raw JSON object alongside the typed
-    // envelope. The side-channel (commit_id, content_hash)
-    // lives in the snake_case wire format, not on the
-    // branded EventEnvelope. We re-parse to a Record so
-    // callers can read both. This is the single snapshot;
-    // we do NOT introduce a second read.
-    let rawParsed: Record<string, unknown>;
-    try {
-      rawParsed = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      rawParsed = env as unknown as Record<string, unknown>;
-    }
     rawRecords.push({
       lineNumber: i + 1,
       raw: line,
-      parsed: rawParsed,
+      parsed: parsed.value.raw,
     });
   }
   return ok({ envelopes, lastSeq, rawRecords });

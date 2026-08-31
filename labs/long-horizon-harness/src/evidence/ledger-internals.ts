@@ -283,3 +283,38 @@ export function decodeEnvelopeFromJsonLine(
   }
   return decodeEnvelope(raw);
 }
+
+/**
+ * B0-CORR05 §13: the authoritative decoder exposes both
+ * the typed envelope AND the raw parsed JSON object.
+ * Callers that need to read wire-format side-channel
+ * fields (e.g. the B0 commit_id / content_hash) use this
+ * entry point to avoid a redundant JSON.parse on the
+ * already-parsed bytes.
+ */
+export function decodeEnvelopeAndRawFromJsonLine(
+  text: string,
+): Result<
+  { readonly envelope: EventEnvelope; readonly raw: Record<string, unknown> },
+  InvalidEvidence
+> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return err({ kind: "invalid_evidence", reason: `Malformed JSON: ${msg}` });
+  }
+  if (typeof raw !== "object" || raw === null) {
+    return err({
+      kind: "invalid_evidence",
+      reason: "JSON must decode to a non-null object.",
+    });
+  }
+  const envResult = decodeEnvelope(raw);
+  if (envResult.ok === false) return err(envResult.error);
+  return ok({
+    envelope: envResult.value,
+    raw: raw as Record<string, unknown>,
+  });
+}

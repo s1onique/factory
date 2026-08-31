@@ -26,7 +26,6 @@ import * as path from "node:path";
 import {
   acquireLedgerWriterLease,
   isLeaseHeld,
-  releaseLedgerWriterLease,
 } from "../../src/ledger-writer/ledger-writer-lease.js";
 import { makeLedgerWriterInstanceId } from "../../src/ledger-writer/ledger-writer-types.js";
 
@@ -146,27 +145,26 @@ test("LEASE_CAP03 hold/release pattern releases between two fresh acquisitions",
   }
 });
 
-test("LEASE_CAP04 releaseLedgerWriterLease still works (backwards compat)", async () => {
-  const tmp = await mkTmp();
-  try {
-    const id = makeLedgerWriterInstanceId("lw-compat-4");
-    const r1 = await acquireLedgerWriterLease({
-      runDir: tmp,
-      instanceId: id,
-      runId: "r",
-      missionId: "m",
-    });
-    assert.equal(r1.ok, true);
-    if (!r1.ok) return;
-    const rel = await releaseLedgerWriterLease({
-      runDir: tmp,
-      expectedInstanceId: id,
-    });
-    assert.equal(rel.ok, true);
-    const held = await isLeaseHeld(tmp);
-    assert.equal(held.held, false);
-  } finally {
-    await rmTmp(tmp);
-  }
+test("LEASE_CAP04 single release authority: LeaseHandle only (B0-CORR05 §5)", async () => {
+  // B0-CORR05 §6: there is no alternate runtime release
+  // route. The runtime barrel does NOT export an
+  // instanceId-only release primitive. The runtime module
+  // imports of `ledger-writer-lease.ts` therefore expose
+  // ONLY acquireLedgerWriterLease, isLeaseHeld,
+  // readLeaseMetadata, generateLeaseToken, and the
+  // LeaseHandle class.
+  //
+  // This test is mechanical: it asserts that the legacy
+  // releaseLedgerWriterLease is no longer exported from
+  // the lease module.
+  const leaseModule = await import(
+    "../../src/ledger-writer/ledger-writer-lease.js"
+  );
+  assert.equal(
+    (leaseModule as { releaseLedgerWriterLease?: unknown })
+      .releaseLedgerWriterLease,
+    undefined,
+    "releaseLedgerWriterLease must not be a runtime export",
+  );
 });
 

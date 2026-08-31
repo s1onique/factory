@@ -21,7 +21,6 @@ import {
   acquireLedgerWriterLease,
   isLeaseHeld,
   readLeaseMetadata,
-  releaseLedgerWriterLease,
 } from "../../src/ledger-writer/ledger-writer-lease.js";
 import { makeLedgerWriterInstanceId } from "../../src/ledger-writer/ledger-writer-types.js";
 
@@ -66,23 +65,19 @@ test("LEASE01 W1 acquires lease; W2 cannot acquire", async () => {
 test("LEASE02 W1 can release; W2 can then acquire", async () => {
   const tmp = await mkTmp();
   try {
-    const idA = makeLedgerWriterInstanceId("lw-A-2");
     const r1 = await acquireLedgerWriterLease({
       runDir: tmp,
-      instanceId: idA,
+      instanceId: makeLedgerWriterInstanceId("lw-A-2"),
       runId: "r",
       missionId: "m",
     });
     assert.equal(r1.ok, true);
-    const rel = await releaseLedgerWriterLease({
-      runDir: tmp,
-      expectedInstanceId: idA,
-    });
+    if (!r1.ok) return;
+    const rel = await r1.handle.release();
     assert.equal(rel.ok, true);
-    const idB = makeLedgerWriterInstanceId("lw-B-2");
     const r2 = await acquireLedgerWriterLease({
       runDir: tmp,
-      instanceId: idB,
+      instanceId: makeLedgerWriterInstanceId("lw-B-2"),
       runId: "r",
       missionId: "m",
     });
@@ -92,26 +87,27 @@ test("LEASE02 W1 can release; W2 can then acquire", async () => {
   }
 });
 
-test("LEASE03 release by wrong instanceId rejected", async () => {
+test("LEASE03 LeaseHandle.release fails closed when token mismatched", async () => {
   const tmp = await mkTmp();
   try {
-    const idA = makeLedgerWriterInstanceId("lw-A-3");
     const r1 = await acquireLedgerWriterLease({
       runDir: tmp,
-      instanceId: idA,
+      instanceId: makeLedgerWriterInstanceId("lw-A-3"),
       runId: "r",
       missionId: "m",
     });
     assert.equal(r1.ok, true);
-    const idB = makeLedgerWriterInstanceId("lw-B-3");
-    const rel = await releaseLedgerWriterLease({
-      runDir: tmp,
-      expectedInstanceId: idB,
-    });
+    if (!r1.ok) return;
+    // Mutate the on-disk token. The handle's release must
+    // refuse to delete the lease.
+    await fs.writeFile(
+      `${tmp}/ledger-writer-owner/token`,
+      "{not the original token}",
+    );
+    const rel = await r1.handle.release();
     assert.equal(rel.ok, false);
     if (rel.ok) return;
-    assert.equal(rel.error.kind, "lease_held_by_other");
-    // Lease still held.
+    assert.equal(rel.error.kind, "lease_replaced");
     const held = await isLeaseHeld(tmp);
     assert.equal(held.held, true);
   } finally {
@@ -176,11 +172,17 @@ test("LEASE06 concurrent ×100 acquisition → exactly one winner", async () => 
 test("LEASE07 release non-existent lease → lease_not_held", async () => {
   const tmp = await mkTmp();
   try {
-    const id = makeLedgerWriterInstanceId("lw-x-7");
-    const rel = await releaseLedgerWriterLease({
+    const r1 = await acquireLedgerWriterLease({
       runDir: tmp,
-      expectedInstanceId: id,
+      instanceId: makeLedgerWriterInstanceId("lw-x-7"),
+      runId: "r",
+      missionId: "m",
     });
+    assert.equal(r1.ok, true);
+    if (!r1.ok) return;
+    // Remove the lease out from under the holder.
+    await fs.rm(`${tmp}/ledger-writer-owner`, { recursive: true, force: true });
+    const rel = await r1.handle.release();
     assert.equal(rel.ok, false);
     if (rel.ok) return;
     assert.equal(rel.error.kind, "lease_not_held");
