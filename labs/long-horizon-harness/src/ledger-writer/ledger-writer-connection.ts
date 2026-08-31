@@ -103,6 +103,15 @@ export async function handleConnection(
         return;
       }
 
+      // B0-CORR07: closed admission gate. Reject the
+      // request synchronously and tear down the socket.
+      // We do NOT increment inFlight, do NOT call
+      // handleRequest, do NOT accept further frames.
+      if (!state.admission.accepting) {
+        socket.destroy();
+        return;
+      }
+
       // B0-CORR06: increment exactly once here, before
       // dispatching the durable request handler.
       // Decrement in finally so the counter settles when

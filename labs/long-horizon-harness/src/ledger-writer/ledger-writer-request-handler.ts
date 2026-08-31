@@ -83,6 +83,13 @@ export type WriterState = {
   // exposes a waitForInFlight() that observes this counter;
   // the lease is NOT released until it reaches zero.
   inFlight: number;
+  // B0-CORR07: request-admission gate. Open during normal
+  // operation; flipped closed synchronously by requestClose().
+  // While closed, no parsed request may be dispatched.
+  // server.close() alone only stops new CONNECTIONS; this
+  // gate closes the REQUEST admission surface for
+  // already-accepted sockets.
+  readonly admission: { accepting: boolean };
 };
 
 export type WriterServerArgs = {

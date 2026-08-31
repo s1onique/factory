@@ -34,14 +34,46 @@ export type CloseRequestError =
 export type ShutdownServerPort = {
   /**
    * Synchronously request that the server stop accepting
-   * new connections. Subsequent admission attempts MUST be
-   * rejected. Returns ok=true if the request was accepted.
+   * new connections AND close the request-admission gate
+   * (see AdmissionGatePort). Subsequent request dispatches
+   * on already-accepted sockets MUST be rejected. Returns
+   * ok=true if the request was accepted.
+   *
+   * B0-CORR07: server.close() alone only stops new
+   * CONNECTIONS. An already-accepted but idle socket
+   * could still introduce a new REQUEST after shutdown
+   * begins. requestClose() therefore MUST close both
+   * admission surfaces synchronously.
    */
   requestClose(): { readonly ok: true } | { readonly ok: false; readonly error: CloseRequestError };
   /**
    * Resolve when the close boundary has been observed.
    */
   awaitClosed(): Promise<void>;
+};
+
+/**
+ * B0-CORR07: the request-admission gate is owned by
+ * LedgerWriter's connection runtime. Each parsed
+ * request consults the gate before incrementing
+ * inFlight. Closing the gate makes the
+ * "graceful shutdown begins by preventing new work
+ * from entering" law literally true.
+ */
+export type AdmissionGatePort = {
+  /**
+   * Synchronously flip the gate closed. Idempotent:
+   * subsequent calls are no-ops. MUST run to completion
+   * before requestClose returns, so the caller can rely
+   * on the gate being closed by then.
+   */
+  closeAdmission(): void;
+  /**
+   * Observe the gate's current state. Production code
+   * uses this in the data callback; tests use it to
+   * assert the closed-by-requestClose invariant.
+   */
+  isAcceptingRequests(): boolean;
 };
 
 export type ShutdownClockPort = {
@@ -194,8 +226,19 @@ export async function shutdownLedgerWriter(args: {
 /**
  * Adapter that turns a `net.Server` into a
  * ShutdownServerPort.
+ *
+ * B0-CORR07: if an AdmissionGatePort is supplied,
+ * requestClose() flips the gate closed SYNCHRONOUSLY
+ * before invoking server.close(). This makes the
+ * "graceful shutdown begins by preventing new work
+ * from entering" law literally true — no parsed
+ * request on an already-accepted socket can be
+ * dispatched after requestClose returns.
  */
-export function asShutdownServerPort(server: Server): ShutdownServerPort {
+export function asShutdownServerPort(
+  server: Server,
+  gate?: AdmissionGatePort,
+): ShutdownServerPort {
   let closeRequested = false;
   let closeResolve: (() => void) | null = null;
   let closeReject: ((e: Error) => void) | null = null;
@@ -209,6 +252,11 @@ export function asShutdownServerPort(server: Server): ShutdownServerPort {
         return { ok: false, error: { kind: "already_closed" } };
       }
       closeRequested = true;
+      // B0-CORR07: close the request-admission gate
+      // SYNCHRONOUSLY before server.close(). After this
+      // line, no parsed request on any already-accepted
+      // socket can be dispatched.
+      if (gate !== undefined) gate.closeAdmission();
       try {
         server.close((err) => {
           if (err !== undefined && err !== null) {

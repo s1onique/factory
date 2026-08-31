@@ -22,6 +22,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { EventEmitter } from "node:events";
+import type { Socket } from "node:net";
 
 import {
   acquireLedgerWriterLease,
@@ -453,4 +455,238 @@ test("SHUT11 asShutdownServerPort rejects double requestClose", async () => {
   } finally {
     await rmTmp(tmp);
   }
+});
+
+/**
+ * SHUT13 (B0-CORR07): the request-admission gate is
+ * closed synchronously by requestClose, AND no parsed
+ * request can be dispatched after that.
+ *
+ * Host-runnable: uses a hand-built state object, not UDS.
+ */
+test("SHUT13 admission gate closed synchronously by requestClose (B0-CORR07)", async () => {
+  const { handleRequest } = await import(
+    "../../src/ledger-writer/ledger-writer-request-handler.js"
+  );
+  const { emptyDedupIndex } = await import(
+    "../../src/ledger-writer/ledger-writer-types.js"
+  );
+  const { makeLedgerWriterInstanceId } = await import(
+    "../../src/ledger-writer/ledger-writer-types.js"
+  );
+  const { asShutdownServerPort } = await import(
+    "../../src/ledger-writer/ledger-writer-shutdown.js"
+  );
+
+  const state = {
+    index: emptyDedupIndex(),
+    busy: false,
+    crashCutHook: null,
+    inFlight: 0,
+    admission: { accepting: true },
+  };
+  const args = {
+    runDir: "/tmp",
+    runId: "r",
+    missionId: "m",
+    socketPath: "/tmp/s",
+    instanceId: makeLedgerWriterInstanceId("lw-shut13"),
+  };
+
+  assert.equal(state.admission.accepting, true);
+
+  // Reply barrier that the test releases.
+  let barrierResolve: () => void = () => undefined;
+  const reply = async (): Promise<void> => {
+    await new Promise<void>((r) => { barrierResolve = r; });
+  };
+  const replyErr = async (): Promise<void> => undefined;
+
+  // Replicate the production dispatch path: gate check
+  // → inFlight++ → handleRequest → finally inFlight--.
+  function dispatch(): void {
+    if (!state.admission.accepting) return;
+    state.inFlight++;
+    void handleRequest(
+      { kind: "who_are_you", protocolVersion: 2 } as never,
+      args,
+      state,
+      reply,
+      replyErr,
+    ).finally(() => {
+      state.inFlight--;
+    });
+  }
+
+  dispatch();
+  assert.equal(state.inFlight, 1, "admit request → inFlight = 1");
+
+  // Build a port that uses state.admission as the gate.
+  const fakeServerLike = {
+    closeCount: 0,
+    close(cb: (err: Error | null) => void): void {
+      this.closeCount++;
+      setImmediate(() => cb(null));
+    },
+  };
+  const port = asShutdownServerPort(
+    fakeServerLike as unknown as Server,
+    {
+      closeAdmission: (): void => {
+        state.admission.accepting = false;
+      },
+      isAcceptingRequests: (): boolean => state.admission.accepting,
+    },
+  );
+
+  // Issue requestClose.
+  const result = port.requestClose();
+  assert.equal(result.ok, true);
+
+  // SYNCHRONOUSLY closed: assert without awaiting.
+  assert.equal(state.admission.accepting, false,
+    "requestClose flips gate closed synchronously");
+  assert.equal(fakeServerLike.closeCount, 1,
+    "requestClose invokes server.close");
+
+  // Late dispatch is rejected — inFlight does NOT change.
+  const before = state.inFlight;
+  dispatch();
+  dispatch();
+  dispatch();
+  assert.equal(state.inFlight, before,
+    "closed gate prevents new dispatches (no inFlight change)");
+
+  // Idempotent.
+  const second = port.requestClose();
+  assert.equal(second.ok, false);
+  if (second.ok) return;
+  assert.equal(second.error.kind, "already_closed");
+
+  // Cleanup: release the barrier so the in-flight
+  // request completes (its decrement fires in the
+  // background).
+  barrierResolve();
+  await new Promise((r) => setImmediate(r));
+  await port.awaitClosed();
+});
+
+/**
+ * SHUT13b (B0-CORR07): the REAL handleConnection()
+ * dispatch path consults the admission gate. This
+ * drives a fake socket through the actual exported
+ * handler so the test is not merely reimplementing
+ * the dispatch loop in test code.
+ *
+ * Host-runnable: no UDS; uses an EventEmitter as a
+ * minimal Socket substitute (handleConnection only
+ * invokes .on('data'/'error'), .write(), .end(),
+ * .destroy()).
+ */
+test("SHUT13b real handleConnection respects admission gate (B0-CORR07)", async () => {
+  const { handleConnection } = await import(
+    "../../src/ledger-writer/ledger-writer-connection.js"
+  );
+  const { emptyDedupIndex } = await import(
+    "../../src/ledger-writer/ledger-writer-types.js"
+  );
+  const { makeLedgerWriterInstanceId } = await import(
+    "../../src/ledger-writer/ledger-writer-types.js"
+  );
+  const { encodeFrame } = await import(
+    "../../src/witness/witness-codec-framing.js"
+  );
+
+  const state = {
+    index: emptyDedupIndex(),
+    busy: false,
+    crashCutHook: null,
+    inFlight: 0,
+    admission: { accepting: true },
+  };
+  const args = {
+    runDir: "/tmp",
+    runId: "r",
+    missionId: "m",
+    socketPath: "/tmp/s",
+    instanceId: makeLedgerWriterInstanceId("lw-shut13b"),
+  };
+
+  // Track all bytes written to the fake socket so we
+  // can assert whether a reply was emitted.
+  const writes: Buffer[] = [];
+  const fakeSocket = new EventEmitter() as EventEmitter & {
+    destroyed: boolean;
+    write: (buf: Buffer, cb?: (e?: Error | null) => void) => boolean;
+    end: (cb?: () => void) => void;
+    destroy: (e?: Error) => void;
+  };
+  fakeSocket.destroyed = false;
+  fakeSocket.write = ((buf: Buffer): boolean => {
+    writes.push(Buffer.from(buf));
+    return true;
+  }) as typeof fakeSocket.write;
+  fakeSocket.end = ((): void => undefined) as typeof fakeSocket.end;
+  fakeSocket.destroy = ((): void => {
+    fakeSocket.destroyed = true;
+  }) as typeof fakeSocket.destroy;
+
+  // Drive the REAL handleConnection.
+  const connPromise = handleConnection(
+    fakeSocket as unknown as Socket,
+    args,
+    state,
+  );
+  // handleConnection installs listeners and returns.
+  await connPromise;
+
+  // Pre-shutdown: send a valid who_are_you frame.
+  // The data handler runs through the REAL production
+  // dispatch path — gate check → inFlight++ →
+  // handleRequest → finally inFlight--.
+  assert.equal(state.admission.accepting, true);
+  const frame1 = encodeFrame(JSON.stringify({
+    kind: "who_are_you",
+    protocolVersion: 2,
+  }));
+  if (!frame1.ok) throw new Error("encode failed");
+  fakeSocket.emit("data", Buffer.from(frame1.bytes));
+  await new Promise((r) => setImmediate(r));
+  assert.ok(state.inFlight >= 0, "inFlight observed during dispatch");
+
+  // Wait for the who_are_you to settle.
+  for (let i = 0; i < 50; i++) {
+    if (state.inFlight === 0) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(state.inFlight, 0, "inFlight settles to 0 after who_are_you");
+
+  // The server emitted a reply (the "self" envelope).
+  const sawSelfReply = writes.some((b) => b.includes(Buffer.from('"kind":"self"')));
+  assert.ok(sawSelfReply, "pre-shutdown who_are_you produced a reply");
+
+  // Close the admission gate synchronously.
+  state.admission.accepting = false;
+  const writesBeforeGate = writes.length;
+
+  // Send another valid frame on the SAME socket.
+  // The data handler MUST observe the closed gate and
+  // tear down the socket without dispatching.
+  const frame2 = encodeFrame(JSON.stringify({
+    kind: "who_are_you",
+    protocolVersion: 2,
+  }));
+  if (!frame2.ok) throw new Error("encode failed");
+  fakeSocket.emit("data", Buffer.from(frame2.bytes));
+  await new Promise((r) => setImmediate(r));
+
+  // inFlight unchanged: gate closed → no dispatch.
+  assert.equal(state.inFlight, 0,
+    "closed gate prevents new dispatch (inFlight unchanged)");
+  // Socket destroyed by the gate-closed branch.
+  assert.equal(fakeSocket.destroyed, true,
+    "closed gate destroys the socket");
+  // No new reply emitted.
+  assert.equal(writes.length, writesBeforeGate,
+    "closed gate emits no new reply");
 });

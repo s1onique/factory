@@ -47,7 +47,6 @@ import {
 } from "../../src/witness/witness-codec-framing.js";
 import {
   shutdownLedgerWriter,
-  asShutdownServerPort,
   realShutdownClockPort,
 } from "../../src/ledger-writer/ledger-writer-shutdown.js";
 
@@ -160,7 +159,7 @@ test("SHUT12 production inFlightCount tracks request lifecycle (B0-CORR06)", asy
     assert.equal(writerHandle.inFlightCount(), 0);
 
     // Cleanup.
-    const port = asShutdownServerPort(writerHandle.server);
+    const port = writerHandle.shutdownPort;
     const sd = await shutdownLedgerWriter({
       server: port,
       waitForInFlight: writerHandle.waitForInFlight,
@@ -217,6 +216,7 @@ test("SHUT12a handleRequest bound to inFlight lifecycle (B0-CORR06)", async () =
     busy: false,
     crashCutHook: null,
     inFlight: 0,
+    admission: { accepting: true },
   };
   const args = {
     runDir: "/tmp",

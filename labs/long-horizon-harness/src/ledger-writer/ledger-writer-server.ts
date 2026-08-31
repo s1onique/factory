@@ -37,6 +37,7 @@ import {
   LEDGER_WRITER_LEASE_DIRNAME,
 } from "./ledger-writer-lease.js";
 import type { LedgerWriterInstanceId } from "./ledger-writer-types.js";
+import { asShutdownServerPort, type ShutdownServerPort } from "./ledger-writer-shutdown.js";
 
 /**
  * Conservative portable UDS path length budget. Matches
@@ -83,6 +84,15 @@ export type WriterServerHandle = {
    * request lifecycle, not the connection lifecycle.
    */
   readonly inFlightCount: () => number;
+  /**
+   * B0-CORR07: returns a ShutdownServerPort whose
+   * requestClose() synchronously closes the
+   * request-admission gate before calling
+   * server.close(). This makes the graceful-shutdown
+   * "no new work enters" law literally true for both
+   * new connections AND already-accepted sockets.
+   */
+  readonly shutdownPort: ShutdownServerPort;
 };
 
 export type WriterServerResult<T> =
@@ -113,6 +123,9 @@ export async function startWriterServer(
       ? { onCommit: () => "crash" }
       : null,
     inFlight: 0,
+    // B0-CORR07: admission gate starts open; requestClose()
+    // flips it closed.
+    admission: { accepting: true },
   };
 
   const server = createServer((socket) => {
@@ -292,6 +305,12 @@ export async function startWriterServer(
         }
       },
       inFlightCount: (): number => state.inFlight,
+      shutdownPort: asShutdownServerPort(server, {
+        closeAdmission: (): void => {
+          state.admission.accepting = false;
+        },
+        isAcceptingRequests: (): boolean => state.admission.accepting,
+      }),
     },
   };
 }
