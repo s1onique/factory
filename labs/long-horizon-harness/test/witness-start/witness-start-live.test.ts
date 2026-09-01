@@ -31,6 +31,7 @@ import {
   udsPathTooLong,
   type LiveRunHandle,
 } from "./_wstart_live_helpers.js";
+import { ledgerWriterSocketPath } from "../../src/ledger-writer/ledger-writer-process.js";
 import {
   proveChildAbsent,
   registerWitnessSpawn,
@@ -86,11 +87,18 @@ async function setupLiveRun(prefix: string): Promise<
   const controlDir = await fs.mkdtemp(
     path.join(runDir, "..", ".c-" + prefix + "-"),
   );
-  // Check UDS path length BEFORE starting the writer. On
-  // hosts where tmpdir is too deep (>100 bytes for the UDS
-  // path), the writer will fail to bind. Detect and skip
-  // honestly.
-  const writerSocketPath = path.join(runDir, "ledger-writer.sock");
+  // CORRECTION04 (endpoint-binding law):
+  //
+  //   The capability-owning component (frozen
+  //   startLedgerWriter) returns its authoritative socket
+  //   path via `r.socketPath`. We MUST propagate that
+  //   exact path; we MUST NOT reconstruct it from a naming
+  //   convention.
+  //
+  //   The preflight length probe uses the CANONICAL helper
+  //   so it measures the path the writer WILL bind, not a
+  //   second-hand guess.
+  const writerSocketPath = ledgerWriterSocketPath(runDir);
   const socketPath = path.join(runDir, "witness.sock");
   if (udsPathTooLong(writerSocketPath) || udsPathTooLong(socketPath)) {
     await fs.rm(runDir, { recursive: true, force: true });
@@ -98,6 +106,16 @@ async function setupLiveRun(prefix: string): Promise<
     return { skip: true, reason: "uds path > 100 bytes budget on this host" };
   }
   const writer = await startLiveWriter(runDir);
+  // CORRECTION04: assert the writer bound EXACTLY the
+  // canonical path. If startLedgerWriter ever changes its
+  // binding convention, this fails fast instead of
+  // silently re-deriving a wrong endpoint.
+  if (writer.socketPath !== writerSocketPath) {
+    throw new Error(
+      `CORRECTION04 invariant violated: writer bound ${writer.socketPath} ` +
+        `but canonical helper says ${writerSocketPath}`,
+    );
+  }
   return { runDir, controlDir, writer, socketPath, writerSocketPath };
 }
 
@@ -141,6 +159,31 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
         witnessInstanceId: r.value.identity.witnessInstanceId,
         runDir: run.runDir,
       });
+      // CORRECTION04: the witness bootstrap fails closed
+      // with exit code 2 if --ledger-writer-socket-path is
+      // missing (B0-C01-11). After a short grace period,
+      // verify the child did NOT immediately exit — that
+      // would prove the writer binding was carried into
+      // the bootstrap argv and was a real, bindable path.
+      const handle = r.value.child as unknown as {
+        on?: (
+          e: "exit",
+          l: (code: number | null, signal: NodeJS.Signals | null) => void,
+        ) => unknown;
+      };
+      let earlyExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        earlyExit = { code, signal };
+      };
+      try { handle.on?.("exit", onExit); } catch { /* */ }
+      await new Promise((res) => setTimeout(res, 200));
+      if (earlyExit !== null) {
+        assert.fail(
+          "WSTART-LIVE01: witness child exited immediately with " +
+            JSON.stringify(earlyExit) +
+            " — likely bootstrap argv missing ledgerWriterSocketPath",
+        );
+      }
     } else {
       assert.fail("WSTART-LIVE01: start must succeed on a live run; got " + JSON.stringify(r.failure));
     }

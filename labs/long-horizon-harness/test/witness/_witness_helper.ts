@@ -7,7 +7,13 @@
  *     --witness-id <w> --witness-instance-id <wi> \
  *     --socket-path <sock> --run-id <r> --mission-id <m> \
  *     --attempt-id <a> --process-id <p> --bootstrap-lease-ms <n> \
- *     --protocol-version 1
+ *     --protocol-version 1 --ledger-writer-socket-path <lw>
+ *
+ * CORRECTION04: --ledger-writer-socket-path is REQUIRED
+ * because the witness runtime exits 2 if
+ * `ledgerWriterSocketPath` is missing (B0-C01-11). The
+ * bootstrap argv MUST carry the exact binding the
+ * Phase A live setup captured (endpoint-binding law).
  *
  * Each line written to stdout is a JSON record. The supervisor
  * wrapper parses these records to verify behaviour.
@@ -34,6 +40,7 @@ function parseArgs(): {
   processId: string;
   bootstrapLeaseMs: number;
   protocolVersion: number;
+  ledgerWriterSocketPath: string;
 } {
   const argv = process.argv.slice(2);
   const m: Record<string, string> = {};
@@ -41,6 +48,16 @@ function parseArgs(): {
     const k = argv[i];
     const v = argv[i + 1];
     if (k !== undefined && v !== undefined) m[k.slice(2)] = v;
+  }
+  const lw = m["ledger-writer-socket-path"] ?? "";
+  // CORRECTION04: if the bootstrap argv doesn't carry the
+  // LedgerWriter binding, fail closed loudly — the runtime
+  // would do the same but with a less informative message.
+  if (lw.length === 0) {
+    process.stderr.write(
+      "FATAL: --ledger-writer-socket-path missing in bootstrap argv\n",
+    );
+    process.exit(2);
   }
   return {
     runDir: m["run-dir"] ?? "/tmp",
@@ -54,6 +71,7 @@ function parseArgs(): {
     processId: m["process-id"] ?? "p",
     bootstrapLeaseMs: parseInt(m["bootstrap-lease-ms"] ?? "30000", 10),
     protocolVersion: parseInt(m["protocol-version"] ?? "1", 10),
+    ledgerWriterSocketPath: lw,
   };
 }
 

@@ -7,7 +7,16 @@ import type {
   WitnessSpawnSpecResult,
 } from "./witness-start-types.js";
 
-function buildArgv(spec: WitnessSpawnSpec): string[] {
+/**
+ * Build the argv for the witness bootstrap child.
+ *
+ * Exported (CORRECTION04) so WSTART-ENDPOINT02 can drive
+ * it directly with a uniquely-named writer binding and
+ * verify the path is carried verbatim. The argument
+ * ordering is stable; changing it requires updating
+ * `_witness_helper.ts` parseArgs.
+ */
+export function buildArgv(spec: WitnessSpawnSpec): string[] {
   return [
     "--import", spec.tsxLoader,
     spec.witnessesEntry,
@@ -22,6 +31,12 @@ function buildArgv(spec: WitnessSpawnSpec): string[] {
     "--process-id", spec.processId,
     "--bootstrap-lease-ms", String(spec.bootstrapLeaseMs),
     "--protocol-version", String(spec.protocolVersion),
+    // CORRECTION04: the witness bootstrap requires the
+    // LedgerWriter binding; the spec already validates it
+    // (B0 freeze). We MUST carry it through to the child
+    // argv — otherwise the child fails closed with exit 2
+    // (B0-C01-11: ledgerWriterSocketPath required).
+    "--ledger-writer-socket-path", spec.ledgerWriterSocketPath,
   ];
 }
 

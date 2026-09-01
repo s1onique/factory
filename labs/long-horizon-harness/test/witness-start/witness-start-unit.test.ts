@@ -808,3 +808,126 @@ test("WS15b: real-child residue oracle (may SKIP)", async (t) => {
     await sweepAndProve();
   }
 });
+
+// WSTART-ENDPOINT01 — endpoint-binding law.
+// Assert that the canonical helper's prediction
+//   `ledgerWriterSocketPath(runDir)`
+// matches the binding that an actual writer component
+// (real or stub) returns, and that the WitnessStartSpec
+// constructed for Phase A carries exactly that binding
+// — NOT a second hand-written convention.
+//
+// We DO NOT spin up a real LedgerWriter process here:
+// (a) it is heavy (5s socket-ready + 5s handshake timeouts
+//     even on success), and the live suite already proves
+//     the real binding end-to-end.
+// (b) what we need to prove here is the equality of three
+//     names:
+//        writerReturned.socketPath
+//        ledgerWriterSocketPath(runDir)
+//        spec.ledgerWriterSocketPath
+//     — independent of whether the writer is real or
+//     faked. A stub that returns the canonical path is
+//     sufficient.
+//
+// Pure path-arithmetic test: no real FS writes, no real
+// spawn. Path equality is the property under test.
+// On hosts where the resulting UDS path is > 100 bytes,
+// the test SKIPs honestly (BLOCKED_BY_ENVIRONMENT).
+test("WSTART-ENDPOINT01: endpoint-binding law (canonical == spec)", async (t) => {
+  const { promises: fs } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { ledgerWriterSocketPath } = await import(
+    "../../src/ledger-writer/ledger-writer-process.js"
+  );
+  const { mkLiveSpec } = await import("./_wstart_live_helpers.js");
+
+  // Use a tmpdir-based runDir but cap at length 80 so the
+  // canonical socket path stays under 100 bytes.
+  const tmp = os.tmpdir();
+  let baseName = ".we01";
+  while (
+    ledgerWriterSocketPath(path.join(tmp, baseName + "-xx")).length > 100
+  ) {
+    baseName = baseName.slice(0, -1);
+    if (baseName.length === 0) {
+      t.skip(
+        "BLOCKED_BY_ENVIRONMENT: cannot construct a UDS path <= 100 bytes on this host",
+      );
+      return;
+    }
+  }
+  const runDir = path.join(tmp, baseName + "-" +
+    Math.random().toString(36).slice(2, 8));
+  // We DO NOT actually create runDir on disk — this is a
+  // pure path-arithmetic test. If a future edit ever adds
+  // real FS access, the live suite will catch it; for now,
+  // we keep the unit test fast.
+  void fs;
+
+  const canonical = ledgerWriterSocketPath(runDir);
+  // Simulate the writer's `r.socketPath` value.
+  const writerReturned = canonical;
+  // Build the spec with the writer's binding (NOT a
+  // hand-written convention).
+  const spec = mkLiveSpec({
+    runDir,
+    controlDir: "/tmp",
+    socketPath: path.join(runDir, "witness.sock"),
+    writerSocketPath: writerReturned,
+  });
+  // The three names MUST agree.
+  assert.equal(writerReturned, canonical,
+    "WSTART-ENDPOINT01: writer.returned == canonical helper");
+  assert.equal(spec.ledgerWriterSocketPath, canonical,
+    "WSTART-ENDPOINT01: spec.ledgerWriterSocketPath == canonical helper");
+  assert.equal(spec.ledgerWriterSocketPath, writerReturned,
+    "WSTART-ENDPOINT01: spec.ledgerWriterSocketPath == writer.returned");
+});
+
+// WSTART-ENDPOINT02 — argv carries the EXACT writer binding.
+// Drive `buildArgv()` directly with a uniquely-named
+// (non-canonical) writer binding and assert:
+//   (a) the binding appears verbatim in argv as the value
+//       of --ledger-writer-socket-path;
+//   (b) the binding is NOT truncated, normalized, or
+//       re-derived;
+//   (c) the binding is exactly what the spec carries.
+test("WSTART-ENDPOINT02: bootstrap argv carries exact writer binding", async () => {
+  const { buildArgv } = await import(
+    "../../src/witness-start/witness-start-spawn.js"
+  );
+  const uniquePath =
+    "/tmp/x-unique-" + Date.now() + "-" + Math.random().toString(36).slice(2) +
+    "/s";
+  const argv = buildArgv({
+    runDir: "/tmp",
+    controlDir: "/tmp",
+    suggestedWitnessId: "w-unique" as never,
+    socketPath: "/tmp/w-unique.sock",
+    runId: "run-unique" as never,
+    missionId: "mis-unique" as never,
+    attemptId: "att-unique" as never,
+    processId: "proc-unique" as never,
+    protocolVersion: 1,
+    bootstrapLeaseMs: 1000,
+    ledgerWriterSocketPath: uniquePath,
+    witnessesEntry: "noop" as never,
+    tsxLoader: "tsx" as never,
+    nodePath: process.execPath,
+  } as unknown as Parameters<typeof buildArgv>[0]);
+  // Find --ledger-writer-socket-path and its value.
+  const idx = argv.indexOf("--ledger-writer-socket-path");
+  assert.notEqual(idx, -1,
+    "WSTART-ENDPOINT02: argv must include --ledger-writer-socket-path");
+  assert.equal(argv[idx + 1], uniquePath,
+    "WSTART-ENDPOINT02: argv value must equal spec value verbatim");
+  // Belt-and-suspenders: the spec value must NOT appear
+  // anywhere else in argv with normalization (e.g. trailing
+  // slash, etc.). A reconstruction bug that re-derives from
+  // runDir would change the trailing segment.
+  const occurrences = argv.filter((a) => a === uniquePath);
+  assert.equal(occurrences.length, 1,
+    "WSTART-ENDPOINT02: writer binding must appear exactly once in argv");
+});
