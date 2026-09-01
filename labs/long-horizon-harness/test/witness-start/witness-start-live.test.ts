@@ -22,6 +22,8 @@ import {
 import { nodeSpawnWitnessPort } from "../../src/witness-start/witness-start-spawn.js";
 import {
   countStartIntents,
+  DEFAULT_LIVE_MISSION_ID,
+  DEFAULT_LIVE_RUN_ID,
   findReadyForInstance,
   findStartIntent,
   mkLiveSpec,
@@ -105,7 +107,18 @@ async function setupLiveRun(prefix: string): Promise<
     await fs.rm(controlDir, { recursive: true, force: true });
     return { skip: true, reason: "uds path > 100 bytes budget on this host" };
   }
-  const writer = await startLiveWriter(runDir);
+  // CORRECTION07 (context-binding law):
+  //
+  //   Establish a SINGLE {runId, missionId} tuple here
+  //   and thread it into BOTH the writer spawn and the
+  //   witness spec. The previous version constructed
+  //   ("test-run", "test-mission") inside
+  //   startLiveWriter and ("run-live", "mis-live") inside
+  //   mkLiveSpec, causing a content_hash_mismatch on the
+  //   short-path host.
+  const runId = DEFAULT_LIVE_RUN_ID;
+  const missionId = DEFAULT_LIVE_MISSION_ID;
+  const writer = await startLiveWriter({ runDir, runId, missionId });
   // CORRECTION04: assert the writer bound EXACTLY the
   // canonical path. If startLedgerWriter ever changes its
   // binding convention, this fails fast instead of
@@ -116,7 +129,40 @@ async function setupLiveRun(prefix: string): Promise<
         `but canonical helper says ${writerSocketPath}`,
     );
   }
-  return { runDir, controlDir, writer, socketPath, writerSocketPath };
+  // CORRECTION07: pin that the writer's binding carries
+  // the SAME runId / missionId we supplied. The writer
+  // returned those via who-are-you during spawn; this
+  // is a sanity check that the spawn handshake honored
+  // the caller's intent (the spawn-time invariant in
+  // startLiveWriter already enforces this at the helper
+  // layer; this is a redundant belt-and-braces pin).
+  const who = await writer.whoAreYou();
+  if (!who.ok) {
+    throw new Error(
+      `CORRECTION07 invariant probe failed: whoAreYou: ${who.error.kind}`,
+    );
+  }
+  if (who.runId !== runId) {
+    throw new Error(
+      `CORRECTION07 invariant violated: writer runId=${who.runId} ` +
+        `but caller supplied ${runId}`,
+    );
+  }
+  if (who.missionId !== missionId) {
+    throw new Error(
+      `CORRECTION07 invariant violated: writer missionId=${who.missionId} ` +
+        `but caller supplied ${missionId}`,
+    );
+  }
+  return {
+    runDir,
+    controlDir,
+    runId,
+    missionId,
+    writer,
+    socketPath,
+    writerSocketPath,
+  };
 }
 
 async function teardown(run: LiveRunHandle): Promise<void> {
@@ -134,12 +180,7 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
     const s = await setupLiveRun("a");
     if ("skip" in s) { skip += 1; return; }
     run = s;
-    const spec = mkLiveSpec({
-      runDir: run.runDir,
-      controlDir: run.controlDir,
-      socketPath: run.socketPath,
-      writerSocketPath: run.writerSocketPath,
-    });
+    const spec = mkLiveSpec(run);
     const start = makeProductionWitnessStart();
     r = await start(spec);
     if (r.ok) {
@@ -268,11 +309,9 @@ test("WSTART-LIVE02: ledger failure then zero child", async () => {
   let r: Awaited<ReturnType<typeof startWitness>> | null = null;
   let spawnCalls = 0;
   try {
-    const spec = mkLiveSpec({
-      runDir: run.runDir,
-      controlDir: run.controlDir,
-      socketPath: run.socketPath,
-      writerSocketPath: "/tmp/no-such-writer-socket-" + Date.now() + ".sock",
+    const spec = mkLiveSpec(run, {
+      ledgerWriterSocketPath:
+        "/tmp/no-such-writer-socket-" + Date.now() + ".sock",
     });
     const spawnPort = {
       spawn: async (): Promise<{
@@ -327,12 +366,7 @@ test("WSTART-LIVE03: durable intent then spawn ENOENT (bad nodePath)", async () 
   const run: LiveRunHandle = liveRun;
   let r: Awaited<ReturnType<typeof startWitness>> | null = null;
   try {
-    const spec = mkLiveSpec({
-      runDir: run.runDir,
-      controlDir: run.controlDir,
-      socketPath: run.socketPath,
-      writerSocketPath: run.writerSocketPath,
-    });
+    const spec = mkLiveSpec(run);
     // Use a non-existent nodePath. Node.spawn will fail to
     // exec() (ENOENT) and emit a synchronous or near-
     // synchronous 'error' event. The spawn adapter resolves

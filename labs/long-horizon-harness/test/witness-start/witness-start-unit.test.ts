@@ -850,7 +850,9 @@ test("WSTART-ENDPOINT01: endpoint-binding law (canonical == spec)", async (t) =>
   const { ledgerWriterSocketPath } = await import(
     "../../src/ledger-writer/ledger-writer-process.js"
   );
-  const { mkLiveSpec } = await import("./_wstart_live_helpers.js");
+  const { mkLiveSpec, mkPartialRunHandle } = await import(
+    "./_wstart_live_helpers.js"
+  );
 
   // Use a tmpdir-based runDir but cap at length 80 so the
   // canonical socket path stays under 100 bytes.
@@ -880,12 +882,17 @@ test("WSTART-ENDPOINT01: endpoint-binding law (canonical == spec)", async (t) =>
   const writerReturned = canonical;
   // Build the spec with the writer's binding (NOT a
   // hand-written convention).
-  const spec = mkLiveSpec({
+  //
+  // CORRECTION07: the partial handle stitches together
+  // identity + endpoint for path-arithmetic tests; the
+  // `writer` slot is irrelevant here.
+  const run = mkPartialRunHandle({
     runDir,
     controlDir: "/tmp",
     socketPath: path.join(runDir, "witness.sock"),
     writerSocketPath: writerReturned,
   });
+  const spec = mkLiveSpec(run);
   // The three names MUST agree.
   assert.equal(writerReturned, canonical,
     "WSTART-ENDPOINT01: writer.returned == canonical helper");
