@@ -60,6 +60,7 @@ import type { AttemptId, MissionId, RunId } from "../domain/ids.js";
 import { makeEventId } from "../domain/ids.js";
 import type { ProcessId } from "../process/process-types.js";
 import type { WitnessId, WitnessInstanceId } from "../witness/witness-types.js";
+import { makeCommitId, type CommitId } from "../ledger-writer/ledger-writer-types.js";
 import type { PersistedWitnessEvidence } from "../witness/witness-types-persisted.js";
 
 /**
@@ -328,30 +329,72 @@ export function validateWitnessStartSpec(
 /**
  * Canonical CommitId for a witness-start intent.
  *
- *   "w-start/${runId}/${attemptId}/${processId}/${witnessId}/${witnessInstanceId}"
+ *   commitId = "w-start:" + sha256(canonical-identity)
  *
- * Determinism is the contract: same six-tuple -> same
+ * Determinism is the contract: same seven-tuple -> same
  * commitId -> writer dedups -> WS11 holds.
  *
- * missionId is intentionally omitted: runId is the dominant
- * identity at this layer; missionId flows through the
- * envelope and is recorded durably by the writer there.
+ * Why a domain-separated hash:
+ *  - the identity tuple contains slash-bearing tokens and
+ *    characters outside COMMIT_ID_GRAMMAR (^[A-Za-z0-9_.:-]{1,128}$).
+ *    Embedding them directly would be rejected at the wire
+ *    boundary by the frozen B0 validator (P1#5).
+ *  - the FULL identity tuple is hashed so a regression that
+ *    drops a field changes the CommitId (CID05).
+ *  - missionId IS included — the writer's envelope records
+ *    missionId, but the CommitId is the dedup key, and
+ *    omitting missionId would let two different missions
+ *    share a slot. (CORRECTION05: previous implementation
+ *    left missionId out.)
  *
- * The namespace prefix "w-start/" is reserved for
+ * The namespace prefix "w-start:" is reserved for
  * witness-start intents. No other code path mints commitIds
  * in this namespace.
+ *
+ * Branded as `CommitId` so the grammar check runs at
+ * construction time, not at the wire boundary (P1#5).
  */
 export function computeWitnessStartCommitId(
   identity: WitnessStartIdentity,
-): string {
-  return `w-start/${identity.runId}/${identity.attemptId}/${identity.processId}/${identity.witnessId}/${identity.witnessInstanceId}`;
+): CommitId {
+  return makeCommitId(
+    "w-start:" +
+      createHash("sha256")
+        .update(WSTART_COMMIT_V1_TAG + "\u0000", "utf8")
+        .update(
+          [
+            identity.runId,
+            identity.missionId,
+            identity.attemptId,
+            identity.processId,
+            identity.witnessId,
+            identity.witnessInstanceId,
+          ].join("\u0000"),
+          "utf8",
+        )
+        .digest("hex"),
+  );
 }
+
+/**
+ * Domain tag for the witness-start CommitId hash input.
+ *
+ * WHY A DOMAIN TAG: two producers with the same canonical
+ * bytes but different meanings must NEVER share a hash.
+ * Without a tag, an EventId and a CommitId could collide.
+ * The tag is the Factory rule:
+ *   - "factory:witness-start:commit:v1"
+ *   - "factory:witness-start:event:v1"
+ * The colon-separated tag is human-readable and contains
+ * only ASCII alphanumerics + ':' (grammar-safe).
+ */
+const WSTART_COMMIT_V1_TAG = "factory:witness-start:commit:v1";
 
 /**
  * Derive a grammar-valid EventId for a witness_start_requested
  * intent.
  *
- *   eventId = "w-start-" + sha256(identity)
+ *   eventId = "w-start-" + sha256(domain-tag || canonical-identity)
  *
  * Why a hash:
  *   - the canonical identity tuple contains slash-bearing
@@ -361,6 +404,17 @@ export function computeWitnessStartCommitId(
  *     "w-start-" + commitId, which used `as never` to bypass
  *     the grammar check (P1#4). That was a type-system
  *     escape hatch, not a real conversion.
+ *
+ * Why a domain tag (CORRECTION05):
+ *   - the EventId and the CommitId MUST NEVER collide even
+ *     when derived from the same identity. Domain-separated
+ *     input ensures distinct hashes.
+ *
+ * Why a NUL separator (CORRECTION05):
+ *   - "a/b" + "c" and "a" + "b/c" use the same tokens but
+ *     have different meanings. A NUL (0x00) separator
+ *     eliminates field-collision ambiguity — NUL is illegal
+ *     in identifier fields by construction.
  *
  * Why the full SHA-256 digest (64 hex chars):
  *   - deterministic from the identity
@@ -386,9 +440,12 @@ export function makeEventIdFromIdentity(
     identity.processId,
     identity.witnessId,
     identity.witnessInstanceId,
-  ].join("\u0001");
+  ].join("\u0000");
   const hex = createHash("sha256")
+    .update(WSTART_EVENT_V1_TAG + "\u0000", "utf8")
     .update(canonical, "utf8")
     .digest("hex");
   return makeEventId("w-start-" + hex);
 }
+
+const WSTART_EVENT_V1_TAG = "factory:witness-start:event:v1";

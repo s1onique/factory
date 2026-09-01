@@ -11,9 +11,13 @@ import assert from "node:assert/strict";
 import { startWitness } from "../../src/witness-start/witness-start-gate.js";
 import {
   computeWitnessStartCommitId,
+  makeEventIdFromIdentity,
   type WitnessIntentCommitPort,
+  type WitnessStartIdentity,
   type WitnessStartSpec,
 } from "../../src/witness-start/witness-start-types.js";
+import { COMMIT_ID_GRAMMAR } from "../../src/ledger-writer/ledger-writer-types.js";
+import { IDENTIFIER_GRAMMAR } from "../../src/domain/ids.js";
 import {
   FAILURES,
   SPAWN_FAILURES,
@@ -362,15 +366,20 @@ test("identity continuity: committed identity equals spawned identity", async ()
 });
 
 // Bonus: CommitId namespace law
-test("commitId namespace starts with w-start/", async () => {
+// CORRECTION05: the namespace separator is now ":"
+// (NOT "/") because the frozen B0 grammar
+// `^[A-Za-z0-9_.:-]{1,128}$` rejects slashes. A
+// CommitId starting with "w-start/" violates the
+// grammar and would be rejected at the wire boundary.
+test("commitId namespace starts with w-start:", async () => {
   const ports = mkPorts();
   ports.commit.ok(SUCCESSES.appended(1));
   await startWitness(mkSpec(), ports);
-  assert.equal(
-    (ports.commit.lastCommitId ?? "").startsWith("w-start/"),
-    true,
-    "CommitId must be namespaced w-start/",
-  );
+  const cid = ports.commit.lastCommitId ?? "";
+  assert.equal(cid.startsWith("w-start:"), true,
+    "CommitId must be namespaced w-start:");
+  assert.equal(cid.includes("/"), false,
+    "CommitId must NOT contain '/' (B0 grammar)");
 });
 
 // Bonus: pending-then-resolve order
@@ -930,4 +939,96 @@ test("WSTART-ENDPOINT02: bootstrap argv carries exact writer binding", async () 
   const occurrences = argv.filter((a) => a === uniquePath);
   assert.equal(occurrences.length, 1,
     "WSTART-ENDPOINT02: writer binding must appear exactly once in argv");
+});
+
+// CID01..CID07 — CommitId grammar & determinism contract.
+// CORRECTION05: prior to this change, the CommitId was
+//   `w-start/<runId>/<attemptId>/<processId>/<witnessId>/<witnessInstanceId>`
+// which violates the frozen B0 grammar
+// `^[A-Za-z0-9_.:-]{1,128}$` (no slashes). The
+// `witness_start_requested` request was being rejected
+// by the LedgerWriter at the protocol boundary with
+// "append.commitId grammar violation". These tests
+// pin the new contract so a regression that re-introduces
+// slash-bearing CommitIds is caught at unit-test time.
+const CID_BASE_IDENTITY: WitnessStartIdentity = {
+  runId: "run-cid" as never,
+  missionId: "mis-cid" as never,
+  attemptId: "att-cid" as never,
+  processId: "proc-cid" as never,
+  witnessId: "w-cid" as never,
+  witnessInstanceId: "wi-cid-1" as never,
+};
+
+test("CID01: computeWitnessStartCommitId satisfies COMMIT_ID_GRAMMAR", () => {
+  const cid = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  assert.ok(COMMIT_ID_GRAMMAR.test(cid),
+    `CID01: ${cid} must match COMMIT_ID_GRAMMAR`);
+});
+
+test("CID02: CommitId length <= 128", () => {
+  const cid = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  assert.ok(cid.length <= 128,
+    `CID02: length ${cid.length} must be <= 128`);
+  // The prefix is "w-start:" (8 chars) + 64 hex = 72 chars.
+  assert.ok(cid.length === 8 + 64,
+    `CID02: expected 8+64=72 chars; got ${cid.length}`);
+});
+
+test("CID03: CommitId contains no slash", () => {
+  const cid = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  assert.ok(!cid.includes("/"),
+    `CID03: ${cid} must contain no '/'`);
+});
+
+test("CID04: same identity yields byte-identical CommitId", () => {
+  const cid1 = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  const cid2 = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  assert.equal(cid1, cid2, "CID04: deterministic across calls");
+  assert.equal(cid1.length, cid2.length, "CID04: equal length");
+});
+
+test("CID05: changing each identity field changes the CommitId", () => {
+  const base = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  const fields: ReadonlyArray<keyof WitnessStartIdentity> = [
+    "runId", "attemptId", "processId", "witnessId", "witnessInstanceId",
+  ];
+  for (const f of fields) {
+    const mutated: WitnessStartIdentity = {
+      ...CID_BASE_IDENTITY,
+      [f]: ((CID_BASE_IDENTITY[f] as string) + "-x") as never,
+    };
+    const got = computeWitnessStartCommitId(mutated);
+    assert.notEqual(got, base,
+      `CID05: changing ${String(f)} must change CommitId`);
+  }
+});
+
+test("CID06: changing missionId changes the CommitId", () => {
+  // CORRECTION05: prior implementation omitted missionId
+  // from the CommitId hash input, so two different
+  // missions would share a slot. This test pins that
+  // missionId is now part of the canonical input.
+  const base = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  const mutated: WitnessStartIdentity = {
+    ...CID_BASE_IDENTITY,
+    missionId: "mis-cid-DIFFERENT" as never,
+  };
+  const got = computeWitnessStartCommitId(mutated);
+  assert.notEqual(got, base,
+    "CID06: missionId difference must change CommitId");
+});
+
+test("CID07: CommitId and EventId must NEVER collide for the same identity", () => {
+  // Both are derived from the same identity tuple; they
+  // MUST hash to different values because they use
+  // distinct domain tags. A regression that drops the
+  // domain tag causes silent cross-namespace collisions.
+  const cid = computeWitnessStartCommitId(CID_BASE_IDENTITY);
+  const eid = makeEventIdFromIdentity(CID_BASE_IDENTITY);
+  assert.notEqual(cid, eid,
+    "CID07: CommitId and EventId must never collide");
+  assert.ok(COMMIT_ID_GRAMMAR.test(cid), "CID07: CommitId grammar");
+  // EventId grammar is IDENTIFIER_GRAMMAR (same shape).
+  assert.ok(IDENTIFIER_GRAMMAR.test(eid), "CID07: EventId grammar");
 });

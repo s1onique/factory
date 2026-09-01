@@ -102,7 +102,7 @@ export async function appendWitnessEvidence(args: {
       };
     }
     if (r.error.kind === "protocol_error") {
-      const inner = r.error.error as { kind?: string; message?: string };
+      const inner = r.error.error as { kind?: string; message?: string; reason?: string };
       if (inner.kind === "conflicting_commit") {
         return {
           ok: false,
@@ -110,9 +110,16 @@ export async function appendWitnessEvidence(args: {
         };
       }
       if (inner.kind === "invalid_envelope") {
+        // CORRECTION05 (rejection-is-not-crash law):
+        // a live authority refusing an invalid request is a
+        // REJECTION, not a crash. Map to writer_rejected
+        // (truthful diagnostic) — NOT writer_crashed.
         return {
           ok: false,
-          error: { kind: "invalid_envelope", reason: inner.message ?? "" },
+          error: {
+            kind: "writer_rejected",
+            reason: inner.message ?? inner.reason ?? "invalid_envelope",
+          },
         };
       }
       if (inner.kind === "append_failed") {
@@ -121,14 +128,37 @@ export async function appendWitnessEvidence(args: {
           error: { kind: "append_failed", message: inner.message ?? "" },
         };
       }
+      // Unknown protocol-level payload shape: the writer
+      // is still alive (we got a response), but the payload
+      // is unexpected. Surface as writer_rejected with the
+      // raw reason rather than writer_crashed (the writer
+      // didn't crash — it just returned something we don't
+      // recognize).
       return {
         ok: false,
         error: {
-          kind: "writer_crashed",
-          message: inner.message ?? "unknown protocol error",
+          kind: "writer_rejected",
+          reason: `unexpected protocol payload: ${
+            inner.kind ?? "unknown"
+          } (${inner.message ?? ""})`.trim(),
         },
       };
     }
+    if (r.error.kind === "writer_busy_retries_exhausted") {
+      // Writer is alive but persistently busy — not a
+      // crash, not a rejection. Surface as writer_rejected
+      // with a clear reason rather than writer_crashed.
+      return {
+        ok: false,
+        error: {
+          kind: "writer_rejected",
+          reason: r.error.message,
+        },
+      };
+    }
+    // True transport-level failures: socket missing,
+    // connect failed, write failed, frame decode failed,
+    // timeout. The writer is presumed gone / unreachable.
     return {
       ok: false,
       error: { kind: "writer_crashed", message: r.error.kind },
