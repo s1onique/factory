@@ -62,7 +62,6 @@ import {
 import {
   registerWriterSpawn,
   sweepAndProve,
-  liveFixtureRegistrySize,
   destroyRunDir,
 } from "./_live_registry.js";
 
@@ -298,8 +297,35 @@ for (const c of LEDGER_WRITER_LIVE_CASES) {
 // --------------------------------------------------------------------
 
 after(async () => {
+  // CORRECTION04: single-source residue count.
+  // `sweepAndProve()` returns the set of fixtures
+  // that could NOT be proven absent; it ALSO leaves
+  // them in the registry (so the strict lane fails
+  // closed). Therefore:
+  //
+  //   failed.length === liveFixtureRegistrySize()
+  //
+  // (every unproven entry is BOTH retained in the
+  // registry AND in the residue list). Using
+  // `failed.length + liveFixtureRegistrySize()`
+  // would double-count — that is exactly the bug
+  // the reviewer flagged at RESIDUE=28 (which was
+  // 14+14, the same 14 denied children counted
+  // twice).
+  //
+  // We use ONE source: `failed.length`. The other
+  // (`liveFixtureRegistrySize()`) is documented here
+  // for completeness but MUST NOT be added back.
+  //
+  // CORRECTION04 also: the residue oracle is now
+  // observation-only (no SIGTERM/SIGKILL inside the
+  // sweep). The residue breakdown will reflect
+  // whatever the capability-owning test site left
+  // behind — typically `permission_denied` on hosts
+  // that block signal delivery, or `pid_absent`
+  // elsewhere.
   const failed = await sweepAndProve();
-  counters.residue = failed.length + liveFixtureRegistrySize();
+  counters.residue = failed.length;
   // CORRECTION02: emit a typed breakdown of residue
   // observations so the operator can classify the
   // remaining failures (env denial vs. ownership

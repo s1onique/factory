@@ -55,31 +55,55 @@ let skip = 0;
 let residue = 0;
 
 /**
- * CORRECTION02/CORRECTION03 (Phase A): every real witness
- * child returned by startWitness MUST be registered in the
+ * CORRECTION04 (Phase A): every real witness child
+ * returned by startWitness MUST be registered in the
  * live registry, and MUST be unregistered ONLY after
- * `proveChildAbsent` succeeded. Signal-sent is not
- * proof-of-cleanup (Q15).
+ * `proveChildAbsent` succeeded.
  *
- * CORRECTION03 type hygiene: `registerWitnessSpawn`
- * accepts a narrow `OwnedChildPort` (pid + kill). The
- * witness's child ref is widened to that port at the
- * registration boundary; `proveChildAbsent` operates on
- * the real ChildProcess (single explicit cast inside
- * this helper).
+ * Architectural split (CORRECTION04):
+ *
+ *   - The TEST SITE owns the child. It is the
+ *     authority on cleanup. It MAY send SIGTERM.
+ *   - The RESIDUE ORACLE only proves what happened.
+ *     It NEVER sends a signal. Calling
+ *     `proveChildAbsent` does NOT cause a kill.
+ *
+ * Signal-sent is not proof-of-cleanup (Q15) — only
+ * kernel ESRCH observed via `kill(pid, 0)` is.
+ *
+ * CORRECTION04 type hygiene: `registerWitnessSpawn`
+ * accepts a narrow `OwnedChildPort` (pid + optional
+ * kill). The witness's child ref is widened to that
+ * port at the registration boundary;
+ * `proveChildAbsent` operates on the real
+ * ChildProcess (single explicit cast inside this
+ * helper).
  */
 async function terminateAndProveWitness(
   entry: LiveFixtureEntry,
 ): Promise<boolean> {
   const child = entry.ref as unknown as import("node:child_process").ChildProcess;
+  // TEST-SITE cleanup authority. The oracle is
+  // observation-only; THIS call is owned by the test
+  // that produced the child.
   try { child.kill("SIGTERM"); } catch { /* */ }
   await new Promise((res) => setTimeout(res, 100));
+  // ORACLE call. The oracle performs NO kill, NO
+  // signal; it only observes (kill(pid,0), exitCode,
+  // signalCode). The previous kill above is the
+  // legacy "best effort" signal that the test sends
+  // before asking the oracle to PROVE what happened.
   const r = await proveChildAbsent(child);
-  // Only "absent" clears the registry. All other
-  // observations — alive, permission_denied,
-  // identity_unavailable, cleanup_failed — retain
-  // the fixture so the strict lane reports residue.
-  const absent = r.kind === "absent";
+  // CORRECTION04: Only "pid_absent" clears the
+  // registry. All other observations — alive,
+  // child_terminated, permission_denied,
+  // identity_unavailable — retain the fixture so the
+  // strict lane reports residue. "absent" (the old
+  // overloaded label) is gone; kernel ESRCH is
+  // `pid_absent`, Node's exit boundary is
+  // `child_terminated`. `cleanup_failed` is also
+  // gone — the oracle never performs cleanup.
+  const absent = r.kind === "pid_absent";
   if (absent) {
     unregisterLiveFixture(entry);
   }
@@ -200,10 +224,11 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
       // cannot certify WITNESS_START_LIVE_RESIDUE=0
       // without proving the witness actually disappeared.
       witnessEntry = registerWitnessSpawn({
-        // CORRECTION03 type hygiene: r.value.child is a
+        // CORRECTION04 type hygiene: r.value.child is a
         // WitnessSpawnHandle (narrow). registerWitnessSpawn
-        // accepts the narrower OwnedChildPort (pid + kill).
-        // No `as unknown as ChildProcess` widening.
+        // accepts the narrower OwnedChildPort (pid +
+        // optional kill). No `as unknown as ChildProcess`
+        // widening.
         child: r.value.child,
         witnessInstanceId: r.value.identity.witnessInstanceId,
         runDir: run.runDir,
@@ -500,7 +525,7 @@ test("WSTART-LIVE03: durable intent then spawn ENOENT (bad nodePath)", async () 
 });
 
 after(async () => {
-  // CORRECTION03: single-source residue count.
+  // CORRECTION04: single-source residue count.
   // `sweepAndProve()` returns the set of fixtures that
   // could NOT be proven absent; it ALSO leaves them in
   // the registry (so the strict lane fails closed).
