@@ -247,29 +247,58 @@ export async function teardownLiveRun(run: LiveRunHandle): Promise<void> {
 }
 
 /**
+ * Structural subset of `LiveRunHandle` that carries
+ * exactly the fields `mkLiveSpec` needs to construct a
+ * `WitnessStartSpec`. The reason this exists rather
+ * than taking `LiveRunHandle` directly:
+ *
+ *   CORRECTION08 (reviewer feedback): path-arithmetic
+ *   unit tests should not have to fabricate a fake
+ *   `writer` field (the previous `null as unknown as
+ *   WriterHandle` cast). A test that does not have a
+ *   real writer does not need a `writer` slot at all.
+ *
+ *   Live tests pass the full `LiveRunHandle` (which
+ *   happens to satisfy `WitnessStartLiveBinding`).
+ *
+ *   Both real and synthetic test contexts satisfy
+ *   this narrower contract without forging a capability
+ *   they do not hold.
+ */
+export type WitnessStartLiveBinding = Pick<
+  LiveRunHandle,
+  | "runDir"
+  | "controlDir"
+  | "runId"
+  | "missionId"
+  | "socketPath"
+  | "writerSocketPath"
+>;
+
+/**
  * Build a valid WitnessStartSpec that points at the actual
  * witness helper script in this repo.
  *
- * CORRECTION07: this takes a `LiveRunHandle` so the spec
- * inherits its runId and missionId from the SAME source
- * that produced the writer. The previous version
+ * CORRECTION07: this takes a `WitnessStartLiveBinding` so
+ * the spec inherits its runId and missionId from the SAME
+ * source that produced the writer. The previous version
  * re-supplied `"run-live"` / `"mis-live"` while the writer
  * was bound to `"test-run"` / `"test-mission"` — the
  * cross-binding was the cause of the LIVE01/LIVE03
  * `content_hash_mismatch` failures on the short-path host.
  *
- * Why accept `LiveRunHandle` rather than the same shape
- * again: passing the handle makes it structurally
- * impossible to construct a spec that disagrees with the
- * writer's binding, because both sides reference the
- * same fields of the same object.
+ * Why accept `WitnessStartLiveBinding` rather than the
+ * same shape again: passing the binding makes it
+ * structurally impossible to construct a spec that
+ * disagrees with the writer's binding, because both
+ * sides reference the same fields of the same object.
  *
  * Unit tests that exercise path arithmetic without a
- * real writer can construct a partial `LiveRunHandle`
- * via `mkPartialRunHandle()`.
+ * real writer construct a `WitnessStartLiveBinding`
+ * directly via `mkPartialBinding()`.
  */
 export function mkLiveSpec(
-  run: LiveRunHandle,
+  run: WitnessStartLiveBinding,
   override?: { readonly ledgerWriterSocketPath?: string },
 ): WitnessStartSpec {
   return {
@@ -284,7 +313,7 @@ export function mkLiveSpec(
     protocolVersion: 1,
     bootstrapLeaseMs: 1000,
     // CORRECTION07: the writer-socket path normally comes
-    // from the same LiveRunHandle whose runId/missionId we
+    // from the same binding whose runId/missionId we
     // just adopted. LIVE02 needs to point at a guaranteed-
     // missing socket; that override is the ONLY reason for
     // the optional second argument. Tests that DO NOT need
@@ -304,28 +333,22 @@ export function mkLiveSpec(
 }
 
 /**
- * Build a partial LiveRunHandle for unit tests that
- * exercise spec construction without a real writer.
- *
- * Important: the runId and missionId default to the
- * canonical live values. Tests that need to assert
- * specific bindings supply explicit overrides.
+ * Build a structural `WitnessStartLiveBinding` for unit
+ * tests that exercise spec construction without a real
+ * writer. The previous version forged a `WriterHandle`
+ * stub via `null as unknown as WriterHandle`; this is
+ * a strict Pick of the actual fields and therefore
+ * cannot pretend to hold a writer capability it does
+ * not have.
  */
-export function mkPartialRunHandle(args: {
+export function mkPartialBinding(args: {
   readonly runDir: string;
   readonly controlDir?: string;
   readonly socketPath: string;
   readonly writerSocketPath: string;
   readonly runId?: RunId;
   readonly missionId?: MissionId;
-}): LiveRunHandle {
-  // The `writer` field is required by the type but
-  // unused in path-arithmetic tests. Construct a stub
-  // via a forward reference that is replaced by the
-  // real writer at live-test setup time. Casting is
-  // safe here because this helper is exclusively used
-  // for spec construction; callers that need to start
-  // a real writer must use `setupLiveRun()`.
+}): WitnessStartLiveBinding {
   return {
     runDir: args.runDir,
     controlDir: args.controlDir ?? path.join(args.runDir, "control"),
@@ -333,7 +356,6 @@ export function mkPartialRunHandle(args: {
     missionId: args.missionId ?? DEFAULT_LIVE_MISSION_ID,
     socketPath: args.socketPath,
     writerSocketPath: args.writerSocketPath,
-    writer: null as unknown as WriterHandle,
   };
 }
 

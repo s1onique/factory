@@ -850,7 +850,7 @@ test("WSTART-ENDPOINT01: endpoint-binding law (canonical == spec)", async (t) =>
   const { ledgerWriterSocketPath } = await import(
     "../../src/ledger-writer/ledger-writer-process.js"
   );
-  const { mkLiveSpec, mkPartialRunHandle } = await import(
+  const { mkLiveSpec, mkPartialBinding } = await import(
     "./_wstart_live_helpers.js"
   );
 
@@ -886,7 +886,7 @@ test("WSTART-ENDPOINT01: endpoint-binding law (canonical == spec)", async (t) =>
   // CORRECTION07: the partial handle stitches together
   // identity + endpoint for path-arithmetic tests; the
   // `writer` slot is irrelevant here.
-  const run = mkPartialRunHandle({
+  const run = mkPartialBinding({
     runDir,
     controlDir: "/tmp",
     socketPath: path.join(runDir, "witness.sock"),
