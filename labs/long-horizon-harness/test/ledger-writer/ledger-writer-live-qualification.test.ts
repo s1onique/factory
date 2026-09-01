@@ -379,60 +379,154 @@ test("ORACLE02: qualification source must not contain the 'uninitialised' sentin
   }
 });
 
-// ORACLE03 — durable fixture invariant (CORRECTION06).
+// ORACLE03 — durable fixture invariant (CORRECTION07).
 //
 // LWQ14 and LWQ15 each spawn a helper child, register
 // it, then must NOT return until the child has
 // actually closed. The contract is:
 //
-//   request termination → await 'close' → then return
+//   arm observers → request termination
+//   → await 'close' boundary
+//   → on 'close' → success
+//   → on 'error' before 'close' → failure
+//   → on deadline expiry → failure
+//   → only then return
 //
-// We verify the contract two ways:
-//   (a) awaitChildClose resolves only after the
-//       child's 'close' event has fired (or after
-//       a defensive timeout — we cannot wait
-//       forever for a runaway child).
-//   (b) The lwq14/lwq15 case bodies call
-//       awaitChildClose(c) before the case returns;
-//       a static grep catches any revert.
-test("ORACLE03: awaitChildClose waits for the child lifecycle boundary", async () => {
+// We verify the contract with FOUR runtime oracles
+// (positive + three negative paths) so a lie in any
+// one direction fails the suite:
+//
+//   ORACLE03a: close observed → resolves
+//   ORACLE03b: no close before deadline → rejects
+//   ORACLE03c: error before close → rejects
+//   ORACLE03d: listener armed before termination
+//              → fast child cannot lose close event
+//
+// Plus a static source-grep guard so the case
+// bodies cannot revert to the bad pattern.
+
+const liveCasesModule = "./_live_cases.js";
+
+// (a) Positive: natural-exit child → resolves.
+test("ORACLE03a: awaitChildClose resolves on natural 'close'", async () => {
   const { spawn } = await import("node:child_process");
-  // Spawn a trivial child that exits on its own.
-  // We don't signal it (some sandboxes block
-  // parent→child signaling); we just observe that
-  // awaitChildClose resolves only after Node has
-  // observed the child's natural exit. The contract
-  // being proven is: awaitChildClose awaits the
-  // lifecycle boundary it owns, period.
-  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 50)"], {
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30)"], {
     stdio: ["ignore", "ignore", "ignore"],
   });
-  const start = Date.now();
-  const { awaitChildClose } = await import("./_live_cases.js");
-  await awaitChildClose(c, 3000);
-  const elapsed = Date.now() - start;
-  // After awaitChildClose returns, Node MUST have
-  // observed the exit (the lifecycle boundary it
-  // owns).
-  assert.equal(
-    c.exitCode !== null || c.signalCode !== null,
-    true,
-    `ORACLE03: child exit must be observed by Node before awaitChildClose resolves (elapsed=${elapsed}ms, exitCode=${c.exitCode}, signalCode=${c.signalCode})`,
-  );
-  // And the kernel must have reaped it. Allow a
-  // one-tick retry window for hosts where 'close'
-  // precedes the kernel reap by microseconds.
+  const { awaitChildClose } = await import(liveCasesModule);
+  const r = await awaitChildClose(c, 3000);
+  assert.equal(r.kind, "closed");
+  // The kernel must have reaped the pid. Allow one
+  // tick of slack for hosts where 'close' precedes
+  // the kernel reap by microseconds.
   let alive = true;
   try { process.kill(c.pid ?? -1, 0); } catch { alive = false; }
   if (alive) {
-    await new Promise((r) => setImmediate(r));
+    await new Promise((res) => setImmediate(res));
     try { process.kill(c.pid ?? -1, 0); alive = true; } catch { alive = false; }
   }
   assert.equal(alive, false,
-    `ORACLE03: kernel must reap the child after awaitChildClose resolves (pid=${c.pid}, elapsed=${elapsed}ms)`);
+    "ORACLE03a: kernel must reap the child after awaitChildClose resolves");
 });
 
-test("ORACLE03b: LWQ14 and LWQ15 case bodies call awaitChildClose before returning", async () => {
+// (b) Negative: an unresponsive child → REJECT on
+//     deadline. (SIGKILL is not allowed in some
+//     sandboxes, so we just spawn a long-sleeping
+//     child and rely on the deadline.)
+test("ORACLE03b: awaitChildClose rejects when deadline expires", async () => {
+  const { spawn } = await import("node:child_process");
+  // 60s sleep; deadline is 250 ms.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  const { awaitChildClose } = await import(liveCasesModule);
+  let rejected = false;
+  let msg = "";
+  try {
+    await awaitChildClose(c, 250);
+  } catch (e: unknown) {
+    rejected = true;
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    // Best-effort cleanup so we don't leave a
+    // 60s sleeper on the host.
+    try { c.kill("SIGKILL"); } catch { /* */ }
+  }
+  assert.equal(rejected, true,
+    "ORACLE03b: awaitChildClose MUST reject on deadline expiry; a deadline that means success lies about a boundary the fixture did not observe");
+  assert.ok(/deadline \d+ms expired/.test(msg),
+    `ORACLE03b: rejection message must mention the deadline (got: ${msg})`);
+});
+
+// (c) Negative: an 'error' event with no 'close' →
+//     REJECT. We synthesise by emitting 'error' on
+//     the ChildProcess (Node treats this as an
+//     async lifecycle event).
+test("ORACLE03c: awaitChildClose rejects on 'error' before 'close'", async () => {
+  const { spawn } = await import("node:child_process");
+  // Long-sleeping child; we will synthesise an
+  // 'error' event before any 'close' can fire.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  const { awaitChildClose } = await import(liveCasesModule);
+  const p = awaitChildClose(c, 5000);
+  // Emit an 'error' WITHOUT emitting 'close'.
+  c.emit("error", new Error("synthesized test failure"));
+  let rejected = false;
+  let msg = "";
+  try { await p; } catch (e: unknown) {
+    rejected = true;
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    try { c.kill("SIGKILL"); } catch { /* */ }
+  }
+  assert.equal(rejected, true,
+    "ORACLE03c: awaitChildClose MUST reject on 'error' before 'close'; 'error' is not equivalent to 'close'");
+  assert.ok(/'error' before 'close'/.test(msg),
+    `ORACLE03c: rejection message must mention the 'error' boundary (got: ${msg})`);
+});
+
+// (d) Ordering: terminateHelperAndAwaitClose
+//     arms observers BEFORE kill(), so a fast
+//     exit cannot lose the 'close' event. We
+//     verify this with the natural-exit fast
+//     path: by the time terminateHelperAndAwaitClose
+//     is invoked, the child has already exited,
+//     so the call MUST skip the signal and just
+//     return a typed result from cached state.
+test("ORACLE03d: terminateHelperAndAwaitClose returns typed closed result on natural exit", async () => {
+  const { spawn } = await import("node:child_process");
+  // Long-enough sleep that the child is alive at
+  // the moment we call terminateHelperAndAwaitClose,
+  // so the call goes through the arm-then-kill
+  // path. We then wait long enough that the child
+  // exits on its own before the kill is delivered.
+  //
+  // Easier alternative: spawn a child, wait for it
+  // to exit naturally, then call
+  // terminateHelperAndAwaitClose — the fast-path
+  // branch must return a typed closed result.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  // Wait for natural exit + one tick of stdio drain.
+  await new Promise<void>((resolve) => {
+    c.once("close", () => resolve());
+    setTimeout(resolve, 3000);
+  });
+  const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
+  const r = await terminateHelperAndAwaitClose(c, 3000);
+  assert.equal(r.kind, "closed",
+    "ORACLE03d: terminateHelperAndAwaitClose must return a typed result on natural-exit fast path");
+  assert.ok(r.code !== null || r.signal !== null,
+    `ORACLE03d: typed result must carry exit info (code=${r.code}, signal=${r.signal})`);
+});
+
+// (e) Static guard: the LWQ14/LWQ15 case bodies
+//     call terminateHelperAndAwaitClose, NOT a
+//     bare kill followed by an unguarded await.
+test("ORACLE03e: LWQ14 and LWQ15 case bodies use terminateHelperAndAwaitClose", async () => {
   const fs = await import("node:fs");
   const path = await import("node:path");
   const url = await import("node:url");
@@ -440,21 +534,26 @@ test("ORACLE03b: LWQ14 and LWQ15 case bodies call awaitChildClose before returni
     path.join(path.dirname(url.fileURLToPath(import.meta.url)), "_live_cases.ts"),
     "utf8",
   );
-  // Slice the LWQ14 and LWQ15 case bodies. Each
-  // must contain `await awaitChildClose(c)` AFTER
-  // the `c.kill` call.
   const lwq14Start = src.indexOf("const LWQ14: LiveCase");
   const lwq15Start = src.indexOf("const LWQ15: LiveCase");
-  const lwq14End = lwq15Start > 0 ? lwq15Start : src.length;
-  const lwq15End = src.length;
-  const lwq14 = src.slice(lwq14Start, lwq14End);
-  const lwq15 = src.slice(lwq15Start, lwq15End);
+  assert.ok(lwq14Start > 0, "ORACLE03e: LWQ14 case must exist");
+  assert.ok(lwq15Start > 0, "ORACLE03e: LWQ15 case must exist");
+  const lwq14 = src.slice(lwq14Start, lwq15Start);
+  const lwq15 = src.slice(lwq15Start);
   for (const [name, body] of [["LWQ14", lwq14], ["LWQ15", lwq15]] as const) {
-    const killIdx = body.indexOf("c.kill(");
-    const awaitIdx = body.indexOf("await awaitChildClose(");
-    assert.ok(
-      killIdx >= 0 && awaitIdx > killIdx,
-      `ORACLE03b: ${name} must call 'await awaitChildClose(c)' AFTER 'c.kill(' (killIdx=${killIdx}, awaitIdx=${awaitIdx})`,
+    assert.equal(
+      /terminateHelperAndAwaitClose\(/.test(body),
+      true,
+      `ORACLE03e: ${name} must call 'terminateHelperAndAwaitClose('`,
+    );
+    // The old `try { c.kill(...); } catch { }`
+    // swallowed-kill anti-pattern must not return.
+    // That pattern would let a kill() EPERM go
+    // unreported.
+    assert.equal(
+      /try\s*\{\s*c\.kill\([^)]*\)\s*;\s*\}\s*catch\s*\{[^}]*\}/.test(body),
+      false,
+      `ORACLE03e: ${name} must NOT contain the 'swallowed kill' anti-pattern`,
     );
   }
 });

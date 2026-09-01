@@ -887,55 +887,182 @@ const LWQ13: LiveCase = {
 // --------------------------------------------------------------------
 
 /**
- * CORRECTION06: durable fixture invariant.
+ * CORRECTION07: durable fixture invariant (doctrine-enforcing).
  *
  * A case owning a ChildProcess MUST NOT report cleanup
  * complete until it observes the subprocess lifecycle
  * boundary it owns. Concretely:
  *
- *   request termination (signal)
- *   → await `'close'`  (after exit + stdio closure)
- *   → then return
+ *   arm `'close'` / `'error'` observers
+ *   → request termination (signal)
+ *   → await `'close'` boundary
+ *   → on `'close'` → success
+ *   → on `'error'` before `'close'` → failure
+ *   → on deadline expiry → failure
+ *   → only then return
  *
  * The previous contract —
  *   `c.kill("SIGKILL"); return;`
- * — returns the moment the signal is dispatched. The
- * kernel may still hold the pid for a few ms (zombie,
- * in-flight stdio drain, or even just SIGKILL delivery
+ * — returns the moment the signal is dispatched.
+ * `subprocess.kill()` only reports whether signal
+ * delivery was accepted by the OS; it does NOT
+ * synchronously reap the child. The kernel may still
+ * hold the pid for a few ms (zombie, in-flight
+ * stdio drain, or even just SIGKILL delivery
  * latency). When the after-suite residue sweep runs
  * immediately after the case returns, it observes
- * `kill(pid, 0)` → alive → records residue for a child
- * the case has in fact killed. The case body has the
- * ownership and the responsibility; sleeping inside the
- * sweep would only relocate the race, not close it.
+ * `kill(pid, 0)` → alive → records residue for a
+ * child the case has in fact killed.
  *
- * This helper centralises the boundary so every helper
- * case uses the same shutdown contract.
+ * Per Node's documented ChildProcess lifecycle,
+ * `'close'` is emitted "after a process has ended
+ * and the stdio streams have been closed". It is
+ * emitted LATER than `'exit'`. `'error'` may be
+ * emitted for spawn failure, kill failure, message
+ * failure, or abort — it does NOT by itself prove
+ * the process has ended, so it MUST NOT be treated
+ * as cleanup success.
+ *
+ * To eliminate the lost-listener race for a fast
+ * exit, observers are armed BEFORE the signal is
+ * dispatched.
+ *
+ * The contract rejects on `'error'` and on deadline
+ * expiry. A deadline that resolves success would
+ * lie about a boundary the fixture did not observe.
+ */
+
+export type ChildCloseResult = {
+  readonly kind: "closed";
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+};
+
+/**
+ * Observe the ChildProcess `'close'` boundary.
+ *
+ *   - Resolves with `{kind:"closed", code, signal}`
+ *     once Node has emitted `'close'`.
+ *   - Rejects on `'error'` (the process did not
+ *     terminate cleanly per Node's contract).
+ *   - Rejects on deadline expiry.
+ *   - Fast-path: if Node has already cached an exit
+ *     before this call is made, waits one tick for
+ *     stdio drain and resolves from the cached state.
  *
  * Exported so ORACLE03 can lock in the contract.
  */
-export async function awaitChildClose(child: import("node:child_process").ChildProcess, timeoutMs = 2000): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    // Already exited; close may still be pending if
-    // stdio hasn't drained yet. Wait for it anyway
-    // so we observe the boundary Node owns.
-  }
-  const closed = new Promise<void>((resolve) => {
-    child.once("close", () => resolve());
-    child.once("error", () => resolve());
-  });
-  // If the child is already past 'exit', close may
-  // have already fired before our listener attached.
-  // In that case resolve immediately; the kernel
-  // teardown is the authoritative boundary.
-  if (child.exitCode !== null || child.signalCode !== null) {
-    // give Node one tick to drain
+export async function awaitChildClose(
+  child: import("node:child_process").ChildProcess,
+  timeoutMs = 2000,
+): Promise<ChildCloseResult> {
+  // Fast path: if Node has already observed exit,
+  // the 'close' boundary is either past or one tick
+  // away. We wait one tick for stdio drain, then
+  // check again.
+  if (
+    (child.exitCode !== null && child.exitCode !== undefined) ||
+    (child.signalCode !== null && child.signalCode !== undefined)
+  ) {
     await new Promise((r) => setImmediate(r));
+    if (
+      (child.exitCode !== null && child.exitCode !== undefined) ||
+      (child.signalCode !== null && child.signalCode !== undefined)
+    ) {
+      return {
+        kind: "closed",
+        code: child.exitCode ?? null,
+        signal: child.signalCode ?? null,
+      };
+    }
   }
-  await Promise.race([
-    closed,
-    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-  ]);
+
+  return new Promise<ChildCloseResult>((resolve, reject) => {
+    let settled = false;
+    const onClose = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ kind: "closed", code, signal });
+    };
+    const onError = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(
+        `awaitChildClose: 'error' before 'close' (fixture boundary violated): ${err.message}`,
+      ));
+    };
+    const timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(
+        `awaitChildClose: deadline ${timeoutMs}ms expired before 'close' was observed (fixture boundary violated)`,
+      ));
+    }, timeoutMs);
+    function cleanup(): void {
+      clearTimeout(timeoutHandle);
+      child.off("close", onClose);
+      child.off("error", onError);
+    }
+    // Arm listeners BEFORE the caller signals the
+    // child, so we cannot miss the 'close' event.
+    child.once("close", onClose);
+    child.once("error", onError);
+  });
+}
+
+/**
+ * Combine termination + close-boundary observation
+ * into one atomic fixture primitive.
+ *
+ *   arm observers (via awaitChildClose)
+ *   → child.kill("SIGKILL")
+ *   → require 'close' within timeoutMs
+ *   → on 'error' / deadline expiry → reject
+ *
+ * The case body MUST let the rejection propagate;
+ * no try/catch around the call. A deadline that
+ * means success would lie about a boundary the
+ * fixture did not observe.
+ */
+export async function terminateHelperAndAwaitClose(
+  child: import("node:child_process").ChildProcess,
+  timeoutMs = 2000,
+): Promise<ChildCloseResult> {
+  // If the child has already observed exit, skip
+  // the signal and just await whatever boundary
+  // remains (the natural-exit fast path used by
+  // ORACLE03's positive case).
+  if (
+    (child.exitCode !== null && child.exitCode !== undefined) ||
+    (child.signalCode !== null && child.signalCode !== undefined)
+  ) {
+    return awaitChildClose(child, timeoutMs);
+  }
+  // Set up the close observer BEFORE calling
+  // kill(), so a fast exit cannot lose the
+  // boundary.
+  const closePromise = awaitChildClose(child, timeoutMs);
+  let accepted = false;
+  try {
+    accepted = child.kill("SIGKILL");
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `terminateHelperAndAwaitClose: kill() threw before 'close' could be observed: ${msg}`,
+    );
+  }
+  if (!accepted) {
+    throw new Error(
+      "terminateHelperAndAwaitClose: kill() returned false (signal not accepted by OS)",
+    );
+  }
+  return closePromise;
 }
 
 const LWQ14: LiveCase = {
@@ -965,10 +1092,11 @@ const LWQ14: LiveCase = {
       if (probe.ok) assert.equal(probe.value, "unknown_socket");
       const stat = await fs.lstat(sp);
       assert.equal(stat.isSocket(), true);
-      // CORRECTION06: signal + await 'close' so the
-      // after-suite sweep sees pid_absent, not alive.
-      try { c.kill("SIGKILL"); } catch { /* */ }
-      await awaitChildClose(c);
+      // CORRECTION07: signal + await 'close' as one
+      // atomic fixture primitive. The rejection
+      // propagates so a deadline-expiry case is a
+      // FAIL, not a silent green.
+      await terminateHelperAndAwaitClose(c);
     } finally {
       await proveUnlink(tmp);
     }
@@ -1010,9 +1138,11 @@ const LWQ15: LiveCase = {
       if (probe.ok) assert.equal(probe.value, "unknown_socket");
       const stat = await fs.lstat(sp);
       assert.equal(stat.isSocket(), true);
-      // CORRECTION06: signal + await 'close'.
-      try { c.kill("SIGKILL"); } catch { /* */ }
-      await awaitChildClose(c);
+      // CORRECTION07: signal + await 'close' as one
+      // atomic fixture primitive. The rejection
+      // propagates so a deadline-expiry case is a
+      // FAIL, not a silent green.
+      await terminateHelperAndAwaitClose(c);
     } finally {
       await proveUnlink(tmp);
     }
