@@ -1,15 +1,21 @@
 /**
- * FOUNDATION04 — PHASE A FINAL CLOSURE — READY01..10.
+ * FOUNDATION04 — PHASE A FINAL CLOSURE — READY01..10 (live).
  *
  *   Readiness-evidence law: a witness is ready only
  *   when its identity-bound readiness fact is durably
  *   committed in the authoritative ledger.
  *
- *   These tests are live (require a real writer and
+ *   These tests are LIVE (require a real writer and
  *   witness process) and SKIP honestly on long-path
  *   hosts. They are NOT in the strict qualification
- *   matrix; they are regression guards for the host
- *   burn.
+ *   matrix; the strict path is exercised by
+ *   `witness-start-readiness-strict.test.ts`, which is
+ *   deterministic and zero-skip.
+ *
+ *   The strict live matrix (third conjunct in
+ *   `qualify:phase-a`) tests the awaitWitnessReady
+ *   function directly with synthetic events.jsonl and
+ *   a fake WitnessSpawnHandle.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -78,12 +84,21 @@ test("READY01..08, READY10: live witness reaches witness_ready and the ledger pr
     const witnessInstanceId = start.value.identity.witnessInstanceId;
     const ready = await awaitWitnessReady({
       runDir: run.runDir,
-      witnessInstanceId,
+      child: start.value.child,
+      expected: {
+        runId: run.runId,
+        missionId: run.missionId,
+        witnessId: spec.suggestedWitnessId as string,
+        witnessInstanceId: start.value.identity.witnessInstanceId as string,
+        socketPath: spec.socketPath as string,
+      },
       deadlineMs: 5000,
       pollIntervalMs: 25,
     });
     assert.equal(ready.kind, "ready",
-      "READY01: witness_ready must be durably committed within the deadline");
+      "READY01: witness_ready must be durably committed within the deadline " +
+      "(or the typed " +
+      "failure: " + JSON.stringify(ready) + ")");
 
     const events = await fs.readFile(path.join(run.runDir, "events.jsonl"), "utf8");
     const lines = events.split("\n").filter((l) => l.length > 0);

@@ -40,6 +40,11 @@ import { promises as fs, type Stats } from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 
+import {
+  ed25519VerifierFromPublicHex,
+  type WitnessVerifier,
+} from "./witness-crypto.js";
+
 export type ControllerIdentityError =
   | { readonly kind: "missing"; readonly path: string }
   | { readonly kind: "symlink"; readonly path: string }
@@ -82,6 +87,13 @@ export type ControllerIdentityBinding = {
   readonly publicKeyHex: string;
   readonly publicKeyFingerprint: string;
   readonly sourcePath: string;
+  /**
+   * Immutable verification authority. Captured ONCE
+   * at bootstrap. After bootstrap, the witness MUST
+   * verify signed commands against this verifier, not
+   * by re-reading the controller.pub file from disk.
+   */
+  readonly verifier: WitnessVerifier;
 };
 
 export async function loadControllerIdentity(
@@ -181,6 +193,7 @@ export async function loadControllerIdentity(
       publicKeyHex: trimmed,
       publicKeyFingerprint: fingerprintOfHex(trimmed),
       sourcePath: p,
+      verifier: ed25519VerifierFromPublicHex(trimmed),
     },
   };
 }

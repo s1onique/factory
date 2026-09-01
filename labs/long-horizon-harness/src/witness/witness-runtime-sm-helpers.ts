@@ -10,6 +10,7 @@ import type {
   WitnessState,
   WitnessPersistedResult,
 } from "./witness-types.js";
+import type { WitnessVerifier } from "./witness-crypto.js";
 import type {
   CommandJournalEntry,
   WitnessBootstrapConfig,
@@ -23,6 +24,17 @@ export type WitnessRuntimeContext = {
   readonly witnessPublicKeyFingerprint: string;
   readonly witnessPid: number;
   readonly controllerPublicKeyFingerprint: string;
+  /**
+   * Immutable controller authority. Captured ONCE at
+   * bootstrap from the controller.pub file. The witness
+   * MUST verify signed commands against THIS verifier,
+   * not by re-reading controller.pub on each command.
+   *
+   * Controller-binding law: a later replacement of
+   * controller.pub does NOT change the authority
+   * accepted by this witness.
+   */
+  readonly controllerVerifier: WitnessVerifier;
   state: WitnessState;
   commandJournal: ReadonlyArray<CommandJournalEntry>;
   activated: boolean;

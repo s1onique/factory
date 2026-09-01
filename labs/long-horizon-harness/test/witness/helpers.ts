@@ -41,6 +41,14 @@ export function makeRuntimeContext(): WitnessRuntimeContext {
     witnessPublicKeyFingerprint: "fp-w",
     witnessPid: 100,
     controllerPublicKeyFingerprint: "fp-ctrl",
+    // Tests use a verifier that never claims a signature
+    // is valid. The actual command-handler code path is
+    // exercised by the dedicated CTRL* tests; this helper
+    // exists for state-machine / projector / codec tests
+    // that don't go through the verifier.
+    controllerVerifier: {
+      verify: (_bytes: Uint8Array, _sig: string): boolean => false,
+    },
     state: {
       kind: "bootstrapping",
       binding: bootstrap.binding,

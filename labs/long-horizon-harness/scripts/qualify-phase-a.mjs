@@ -89,11 +89,21 @@ console.log("PHASE_A_QUALIFICATION_EXPECTED_COMMIT=" + EXPECTED);
 console.log("PHASE_A_QUALIFICATION_OBSERVED_COMMIT_PRE=" + HEAD_BEFORE);
 console.log("PHASE_A_QUALIFICATION_SUBJECT_BINDING=external");
 
-// Now run the two strict matrices. We invoke npm run
-// with the env var set so the inner scripts see the
-// same EXPECTED; we do NOT let nested npm scripts
-// overwrite it (npm run sets process.env from the
-// caller's process.env; child processes inherit).
+// Now run the three strict matrices. We invoke the
+// authoritative non-self-binding chain (`qualify:phase-a`).
+// Inner oracles (witness-start-live.test.ts,
+// witness-start-context-binding.test.ts, and
+// witness-start-readiness-strict.test.ts) read
+// `FACTORY_QUALIFICATION_SUBJECT_COMMIT` from
+// `process.env`. The npm-run inherits our env, so the
+// inner oracle's EXPECTED is the operator's SHA, not
+// `git rev-parse HEAD` (which would be a tautology).
+//
+// The `:sha` variants that DO self-derive (`git rev-parse HEAD`)
+// exist as ad-hoc operators (npm run qualify:*:sha) but
+// are NOT in the authoritative chain. Use
+// `npm run qualify:phase-a:self-binding` if you want
+// the legacy self-deriving path.
 const cmd = "npm";
 const args = ["run", "qualify:phase-a"];
 const env = { ...process.env, FACTORY_QUALIFICATION_SUBJECT_COMMIT: EXPECTED };

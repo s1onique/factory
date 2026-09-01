@@ -6,18 +6,16 @@
  * source-size discipline.
  */
 
-import { promises as fs } from "node:fs";
 import { canonicalHandshakePayload, canonicalCommandResponse } from "./witness-codec-payload.js";
 import {
   decodeClientMessage,
-  decodeJsonText,
 } from "./witness-codec-decode.js";
 import {
   encodeHandshakeResponse,
   encodeCommandResponse,
   encodeProtocolError,
 } from "./witness-codec-messages.js";
-import { generateEd25519Keypair, ed25519VerifierFromPublicHex, sha256Hex, signWithKeyObject } from "./witness-crypto.js";
+import { generateEd25519Keypair, sha256Hex, signWithKeyObject } from "./witness-crypto.js";
 import { safeRemoveSocketFile } from "./witness-server.js";
 import { WITNESS_PROTOCOL_VERSION } from "./witness-protocol.js";
 import { applyRuntimeInput } from "./witness-runtime-sm.js";
@@ -39,11 +37,19 @@ export type WitnessKey = ReturnType<typeof generateEd25519Keypair>;
 
 export type RuntimeHandleArgs = {
   readonly runDir: string;
-  readonly controlDir: string;
   /**
    * B0-CORR01: the LedgerWriter socket path. Required for
    * durable evidence appends. If absent, handleSignedCommand
    * fails closed (B0-C01-11).
+   *
+   * Note (Phase C / controller-binding law): the witness
+   * NO LONGER accepts `controlDir` here. Controller identity
+   * is loaded once at bootstrap into
+   * `WitnessRuntimeContext.controllerVerifier`. Per-command
+   * authentication uses that immutable verifier, not a
+   * re-read of `controller.pub` from disk. A later
+   * replacement of the file MUST NOT change the authority
+   * accepted by this witness.
    */
   readonly ledgerWriterSocketPath: string | undefined;
 };
@@ -135,16 +141,9 @@ export async function handleSignedCommand(
       reason: "command identity does not match witness binding",
     });
   }
-  const controllerPub = await readControllerPublicKey(args.controlDir);
-  if (controllerPub === null) {
-    return encodeProtocolError({
-      kind: "invalid_signature",
-      reason: "no controller public key configured",
-    });
-  }
-  const verifier = ed25519VerifierFromPublicHex(controllerPub);
+  const controllerVerifier = currentCtx().controllerVerifier;
   const canonical = canonicalCommandPayloadForSign(p);
-  if (!verifier.verify(canonical, cmd.signature)) {
+  if (!controllerVerifier.verify(canonical, cmd.signature)) {
     return encodeProtocolError({
       kind: "invalid_signature",
       reason: "controller signature did not verify",
@@ -283,26 +282,11 @@ export function canonicalCommandPayloadForSign(p: ControllerCommandPayload): Uin
   return new TextEncoder().encode(lines.join("\n") + "\n");
 }
 
-export async function readControllerPublicKey(dir: string): Promise<string | null> {
-  try {
-    const raw = await fs.readFile(dir + "/controller.pub", "utf8");
-    const parsed: unknown = decodeJsonText(raw);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      typeof (parsed as { public_key?: unknown }).public_key === "string"
-    ) {
-      return (parsed as { public_key: string }).public_key;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export function eventId(prefix: string): import("../domain/ids.js").EventId {
   return `${prefix}-${Date.now().toString(36)}-${process.pid.toString(36)}` as import("../domain/ids.js").EventId;
 }
+
+
 
 let liveCtx: WitnessRuntimeContext | null = null;
 

@@ -216,52 +216,107 @@ test("CTRL10: a captured binding is durable across file replacement", async () =
     "CTRL10: original binding must still reference the original key bytes");
 });
 
-test("CTRL08: a controller.pub replacement after bootstrap is not honoured by the witness runtime", async () => {
+test("CTRL08: controller.pub replacement after bootstrap is NOT honoured by the captured binding", async () => {
   // Doctrine: the witness's authority is the binding it
   // captured at bootstrap. A subsequent replacement of
   // the file MUST NOT retroactively grant authority to
   // a new key.
   //
-  // Implementation: we run the loader twice with two
-  // distinct keys, and we check the witness runtime
-  // source to assert it threads the FIRST binding.
-  // A more elaborate test would spawn a real witness
-  // process; the source-level check below is the
-  // load-bearing invariant for the lab.
+  // The previous version of this test was a source-grep
+  // for `loadControllerIdentity(` in witness-runtime.ts.
+  // It did NOT catch the real defect: the command
+  // handler was re-reading controller.pub via a
+  // DIFFERENT function (`readControllerPublicKey` in
+  // witness-runtime-handlers.ts) on every command.
+  //
+  // This new version mechanically exercises the
+  // binding: bootstrap with key A, replace the file
+  // with key B, then verify that:
+  //   - A's signature still verifies (authority preserved)
+  //   - B's signature does NOT verify (replacement ignored)
+  const { ed25519SignerFromPrivateHex } = await import(
+    "../../src/witness/witness-crypto.js"
+  );
   const controlDir = await mkControlDir();
-  const kp1 = generateEd25519Keypair();
-  await writeValidControllerPub(controlDir, kp1.publicKeyHex);
-  const r1 = await loadControllerIdentity(controlDir);
-  // Replace the file with a DIFFERENT key.
-  const kp2 = generateEd25519Keypair();
-  await writeValidControllerPub(controlDir, kp2.publicKeyHex);
-  // Re-read would yield kp2; but the witness's
-  // captured binding is r1.value, which is kp1.
-  const r2 = await loadControllerIdentity(controlDir);
-  assert.equal(r1.ok, true, "CTRL08: initial load must succeed");
-  assert.equal(r2.ok, true, "CTRL08: re-load after swap must succeed");
-  if (!r1.ok || !r2.ok) return;
-  assert.equal(r1.value.publicKeyHex, kp1.publicKeyHex,
-    "CTRL08: initial binding must reference the original key");
-  assert.equal(r2.value.publicKeyHex, kp2.publicKeyHex,
-    "CTRL08: re-load after swap references the new key — " +
-    "but a witness holding the first binding is unaffected");
+  const kpA = generateEd25519Keypair();
+  const kpB = generateEd25519Keypair();
+  assert.notEqual(kpA.publicKeyHex, kpB.publicKeyHex,
+    "CTRL08: A and B must be distinct keys");
 
-  // Source-level guard: the witness runtime must NOT
-  // call loadControllerIdentity from any other call site
-  // (e.g. per-command reload). If a future change adds
-  // such a call, this test fails.
+  // Bootstrap with key A.
+  await writeValidControllerPub(controlDir, kpA.publicKeyHex);
+  const bootA = await loadControllerIdentity(controlDir);
+  assert.equal(bootA.ok, true, "CTRL08: initial load with A must succeed");
+  if (!bootA.ok) return;
+  const bindingA = bootA.value;
+
+  // Sign a canonical payload with A.
+  const signerA = ed25519SignerFromPrivateHex(kpA.privateKeyHex);
+  const signerB = ed25519SignerFromPrivateHex(kpB.privateKeyHex);
+  const payload = new TextEncoder().encode("canonical-payload");
+  const sigA = signerA.sign(payload);
+  const sigB = signerB.sign(payload);
+
+  // Replace the file with key B (controller swap).
+  await writeValidControllerPub(controlDir, kpB.publicKeyHex);
+
+  // The CAPTURED binding's verifier must still accept A
+  // and must NOT accept B. (If the witness re-reads the
+  // file at verification time, the test will fail because
+  // B's verifier would replace A's.)
+  assert.equal(bindingA.verifier.verify(payload, sigA), true,
+    "CTRL08: A's signature must still verify after the file is " +
+    "replaced with B (captured binding is immutable)");
+  assert.equal(bindingA.verifier.verify(payload, sigB), false,
+    "CTRL08: B's signature must NOT verify against the captured A " +
+    "binding (a file replacement is NOT honoured)");
+
+  // And, by symmetry, a freshly-loaded binding from the
+  // replaced file accepts B and rejects A — proving the
+  // authority is local to the binding, not ambient.
+  const freshB = await loadControllerIdentity(controlDir);
+  assert.equal(freshB.ok, true, "CTRL08: reload after swap must succeed");
+  if (!freshB.ok) return;
+  assert.equal(freshB.value.verifier.verify(payload, sigB), true,
+    "CTRL08: B's signature verifies against a fresh B binding");
+  assert.equal(freshB.value.verifier.verify(payload, sigA), false,
+    "CTRL08: A's signature does NOT verify against a fresh B binding");
+});
+
+test("CTRL11: no per-command re-read of controller.pub outside the loader", async () => {
+  // This is the static guard that complements CTRL08
+  // (which is a real key-swap). The witness runtime
+  // and the runtime-handlers must NOT call:
+  //   - readControllerPublicKey (removed in this ACT)
+  //   - fs.readFile on a path ending in `controller.pub`
+  //   - JSON.parse on the contents of controller.pub
+  // outside the single loader in witness-controller-binding.ts.
+  //
+  // A future regression that re-introduces a per-command
+  // controller read fails this test loud and immediately.
   const { promises: fs2 } = await import("node:fs");
   const path2 = await import("node:path");
-  const runtimePath = path2.default.join(
-    path2.default.dirname(new URL(import.meta.url).pathname),
-    "..", "..", "src", "witness", "witness-runtime.ts",
-  );
-  const src = await fs2.readFile(runtimePath, "utf8");
-  const matches = src.match(/loadControllerIdentity\s*\(/g) ?? [];
-  assert.equal(matches.length, 1,
-    "CTRL08: loadControllerIdentity must be called exactly once " +
-    "in witness-runtime.ts (any additional call would re-read mutable " +
-    "controller identity from disk and violate the controller-binding law). " +
-    "Found " + matches.length + " occurrences.");
+  const here = path2.default.dirname(new URL(import.meta.url).pathname);
+  const repoRoot = path2.default.resolve(here, "..", "..");
+  const runtimeTs = path2.default.join(repoRoot, "src/witness/witness-runtime.ts");
+  const handlersTs = path2.default.join(repoRoot, "src/witness/witness-runtime-handlers.ts");
+  const [runtimeSrc, handlersSrc] = await Promise.all([
+    fs2.readFile(runtimeTs, "utf8"),
+    fs2.readFile(handlersTs, "utf8"),
+  ]);
+  const combined = runtimeSrc + "\n---HANDLERS---\n" + handlersSrc;
+  // readControllerPublicKey must be gone (or, at most,
+  // appear as a no-op comment).
+  const readPubMatches = combined.match(/readControllerPublicKey\s*\(/g) ?? [];
+  assert.equal(readPubMatches.length, 0,
+    "CTRL11: readControllerPublicKey must not be called from " +
+    "witness-runtime.ts or witness-runtime-handlers.ts " +
+    "(per-command controller reads violate the controller-binding law). " +
+    "Found " + readPubMatches.length + " occurrences.");
+  // No file ending in controller.pub is read directly.
+  const controllerPubReads = combined.match(/readFile\([^)]*controller\.pub/g) ?? [];
+  assert.equal(controllerPubReads.length, 0,
+    "CTRL11: no readFile on a path ending in 'controller.pub' is " +
+    "permitted outside the loader " +
+    "(found " + controllerPubReads.length + " occurrence(s))");
 });

@@ -149,3 +149,38 @@ test("BOOTOBS06: child emitting >> cap cannot deadlock the parent (pipe-drain la
   assert.equal(out.stdoutTruncated, true,
     "BOOTOBS06: stdout must be marked truncated past the cap");
 });
+
+// BOOTOBS07: a real Node child emitting a multi-line
+// diagnostic on stderr and exiting non-zero must be
+// captured completely by the harness bounded drain.
+// This proves the flush-safe bootstrap-diagnostic
+// pattern: the diagnostic IS delivered to the parent.
+test("BOOTOBS07: real Node child diagnostic is captured completely on non-zero exit", async () => {
+  const expected = "DIAG-LINE-1: bootstrap-failure\nDIAG-LINE-2: details\n";
+  const child: ChildProcess = spawn(
+    process.execPath,
+    ["-e",
+     "process.stderr.write(" + JSON.stringify(expected) + "); " +
+     "process.exit(2);",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const handle = wrapChild(child);
+  await new Promise<void>((r) => child.once("exit", () => r()));
+  await new Promise((r) => setTimeout(r, 200));
+  // The diagnostic is captured completely; the exact exit
+  // code is a regression check on exitInfo() round-trip.
+  assert.equal(handle.exitInfo().exited, true,
+    "BOOTOBS07: exitInfo().exited must be true");
+  assert.equal(handle.exitInfo().code, 2,
+    "BOOTOBS07: exit code must round-trip");
+  const out = handle.bootstrapOutput();
+  const captured = new TextDecoder("utf-8").decode(out.stderr);
+  assert.equal(captured, expected,
+    "BOOTOBS07: stderr diagnostic must reach the parent COMPLETE " +
+    "(no truncation, no loss). captured=" + JSON.stringify(captured));
+  assert.equal(out.stderrBytesSeen, expected.length,
+    "BOOTOBS07: stderrBytesSeen must equal the bytes written");
+  assert.equal(out.stderrTruncated, false,
+    "BOOTOBS07: tiny diagnostic must not be truncated");
+});

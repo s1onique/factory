@@ -29,6 +29,41 @@ import {
   shutdown,
 } from "./witness-runtime-handlers.js";
 
+/**
+ * Flush-safe bootstrap-diagnostic helper.
+ *
+ * Node's `process.exit()` can terminate before asynchronous
+ * stderr writes finish, causing diagnostic output to be
+ * truncated or lost. At the bootstrap-failure boundary the
+ * witness has no live UDS, no timers, and no pending I/O
+ * (we return BEFORE installing the SIGTERM/SIGINT listeners
+ * or the server). The safe pattern is:
+ *
+ *   1. Synchronously write the diagnostic to stderr.
+ *   2. Set process.exitCode to the desired exit code.
+ *   3. Throw a sentinel to short-circuit the rest of
+ *      runWitnessProcess; the entry-point helper catches
+ *      the sentinel and lets the event loop drain.
+ *
+ * The harness's bounded drain on the child stdio pipes
+ * (in `witness-start-spawn.ts`) is what guarantees the
+ * parent's pipe reader sees the full diagnostic.
+ */
+class BootstrapFailureSentinel extends Error {
+  readonly exitCode: number;
+  constructor(exitCode: number) {
+    super("bootstrap-failure-sentinel");
+    this.exitCode = exitCode;
+  }
+}
+
+function bootstrapFail(message: string, code: number): never {
+  process.stderr.write(message);
+  if (!message.endsWith("\n")) process.stderr.write("\n");
+  process.exitCode = code;
+  throw new BootstrapFailureSentinel(code);
+}
+
 export type WitnessProcessArgs = {
   readonly runDir: string;
   readonly witnessId: string;
@@ -51,26 +86,29 @@ export type WitnessProcessArgs = {
 };
 
 export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void> {
-  if (args.protocolVersion !== WITNESS_PROTOCOL_VERSION) {
-    process.stderr.write(`witness: unsupported protocol_version ${args.protocolVersion}\n`);
-    process.exit(2);
-  }
-  const witnessId = makeWitnessId(args.witnessId);
-  const witnessInstanceId = makeWitnessInstanceId(args.witnessInstanceId);
-  const runId = args.runId as import("../domain/ids.js").RunId;
-  const missionId = args.missionId as import("../domain/ids.js").MissionId;
+  try {
+    if (args.protocolVersion !== WITNESS_PROTOCOL_VERSION) {
+      bootstrapFail(
+        `witness: unsupported protocol_version ${args.protocolVersion}`,
+        2,
+      );
+    }
+    const witnessId = makeWitnessId(args.witnessId);
+    const witnessInstanceId = makeWitnessInstanceId(args.witnessInstanceId);
+    const runId = args.runId as import("../domain/ids.js").RunId;
+    const missionId = args.missionId as import("../domain/ids.js").MissionId;
 
-  // B0-C01-11: refuse to start without a writer binding. The
-  // witness MUST NOT write events.jsonl directly; the
-  // LedgerWriter owns the run's events.jsonl. If the
-  // supervisor forgot to provide a binding, fail closed
-  // rather than silently fall back to direct writes.
-  if (typeof args.ledgerWriterSocketPath !== "string" || args.ledgerWriterSocketPath.length === 0) {
-    process.stderr.write(
-      "witness: ledgerWriterSocketPath is required (B0-C01-11)\n",
-    );
-    process.exit(2);
-  }
+    // B0-C01-11: refuse to start without a writer binding. The
+    // witness MUST NOT write events.jsonl directly; the
+    // LedgerWriter owns the run's events.jsonl. If the
+    // supervisor forgot to provide a binding, fail closed
+    // rather than silently fall back to direct writes.
+    if (typeof args.ledgerWriterSocketPath !== "string" || args.ledgerWriterSocketPath.length === 0) {
+      bootstrapFail(
+        "witness: ledgerWriterSocketPath is required (B0-C01-11)",
+        2,
+      );
+    }
   const binding = {
     runDir: args.runDir,
     socketPath: args.ledgerWriterSocketPath,
@@ -87,12 +125,16 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
   //   authority accepted by this witness.
   const ctrlR = await loadControllerIdentity(args.controlDir);
   if (!ctrlR.ok) {
-    process.stderr.write(
-      `witness: controller_binding_failed: ${JSON.stringify(ctrlR.error)}\n`,
+    bootstrapFail(
+      `witness: controller_binding_failed: ${JSON.stringify(ctrlR.error)}`,
+      1,
     );
-    process.exit(1);
   }
   const controllerFingerprint = ctrlR.value.publicKeyFingerprint;
+  // The verifier is captured into the binding and threaded
+  // into WitnessRuntimeContext. Per-command authentication
+  // MUST use this verifier, not a re-read of controller.pub.
+  const controllerVerifier = ctrlR.value.verifier;
 
   // PHASE A (B0-QUALIFICATION06 -> Phase A correction):
   // The witness process no longer writes its own
@@ -130,6 +172,7 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
     witnessPublicKeyFingerprint: key.publicKeyFingerprint,
     witnessPid: process.pid,
     controllerPublicKeyFingerprint: controllerFingerprint,
+    controllerVerifier,
     state: {
       kind: "bootstrapping",
       binding: bootstrap.binding,
@@ -147,13 +190,14 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
     onFrame: (json) =>
       handleFrame(json, key, {
         runDir: args.runDir,
-        controlDir: args.controlDir,
         ledgerWriterSocketPath: args.ledgerWriterSocketPath,
       }),
   });
   if (!bindR.ok) {
-    process.stderr.write(`witness: bind failed: ${JSON.stringify(bindR.error)}\n`);
-    process.exit(1);
+    bootstrapFail(
+      `witness: bind failed: ${JSON.stringify(bindR.error)}`,
+      1,
+    );
   }
   const server = bindR.value;
 
@@ -178,8 +222,7 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
     },
   });
   if (!readyAck.ok) {
-    process.stderr.write(`witness: ready durability failed\n`);
-    process.exit(1);
+    bootstrapFail(`witness: ready durability failed`, 1);
   }
   ctx = {
     ...ctx,
@@ -207,4 +250,16 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
   process.on("SIGINT", () => void shutdown(server, args.socketPath, 0));
 
   await new Promise<void>((resolve) => server.on("close", () => resolve()));
+  } catch (e: unknown) {
+    // BootstrapFailureSentinel: expected short-circuit from
+    // bootstrapFail(). The diagnostic has already been
+    // written to stderr and process.exitCode is set. The
+    // event loop drains, Node exits with the assigned code.
+    // We swallow the sentinel so the promise resolves
+    // cleanly (rather than rejecting).
+    if (e instanceof BootstrapFailureSentinel) {
+      return;
+    }
+    throw e;
+  }
 }
