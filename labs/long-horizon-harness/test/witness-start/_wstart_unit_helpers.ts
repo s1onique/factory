@@ -137,6 +137,15 @@ export function makeFakeHandle(pid = 99999): WitnessSpawnHandle {
       void _listener;
       return makeFakeHandle(pid);
     },
+    bootstrapOutput: () => ({
+      stdout: new Uint8Array(0),
+      stderr: new Uint8Array(0),
+      stdoutBytesSeen: 0,
+      stderrBytesSeen: 0,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }),
+    exitInfo: () => ({ pid, code: null, signal: null, exited: false }),
   };
 }
 

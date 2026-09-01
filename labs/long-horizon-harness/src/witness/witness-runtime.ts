@@ -21,6 +21,7 @@ import type { WitnessBootstrapConfig } from "./witness-runtime-types.js";
 import type { WitnessRuntimeContext } from "./witness-runtime-sm-helpers.js";
 import { makeWitnessId, makeWitnessInstanceId } from "./witness-types.js";
 import { appendWitnessEvidence } from "./witness-ledger.js";
+import { loadControllerIdentity } from "./witness-controller-binding.js";
 import {
   handleFrame,
   setLiveCtx,
@@ -77,6 +78,22 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
 
   const key = generateEd25519Keypair();
 
+  // PHASE C (controller-binding law):
+  //   Load and validate the controller public-key file
+  //   exactly once. The resulting fingerprint is durable
+  //   for the lifetime of THIS witness instance. Command
+  //   handling MUST NOT re-read the file. A later
+  //   replacement of the file is irrelevant to the
+  //   authority accepted by this witness.
+  const ctrlR = await loadControllerIdentity(args.controlDir);
+  if (!ctrlR.ok) {
+    process.stderr.write(
+      `witness: controller_binding_failed: ${JSON.stringify(ctrlR.error)}\n`,
+    );
+    process.exit(1);
+  }
+  const controllerFingerprint = ctrlR.value.publicKeyFingerprint;
+
   // PHASE A (B0-QUALIFICATION06 -> Phase A correction):
   // The witness process no longer writes its own
   // witness_start_requested record. Intent ownership is
@@ -101,7 +118,7 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
       witnessId,
       witnessInstanceId,
     },
-    controllerPublicKeyFingerprint: "",
+    controllerPublicKeyFingerprint: controllerFingerprint,
     socketPath: args.socketPath,
     protocolVersion: args.protocolVersion,
     bootstrapLeaseMs: args.bootstrapLeaseMs,
@@ -112,7 +129,7 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
     witnessPublicKey: key.publicKeyHex,
     witnessPublicKeyFingerprint: key.publicKeyFingerprint,
     witnessPid: process.pid,
-    controllerPublicKeyFingerprint: "",
+    controllerPublicKeyFingerprint: controllerFingerprint,
     state: {
       kind: "bootstrapping",
       binding: bootstrap.binding,
@@ -156,7 +173,7 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
       socket_path: args.socketPath,
       witness_public_key: key.publicKeyHex,
       witness_public_key_fingerprint: key.publicKeyFingerprint,
-      controller_public_key_fingerprint: "",
+      controller_public_key_fingerprint: controllerFingerprint,
       protocol_version: args.protocolVersion,
     },
   });
@@ -172,7 +189,7 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
       historicalWitnessPid: process.pid,
       witnessPublicKey: key.publicKeyHex,
       witnessPublicKeyFingerprint: key.publicKeyFingerprint,
-      controllerPublicKeyFingerprint: "",
+      controllerPublicKeyFingerprint: controllerFingerprint,
       socketPath: args.socketPath,
       protocolVersion: args.protocolVersion,
     },

@@ -217,6 +217,48 @@ export async function sweepAndProve(): Promise<ReadonlyArray<LiveFixtureEntry>> 
 }
 
 /**
+ * Pure residue classifier used by WS15c.
+ *
+ * Given a list of entries and a probe function,
+ * partition the list into:
+ *   - proven    (probe returned true)
+ *   - residue   (probe returned false)
+ *
+ * The probe function is the test-harness's
+ * authoritative "is this gone?" observer — the
+ * default registry sweep uses real `kill`/`lstat`,
+ * but a pure test can inject any observation
+ * (e.g. a recorded script).
+ *
+ * Required law:
+ *   proven  → unregister
+ *   residue → retain + report
+ *
+ * No mutation of the input list is performed. The
+ * caller is responsible for actually unregistering
+ * the proven entries.
+ */
+export function classifyResidue<E extends { readonly path?: string }>(
+  entries: ReadonlyArray<E>,
+  proveFn: (e: E) => Promise<boolean>,
+): Promise<{
+  readonly proven: ReadonlyArray<E>;
+  readonly residue: ReadonlyArray<E>;
+}> {
+  return Promise.all(
+    entries.map(async (e) => ({ e, ok: await proveFn(e) })),
+  ).then((results) => {
+    const proven: E[] = [];
+    const residue: E[] = [];
+    for (const r of results) {
+      if (r.ok) proven.push(r.e);
+      else residue.push(r.e);
+    }
+    return { proven, residue };
+  });
+}
+
+/**
  * Register a writer child + its socket + its lease
  * dir + its runDir atomically.
  *

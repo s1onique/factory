@@ -154,15 +154,63 @@ export type StartedWitness = {
 };
 
 /**
+ * Bounded child stdio evidence (pipe-drain law).
+ * Continuously drained; `truncated` is truthful; raw
+ * bytes are retained up to a host-defined cap.
+ */
+export type WitnessBootstrapOutput = {
+  readonly stdout: Uint8Array;
+  readonly stderr: Uint8Array;
+  readonly stdoutBytesSeen: number;
+  readonly stderrBytesSeen: number;
+  readonly stdoutTruncated: boolean;
+  readonly stderrTruncated: boolean;
+};
+
+/**
+ * Captured final child completion record. Filled in once
+ * the child has actually exited. `null` until then.
+ *
+ * Doctrine (bootstrap-observability law):
+ *   A spawned process that dies before readiness MUST
+ *   leave bounded diagnostic evidence sufficient to
+ *   classify the bootstrap failure; an exit code alone
+ *   is not a diagnosis.
+ */
+export type WitnessExitInfo = {
+  readonly pid: number | null;
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly exited: boolean;
+};
+
+/**
  * WitnessSpawnHandle abstracts over a spawned child. Tests
  * substitute a fake; production wraps node:child_process
  * ChildProcess.
+ *
+ * The handle is intentionally narrow. It does NOT expose
+ * raw mutable Node streams (that would let tests hide
+ * pipe-pressure bugs). The diagnostic surface is the
+ * read-only `bootstrapOutput()` and `exitInfo()` methods.
  */
 export type WitnessSpawnHandle = {
   readonly pid: number | null;
   kill(signal?: NodeJS.Signals): boolean;
   on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
   on(event: "error", listener: (err: Error) => void): unknown;
+  /**
+   * Bounded, drain-continuous child stdio evidence.
+   * Always non-null; safe to call after the child has
+   * exited (the bounded buffer has already absorbed
+   * whatever the kernel delivered).
+   */
+  bootstrapOutput(): WitnessBootstrapOutput;
+  /**
+   * Final child completion record. `exited: false` while
+   * the child is still running; `exited: true` once.
+   */
+  exitInfo(): WitnessExitInfo;
 };
 
 /**

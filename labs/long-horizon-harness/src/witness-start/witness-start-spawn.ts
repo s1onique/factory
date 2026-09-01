@@ -1,4 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { drainBounded } from "./witness-start-bootstrap-output.js";
+import type {
+  WitnessBootstrapOutput,
+  WitnessExitInfo,
+} from "./witness-start-types.js";
 
 import type {
   WitnessSpawnHandle,
@@ -51,21 +56,93 @@ type ExitListener = (
 ) => void;
 type ErrorListener = (err: Error) => void;
 
-function wrapChild(child: ChildProcess): WitnessSpawnHandle {
+/**
+ * Wrap a real Node `ChildProcess` in a `WitnessSpawnHandle`.
+ *
+ * This is exported so that observability tests can drive
+ * the production wiring directly. It MUST NOT be called
+ * by application code; callers should use
+ * `nodeSpawnWitnessPort()` (or the spawn-port test fake),
+ * not invoke `wrapChild` themselves.
+ */
+export function wrapChild(child: ChildProcess): WitnessSpawnHandle {
+  // Pipe-drain law: continuously drain stdout/stderr so
+  // the child can never block on a full pipe, and so the
+  // supervisor can classify a post-spawn failure.
+  //
+  // We tolerate test fakes that do not model streams or
+  // listener registration by treating missing properties
+  // as no-ops. The production `nodeSpawnWitnessPort`
+  // always sets `stdio: ["ignore", "pipe", "pipe"]` so the
+  // real streams are always present and continuously
+  // drained in production.
+  type Drainable = Parameters<typeof drainBounded>[0];
+  const stdStreams = child as unknown as {
+    readonly stdout?: Drainable | null;
+    readonly stderr?: Drainable | null;
+  };
+  const stdoutDrain =
+    stdStreams.stdout !== null && stdStreams.stdout !== undefined
+      ? drainBounded(stdStreams.stdout)
+      : null;
+  const stderrDrain =
+    stdStreams.stderr !== null && stdStreams.stderr !== undefined
+      ? drainBounded(stdStreams.stderr)
+      : null;
+  let exit: WitnessExitInfo = {
+    pid: child.pid === undefined ? null : child.pid,
+    code: null,
+    signal: null,
+    exited: false,
+  };
+  // Register the exit listener only if the fake supports
+  // a real `on`. Test fakes that omit `.on` simply never
+  // populate `exited: true`; production always provides
+  // it.
+  if (typeof child.on === "function") {
+    child.on("exit", (code, signal) => {
+      exit = {
+        pid: child.pid === undefined ? null : child.pid,
+        code,
+        signal,
+        exited: true,
+      };
+    });
+  }
   const on = (event: "exit" | "error", listener: unknown): WitnessSpawnHandle => {
     if (event === "exit") {
       const exitL = listener as ExitListener;
-      child.on("exit", (code, signal) => exitL(code, signal));
+      if (typeof child.on === "function") {
+        child.on("exit", (code, signal) => exitL(code, signal));
+      }
     } else {
       const errL = listener as ErrorListener;
-      child.on("error", (err: Error) => errL(err));
+      if (typeof child.on === "function") {
+        child.on("error", (err: Error) => errL(err));
+      }
     }
     return handle;
   };
   const handle: WitnessSpawnHandle = {
     pid: child.pid === undefined ? null : child.pid,
-    kill: (signal?: NodeJS.Signals): boolean => child.kill(signal),
+    kill: (signal?: NodeJS.Signals): boolean => {
+      if (typeof child.kill === "function") return child.kill(signal);
+      return false;
+    },
     on: on as WitnessSpawnHandle["on"],
+    bootstrapOutput: (): WitnessBootstrapOutput => {
+      const so = stdoutDrain?.stats();
+      const se = stderrDrain?.stats();
+      return {
+        stdout: stdoutDrain?.bytes() ?? new Uint8Array(0),
+        stderr: stderrDrain?.bytes() ?? new Uint8Array(0),
+        stdoutBytesSeen: so?.bytesSeen ?? 0,
+        stderrBytesSeen: se?.bytesSeen ?? 0,
+        stdoutTruncated: so?.truncated ?? false,
+        stderrTruncated: se?.truncated ?? false,
+      };
+    },
+    exitInfo: (): WitnessExitInfo => exit,
   };
   return handle;
 }

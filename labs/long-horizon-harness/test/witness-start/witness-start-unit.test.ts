@@ -718,14 +718,9 @@ test("WS14: makeEventIdFromIdentity is deterministic (full SHA-256)", async () =
 });
 
 // WS15a — pure residue-oracle classifier (no real child).
-// Always executes on every host. Verifies that:
-//   - registerLiveFixture puts an entry in the registry
-//   - sweepAndProve() with a non-ChildProcess ref reports
-//     it as failed (so the strict lane cannot certify
-//     residue=0)
-//   - unregisterLiveFixture removes the entry
-//   - after unregister, snapshotLiveFixtures does not
-//     include it
+// Verifies the already-absent path is removed from the
+// registry after a sweep (i.e. the oracle can certify
+// "this entry is gone because the path is gone").
 //
 // CORRECTION03: split out from WS15 so the pure
 // classifier is always exercised. WS15b exercises the
@@ -757,6 +752,38 @@ test("WS15a: pure registry classifier (register -> residue -> unregister)", asyn
     const e = all.find((x) => x.note === marker);
     if (e !== undefined) unregisterLiveFixture(e);
   }
+});
+
+// WS15c — unproven residue remains registered and is
+// returned as residue (false-proof guard). The pure
+// `classifyResidue` helper accepts an injected probe
+// so we can simulate "this entry is still on disk"
+// without a real child. Required law:
+//   proven  → unregister
+//   residue → retain + report
+test("WS15c: classifyResidue retains unproven entries as residue", async () => {
+  const { classifyResidue } = await import(
+    "../../test/ledger-writer/_live_registry.js"
+  );
+  type E = { readonly path: string; readonly note: string };
+  const entries: E[] = [
+    { path: "/gone/a", note: "gone-a" },
+    { path: "/gone/b", note: "gone-b" },
+    { path: "/still-there/c", note: "still-c" },
+  ];
+  const result = await classifyResidue<E>(
+    entries,
+    async (e) => e.path !== "/still-there/c",
+  );
+  assert.equal(result.proven.length, 2,
+    "WS15c: two entries must be classified as proven");
+  assert.equal(result.residue.length, 1,
+    "WS15c: one entry must be classified as residue");
+  assert.equal(result.residue[0]?.note, "still-c",
+    "WS15c: residue must be the entry the probe said was still there");
+  // Pure invariant: residue + proven = all entries.
+  assert.equal(result.proven.length + result.residue.length, entries.length,
+    "WS15c: proven + residue must equal input length (no silent loss)");
 });
 
 // WS15b — residue oracle catches an unproven witness

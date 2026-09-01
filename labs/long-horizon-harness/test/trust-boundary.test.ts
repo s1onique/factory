@@ -118,6 +118,16 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // boundary.
     "src/ledger-writer/ledger-writer-connection.ts",
     "src/witness/witness-evidence-decode.ts",
+    // FOUNDATION04 PHASE A FINAL CLOSURE: the
+    // controller.pub file is the trust boundary for
+    // controller identity (Phase C controller-binding
+    // law). The loader parses that single canonical
+    // file exactly once at bootstrap. Treating the
+    // controller key as a typed trust boundary (rather
+    // than a free-floating JSON.parse somewhere in the
+    // witness runtime) is the whole point of the
+    // witness-controller-binding module.
+    "src/witness/witness-controller-binding.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

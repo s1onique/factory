@@ -320,6 +320,20 @@ test("WSTART-LIVE02: ledger failure then zero child", async () => {
           pid: number | null;
           kill: (signal?: NodeJS.Signals) => boolean;
           on: (event: "exit" | "error", listener: unknown) => unknown;
+          bootstrapOutput: () => {
+            stdout: Uint8Array;
+            stderr: Uint8Array;
+            stdoutBytesSeen: number;
+            stderrBytesSeen: number;
+            stdoutTruncated: boolean;
+            stderrTruncated: boolean;
+          };
+          exitInfo: () => {
+            pid: number | null;
+            code: number | null;
+            signal: NodeJS.Signals | null;
+            exited: boolean;
+          };
         };
       }> => {
         spawnCalls += 1;
@@ -329,6 +343,15 @@ test("WSTART-LIVE02: ledger failure then zero child", async () => {
             pid: 1,
             kill: (_signal?: NodeJS.Signals): boolean => true,
             on: (_event: "exit" | "error", _listener: unknown): unknown => ({}),
+            bootstrapOutput: () => ({
+              stdout: new Uint8Array(0),
+              stderr: new Uint8Array(0),
+              stdoutBytesSeen: 0,
+              stderrBytesSeen: 0,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+            exitInfo: () => ({ pid: 1, code: null, signal: null, exited: false }),
           },
         };
       },
