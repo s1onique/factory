@@ -166,29 +166,98 @@ export async function proveUnlink(p: string): Promise<boolean> {
 }
 
 /**
- * Prove a ChildProcess is absent. SIGKILL after
- * already-exited is a no-op. We require exitCode /
- * signalCode !== null within a bounded wait.
+ * (CORRECTION02/CORRECTION03) Probe the OS-level
+ * process existence of `child.pid` and SIGKILL it
+ * until the kernel reports ESRCH. This is the only
+ * authority on "the process is gone"; Node's
+ * `child.exitCode` / `child.signalCode` may stay null
+ * indefinitely for detached children when the parent
+ * loses visibility into the exit (libuv may not
+ * receive SIGCHLD for an immediate SIGKILL on a
+ * detached child re-parented to launchd).
+ *
+ * Returns true iff the kernel reports the PID is
+ * absent. The bounded budget prevents an infinite
+ * wait when the OS itself denies us visibility.
  */
 export async function proveChildAbsent(
-  child: import("node:child_process").ChildProcess,
+  child: OwnedChildPort,
 ): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  const pid = child.pid;
+  if (typeof pid !== "number" || pid <= 0) {
+    // No PID to probe; treat as already absent.
     return true;
   }
-  try {
-    child.kill("SIGKILL");
-  } catch {
-    // best-effort
+  // Short-circuit if Node already saw the exit AND
+  // the kernel agrees (e.g. parent and child are in
+  // the same session).
+  if (nodeChildExited(child) && processGone(pid)) {
+    return true;
   }
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      return true;
-    }
+  const deadlineMs = Date.now() + 5000;
+  // Phase 1: cheap kernel probe (the writer may have
+  // died on its own; we just need the kernel to
+  // report ESRCH).
+  while (Date.now() < deadlineMs) {
+    if (processGone(pid)) return true;
     await new Promise((r) => setTimeout(r, 25));
   }
-  return false;
+  // Phase 2: send SIGKILL repeatedly until the
+  // kernel reports ESRCH or the deadline expires.
+  // Each round gives the kernel a chance to deliver
+  // the signal and propagate the reaped state.
+  while (Date.now() < deadlineMs) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // EPERM/ESRCH: re-probe to distinguish.
+    }
+    if (processGone(pid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return processGone(pid);
+}
+
+/**
+ * Structural probe of Node's ChildProcess exit
+ * observation. Returns true iff Node has observed
+ * an exit. Note: for detached children the parent
+ * may never observe an exit; in that case this
+ * returns false and we fall through to the kernel
+ * probe in `processGone`.
+ */
+function nodeChildExited(child: OwnedChildPort): boolean {
+  const c = child as unknown as {
+    exitCode?: number | null;
+    signalCode?: NodeJS.Signals | null;
+  };
+  return (c.exitCode !== null && c.exitCode !== undefined) ||
+    (c.signalCode !== null && c.signalCode !== undefined);
+}
+
+/**
+ * Kernel probe via `kill(pid, 0)`.
+ *   - returns (no error) → process exists, we have
+ *     permission to signal it (residue = alive).
+ *   - throws ESRCH        → process does not exist.
+ *   - throws EPERM        → process exists but we lack
+ *     permission to signal it. On macOS this is the
+ *     sandbox case for a re-parented child whose
+ *     owning session has different credentials. We
+ *     MUST count it as alive — only ESRCH proves
+ *     absence.
+ */
+function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e: unknown) {
+    const code =
+      typeof e === "object" && e !== null && "code" in e
+        ? (e as { code: unknown }).code
+        : undefined;
+    return code === "ESRCH";
+  }
 }
 
 /**
@@ -202,7 +271,7 @@ export async function sweepAndProve(): Promise<ReadonlyArray<LiveFixtureEntry>> 
     if (e === undefined) continue;
     let proved = false;
     if (e.kind === "writer_child" || e.kind === "helper_child") {
-      const child = e.ref as import("node:child_process").ChildProcess;
+      const child = e.ref as OwnedChildPort;
       proved = await proveChildAbsent(child);
     } else if (e.path !== undefined) {
       proved = await proveUnlink(e.path);
@@ -350,7 +419,12 @@ export function registerHelperSpawn(args: {
  * coupling tax (CORRECTION03 P2).
  */
 export type OwnedChildPort = {
-  readonly pid: number | null;
+  // ChildProcess.pid is `number | undefined`; the
+  // WitnessSpawnHandle narrows to `number | null`.
+  // Accept either (and treat missing pid as
+  // "treat as absent") to keep the residue helpers
+  // usable from both surfaces.
+  readonly pid?: number | null | undefined;
   kill(signal?: NodeJS.Signals): boolean;
 };
 

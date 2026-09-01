@@ -246,8 +246,16 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
       "WSTART-LIVE01: ledger must contain witness_start_requested");
     const commitId = (intent as Record<string, unknown>)["commit_id"];
     if (typeof commitId === "string") {
-      assert.ok(commitId.startsWith("w-start/"),
-        "WSTART-LIVE01: commitId must be in w-start/ namespace");
+      // CORRECTION05: the B0 frozen grammar
+      // `^[A-Za-z0-9_.:-]{1,128}$` rejects slashes. The
+      // namespace separator is ":" (NOT "/"). Mirror the
+      // canonical predicate from witness-start-unit.test.ts:
+      //   prefix == "w-start:"
+      //   no "/"
+      assert.equal(commitId.startsWith("w-start:"), true,
+        `WSTART-LIVE01: commitId must be in w-start: namespace; got ${commitId}`);
+      assert.equal(commitId.includes("/"), false,
+        `WSTART-LIVE01: commitId must NOT contain '/' (B0 grammar); got ${commitId}`);
     }
     // Identity tuple: the committed intent's runId/missionId
     // envelope (runId lives at the envelope level; missionId

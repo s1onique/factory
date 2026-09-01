@@ -213,7 +213,8 @@ const LWQ02: LiveCase = {
         commitId: "lwq02",
         event: makeEvent(1, "lwq02"),
       });
-      assert.equal(r.ok, true);
+      assert.equal(r.ok, true,
+        `LWQ02 append failed: ${JSON.stringify(r)}`);
       if (r.ok) assert.equal(r.value.sequence, 1);
     } finally {
       await h.stop();
@@ -233,12 +234,14 @@ const LWQ03: LiveCase = {
         commitId: "lwq03a",
         event: makeEvent(1, "lwq03a"),
       });
-      assert.equal(a.ok, true);
+      assert.equal(a.ok, true,
+        `LWQ03 first append failed: ${JSON.stringify(a)}`);
       const b = await ctx.appendCounting(h, {
         commitId: "lwq03b",
         event: makeEvent(2, "lwq03b"),
       });
-      assert.equal(b.ok, true);
+      assert.equal(b.ok, true,
+        `LWQ03 second append failed: ${JSON.stringify(b)}`);
       if (b.ok) assert.equal(b.value.sequence, 2);
     } finally {
       await h.stop();
@@ -258,13 +261,15 @@ const LWQ04: LiveCase = {
         commitId: "lwq04",
         event: makeEvent(1, "lwq04"),
       });
-      assert.equal(a.ok, true);
+      assert.equal(a.ok, true,
+        `LWQ04 first append failed: ${JSON.stringify(a)}`);
       if (a.ok) assert.equal(a.value.sequence, 1);
       const b = await ctx.appendCounting(h, {
         commitId: "lwq04",
         event: makeEvent(1, "lwq04"),
       });
-      assert.equal(b.ok, true);
+      assert.equal(b.ok, true,
+        `LWQ04 second append failed: ${JSON.stringify(b)}`);
       if (b.ok) assert.equal(b.value.sequence, 1);
     } finally {
       await h.stop();
@@ -289,8 +294,10 @@ const LWQ05: LiveCase = {
         commitId: "lwq05b",
         event: ev,
       });
-      assert.equal(a.ok, true);
-      assert.equal(b.ok, true);
+      assert.equal(a.ok, true,
+        `LWQ05 first append failed: ${JSON.stringify(a)}`);
+      assert.equal(b.ok, true,
+        `LWQ05 second append failed: ${JSON.stringify(b)}`);
       if (a.ok && b.ok) {
         assert.equal(a.value.sequence, 1);
         assert.equal(b.value.sequence, 2);
@@ -316,7 +323,8 @@ const LWQ06: LiveCase = {
           commitId: `lwq06-${i}`,
           event: makeEvent(i, `lwq06-${i}`),
         });
-        assert.equal(r.ok, true);
+        assert.equal(r.ok, true,
+          `LWQ06 append ${i} failed: ${JSON.stringify(r)}`);
       }
       // (B0-QUALIFICATION04) Read evidence BEFORE
       // writer stop + runDir destruction.
@@ -355,7 +363,8 @@ const LWQ07: LiveCase = {
         commitId,
         event: makeEvent(1, "lwq07"),
       });
-      assert.equal(a.ok, true);
+      assert.equal(a.ok, true,
+        `LWQ07 first append failed: ${JSON.stringify(a)}`);
       if (a.ok) assert.equal(a.value.sequence, 1);
       // (B0-QUALIFICATION04) Writer stop MUST NOT
       // destroy the runDir; durable evidence is read
@@ -370,7 +379,8 @@ const LWQ07: LiveCase = {
         commitId,
         event: makeEvent(1, "lwq07"),
       });
-      assert.equal(b.ok, true);
+      assert.equal(b.ok, true,
+        `LWQ07 second append failed: ${JSON.stringify(b)}`);
       if (b.ok) {
         assert.equal(b.value.sequence, 1,
           "replay returns original seq after restart");
@@ -588,7 +598,8 @@ const LWQ09: LiveCase = {
         commitId: "rpc01",
         event: makeEvent(1, "rpc01"),
       });
-      assert.equal(r.ok, true);
+      assert.equal(r.ok, true,
+        `LWQ09 append failed: ${JSON.stringify(r)}`);
       if (r.ok) assert.equal(r.value.sequence, 1);
     } finally {
       await h.stop();
@@ -608,12 +619,14 @@ const LWQ10: LiveCase = {
         commitId: "rpc02",
         event: makeEvent(1, "rpc02"),
       });
-      assert.equal(a.ok, true);
+      assert.equal(a.ok, true,
+        `LWQ10 first append failed: ${JSON.stringify(a)}`);
       const b = await ctx.appendCounting(h, {
         commitId: "rpc02",
         event: makeEvent(1, "rpc02"),
       });
-      assert.equal(b.ok, true);
+      assert.equal(b.ok, true,
+        `LWQ10 second append failed: ${JSON.stringify(b)}`);
       if (a.ok && b.ok) {
         assert.equal(a.value.sequence, b.value.sequence,
           "replay returns same sequence");
@@ -648,7 +661,8 @@ const LWQ11: LiveCase = {
         commitId: "rpc03",
         event: evA,
       });
-      assert.equal(a.ok, true);
+      assert.equal(a.ok, true,
+        `LWQ11 first append failed: ${JSON.stringify(a)}`);
       if (a.ok) assert.equal(a.value.sequence, 1);
       const b = await ctx.appendCounting(h, {
         commitId: "rpc03",
@@ -656,11 +670,11 @@ const LWQ11: LiveCase = {
       });
       // RPC03 conflict: must report an error.
       assert.equal(b.ok, false,
-        "RPC03 conflict must report ok=false");
+        `RPC03 conflict must report ok=false; got ${JSON.stringify(b)}`);
       if (!b.ok) {
         const k = (b.error as { kind?: string }).kind;
         assert.equal(k, "protocol_error",
-          `RPC03 client wraps conflict as protocol_error, got ${k}`);
+          `RPC03 client wraps conflict as protocol_error, got ${JSON.stringify(b.error)}`);
         const inner = (b.error as {
           error?: { kind?: string };
         }).error;
