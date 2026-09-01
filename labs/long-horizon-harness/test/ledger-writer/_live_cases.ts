@@ -887,32 +887,21 @@ const LWQ13: LiveCase = {
 // --------------------------------------------------------------------
 
 /**
- * CORRECTION07: durable fixture invariant (doctrine-enforcing).
+ * CORRECTION08: durable fixture invariant (doctrine-enforcing,
+ * algebraically literal).
  *
  * A case owning a ChildProcess MUST NOT report cleanup
  * complete until it observes the subprocess lifecycle
  * boundary it owns. Concretely:
  *
- *   arm `'close'` / `'error'` observers
+ *   arm `'close'` / `'error'` observers + deadline
  *   → request termination (signal)
  *   → await `'close'` boundary
  *   → on `'close'` → success
  *   → on `'error'` before `'close'` → failure
  *   → on deadline expiry → failure
+ *   → on kill() failure (false / throw) → failure
  *   → only then return
- *
- * The previous contract —
- *   `c.kill("SIGKILL"); return;`
- * — returns the moment the signal is dispatched.
- * `subprocess.kill()` only reports whether signal
- * delivery was accepted by the OS; it does NOT
- * synchronously reap the child. The kernel may still
- * hold the pid for a few ms (zombie, in-flight
- * stdio drain, or even just SIGKILL delivery
- * latency). When the after-suite residue sweep runs
- * immediately after the case returns, it observes
- * `kill(pid, 0)` → alive → records residue for a
- * child the case has in fact killed.
  *
  * Per Node's documented ChildProcess lifecycle,
  * `'close'` is emitted "after a process has ended
@@ -923,13 +912,24 @@ const LWQ13: LiveCase = {
  * the process has ended, so it MUST NOT be treated
  * as cleanup success.
  *
- * To eliminate the lost-listener race for a fast
- * exit, observers are armed BEFORE the signal is
- * dispatched.
+ * The contract rejects on `'error'`, on deadline
+ * expiry, and on kill() failure. A deadline that
+ * resolves success would lie about a boundary the
+ * fixture did not observe; a synthesized
+ * `{kind:"closed"}` from cached exitCode/signalCode
+ * would lie about having observed `'close'`.
  *
- * The contract rejects on `'error'` and on deadline
- * expiry. A deadline that resolves success would
- * lie about a boundary the fixture did not observe.
+ * Algebra:
+ *   `{kind:"closed"}` may originate ONLY from the
+ *   actual `'close'` callback. Cached exitCode or
+ *   signalCode ≠ close observed.
+ *
+ *   `terminateHelperAndAwaitClose` is ONE atomic
+ *   Promise, not two composed ones. Installing the
+ *   listeners, running the kill, and observing the
+ *   boundary share a single state machine so kill
+ *   failure cannot orphan the observer's timer /
+ *   listeners / rejection.
  */
 
 export type ChildCloseResult = {
@@ -942,13 +942,19 @@ export type ChildCloseResult = {
  * Observe the ChildProcess `'close'` boundary.
  *
  *   - Resolves with `{kind:"closed", code, signal}`
- *     once Node has emitted `'close'`.
+ *     once Node has emitted `'close'`. ONLY the
+ *     `'close'` callback may construct that value;
+ *     cached exitCode/signalCode is not sufficient.
  *   - Rejects on `'error'` (the process did not
  *     terminate cleanly per Node's contract).
  *   - Rejects on deadline expiry.
- *   - Fast-path: if Node has already cached an exit
- *     before this call is made, waits one tick for
- *     stdio drain and resolves from the cached state.
+ *
+ * If `'close'` was already emitted before this call
+ * is made (rare), the deadline will expire and the
+ * call rejects. This is intentional: the fixture
+ * did not observe the boundary it owns; "we think
+ * it must have happened" is not the same claim as
+ * "we observed it".
  *
  * Exported so ORACLE03 can lock in the contract.
  */
@@ -956,27 +962,6 @@ export async function awaitChildClose(
   child: import("node:child_process").ChildProcess,
   timeoutMs = 2000,
 ): Promise<ChildCloseResult> {
-  // Fast path: if Node has already observed exit,
-  // the 'close' boundary is either past or one tick
-  // away. We wait one tick for stdio drain, then
-  // check again.
-  if (
-    (child.exitCode !== null && child.exitCode !== undefined) ||
-    (child.signalCode !== null && child.signalCode !== undefined)
-  ) {
-    await new Promise((r) => setImmediate(r));
-    if (
-      (child.exitCode !== null && child.exitCode !== undefined) ||
-      (child.signalCode !== null && child.signalCode !== undefined)
-    ) {
-      return {
-        kind: "closed",
-        code: child.exitCode ?? null,
-        signal: child.signalCode ?? null,
-      };
-    }
-  }
-
   return new Promise<ChildCloseResult>((resolve, reject) => {
     let settled = false;
     const onClose = (
@@ -1018,12 +1003,34 @@ export async function awaitChildClose(
 
 /**
  * Combine termination + close-boundary observation
- * into one atomic fixture primitive.
+ * into ONE atomic Promise state machine.
  *
- *   arm observers (via awaitChildClose)
- *   → child.kill("SIGKILL")
- *   → require 'close' within timeoutMs
- *   → on 'error' / deadline expiry → reject
+ * Sequence:
+ *   (a) attempt child.kill("SIGKILL")
+ *       throws → reject immediately (no listeners
+ *                installed → no synchronous error
+ *                event leak)
+ *       returns false → reject immediately
+ *       returns true → fall through to (b)
+ *   (b) install 'close' / 'error' observers +
+ *       deadline timer
+ *       'close'  → cleanup + resolve
+ *       'error'  → cleanup + reject
+ *       deadline → cleanup + reject
+ *
+ * Why install listeners AFTER kill:
+ *   Node's ChildProcess.kill() may SYNCHRONOUSLY
+ *   emit 'error' (e.g. EPERM). If 'error' is
+ *   attached first, the synchronous emit leaks
+ *   into our reject path AND the synchronous
+ *   throw bubbles out of kill() — producing an
+ *   unhandled rejection. Doing kill() first with
+ *   no listeners installed means the error
+ *   arrives via the throw (which we surface
+ *   honestly) or, if kill() returns true, by
+ *   the time listeners are attached the only
+ *   possible async 'error' is one that arrives
+ *   AFTER kill() succeeded.
  *
  * The case body MUST let the rejection propagate;
  * no try/catch around the call. A deadline that
@@ -1034,25 +1041,19 @@ export async function terminateHelperAndAwaitClose(
   child: import("node:child_process").ChildProcess,
   timeoutMs = 2000,
 ): Promise<ChildCloseResult> {
-  // If the child has already observed exit, skip
-  // the signal and just await whatever boundary
-  // remains (the natural-exit fast path used by
-  // ORACLE03's positive case).
-  if (
-    (child.exitCode !== null && child.exitCode !== undefined) ||
-    (child.signalCode !== null && child.signalCode !== undefined)
-  ) {
-    return awaitChildClose(child, timeoutMs);
-  }
-  // Set up the close observer BEFORE calling
-  // kill(), so a fast exit cannot lose the
-  // boundary.
-  const closePromise = awaitChildClose(child, timeoutMs);
+  // (a) Synchronous kill attempt. No listeners
+  // installed, so a synchronous 'error' emit
+  // would crash Node — we catch the throw and
+  // surface it as a structured rejection.
   let accepted = false;
+  let killError: unknown;
   try {
     accepted = child.kill("SIGKILL");
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    killError = e;
+  }
+  if (killError !== undefined) {
+    const msg = killError instanceof Error ? killError.message : String(killError);
     throw new Error(
       `terminateHelperAndAwaitClose: kill() threw before 'close' could be observed: ${msg}`,
     );
@@ -1062,7 +1063,59 @@ export async function terminateHelperAndAwaitClose(
       "terminateHelperAndAwaitClose: kill() returned false (signal not accepted by OS)",
     );
   }
-  return closePromise;
+
+  // (b) Async observers + deadline. ONE promise,
+  // ONE cleanup, ONE state machine. Kill failure
+  // already surfaced above; from here, only
+  // 'close', 'error', or deadline can settle.
+  return new Promise<ChildCloseResult>((resolve, reject) => {
+    let settled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+    function cleanup(): void {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = undefined;
+      }
+      child.off("close", onClose);
+      child.off("error", onError);
+    }
+
+    const onClose = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ kind: "closed", code, signal });
+    };
+
+    const onError = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(
+        `terminateHelperAndAwaitClose: 'error' before 'close' (fixture boundary violated): ${err.message}`,
+      ));
+    };
+
+    // Arm listeners AFTER the synchronous kill
+    // call so we cannot lose the boundary to a
+    // synchronous error emit, and so the
+    // synchronous kill-throw / kill-false cannot
+    // orphan the observer state.
+    child.once("close", onClose);
+    child.once("error", onError);
+    timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(
+        `terminateHelperAndAwaitClose: deadline ${timeoutMs}ms expired before 'close' was observed (fixture boundary violated)`,
+      ));
+    }, timeoutMs);
+  });
 }
 
 const LWQ14: LiveCase = {

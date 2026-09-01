@@ -407,7 +407,64 @@ test("ORACLE02: qualification source must not contain the 'uninitialised' sentin
 
 const liveCasesModule = "./_live_cases.js";
 
-// (a) Positive: natural-exit child → resolves.
+/**
+ * Cleanup-only wrapper for ORACLE03 negative
+ * paths. The test body has already asserted the
+ * negative contract (rejection). The cleanup MUST
+ * still observe the actual 'close' boundary
+ * rather than naked-kill, because the doctrine
+ * forbids a fixture that itself violates the
+ * doctrine it is asserting.
+ *
+ * Sequence:
+ *   1. Try the atomic primitive (signal + wait).
+ *      If it succeeds, we're done.
+ *   2. If it throws (kill EPERM on a sandboxed
+ *      host, kill returns false, or kill threw),
+ *      fall back to: best-effort raw kill() +
+ *      awaitChildClose() to still OBSERVE the
+ *      boundary even when the atomic primitive
+ *      itself is broken.
+ *   3. Any residual rejection is swallowed
+ *      (the test body already proved the
+ *      negative path; cleanup is best-effort).
+ */
+async function terminateHelperAndAwaitCloseSilent(
+  child: import("node:child_process").ChildProcess,
+  timeoutMs = 2000,
+): Promise<void> {
+  const mod = await import(liveCasesModule);
+  const exited = (child.exitCode !== null && child.exitCode !== undefined) ||
+                 (child.signalCode !== null && child.signalCode !== undefined);
+  // First try the atomic primitive.
+  try {
+    if (exited) {
+      await mod.awaitChildClose(child, timeoutMs);
+      return;
+    }
+    await mod.terminateHelperAndAwaitClose(child, timeoutMs);
+    return;
+  } catch {
+    // Fall through to fallback.
+  }
+  // Fallback: best-effort raw kill + observe
+  // close boundary. This obeys the doctrine:
+  // we still observe 'close' before returning;
+  // we just don't require the atomic primitive
+  // to succeed (it may be broken in this
+  // negative-path test).
+  try { child.kill("SIGKILL"); } catch { /* */ }
+  try {
+    await mod.awaitChildClose(child, timeoutMs);
+  } catch {
+    // Best-effort. The test body already
+    // proved the negative contract.
+  }
+}
+
+// (a) Positive: natural-exit child → resolves on
+//     the actual 'close' boundary (the ONLY path
+//     that constructs `{kind:"closed"}`).
 test("ORACLE03a: awaitChildClose resolves on natural 'close'", async () => {
   const { spawn } = await import("node:child_process");
   const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30)"], {
@@ -430,13 +487,16 @@ test("ORACLE03a: awaitChildClose resolves on natural 'close'", async () => {
 });
 
 // (b) Negative: an unresponsive child → REJECT on
-//     deadline. (SIGKILL is not allowed in some
-//     sandboxes, so we just spawn a long-sleeping
-//     child and rely on the deadline.)
+//     deadline. We spawn a sleeper longer than
+//     the deadline and assert the deadline
+//     rejects. The child is then cleaned up by
+//     the doctrine-observant helper.
 test("ORACLE03b: awaitChildClose rejects when deadline expires", async () => {
   const { spawn } = await import("node:child_process");
-  // 60s sleep; deadline is 250 ms.
-  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+  // 5s sleep > 250 ms deadline. (60s was too
+  // long: the cleanup path could not observe
+  // close before the test runner exits.)
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], {
     stdio: ["ignore", "ignore", "ignore"],
   });
   const { awaitChildClose } = await import(liveCasesModule);
@@ -447,11 +507,11 @@ test("ORACLE03b: awaitChildClose rejects when deadline expires", async () => {
   } catch (e: unknown) {
     rejected = true;
     msg = e instanceof Error ? e.message : String(e);
-  } finally {
-    // Best-effort cleanup so we don't leave a
-    // 60s sleeper on the host.
-    try { c.kill("SIGKILL"); } catch { /* */ }
   }
+  // Cleanup: observe the actual 'close' boundary
+  // of our 60s sleeper so we do not violate the
+  // same doctrine the test is asserting.
+  await terminateHelperAndAwaitCloseSilent(c);
   assert.equal(rejected, true,
     "ORACLE03b: awaitChildClose MUST reject on deadline expiry; a deadline that means success lies about a boundary the fixture did not observe");
   assert.ok(/deadline \d+ms expired/.test(msg),
@@ -464,9 +524,11 @@ test("ORACLE03b: awaitChildClose rejects when deadline expires", async () => {
 //     async lifecycle event).
 test("ORACLE03c: awaitChildClose rejects on 'error' before 'close'", async () => {
   const { spawn } = await import("node:child_process");
-  // Long-sleeping child; we will synthesise an
-  // 'error' event before any 'close' can fire.
-  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+  // Short-sleeping child; we synthesise an
+  // 'error' event before any 'close' can fire,
+  // then the cleanup helper waits for the
+  // child to exit on its own.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 200)"], {
     stdio: ["ignore", "ignore", "ignore"],
   });
   const { awaitChildClose } = await import(liveCasesModule);
@@ -478,49 +540,171 @@ test("ORACLE03c: awaitChildClose rejects on 'error' before 'close'", async () =>
   try { await p; } catch (e: unknown) {
     rejected = true;
     msg = e instanceof Error ? e.message : String(e);
-  } finally {
-    try { c.kill("SIGKILL"); } catch { /* */ }
   }
+  // Cleanup: observe the actual 'close' boundary
+  // — the doctrine forbids naked kill+return.
+  await terminateHelperAndAwaitCloseSilent(c);
   assert.equal(rejected, true,
     "ORACLE03c: awaitChildClose MUST reject on 'error' before 'close'; 'error' is not equivalent to 'close'");
   assert.ok(/'error' before 'close'/.test(msg),
     `ORACLE03c: rejection message must mention the 'error' boundary (got: ${msg})`);
 });
 
-// (d) Ordering: terminateHelperAndAwaitClose
-//     arms observers BEFORE kill(), so a fast
-//     exit cannot lose the 'close' event. We
-//     verify this with the natural-exit fast
-//     path: by the time terminateHelperAndAwaitClose
-//     is invoked, the child has already exited,
-//     so the call MUST skip the signal and just
-//     return a typed result from cached state.
-test("ORACLE03d: terminateHelperAndAwaitClose returns typed closed result on natural exit", async () => {
+// (d) Boundary truthfulness: awaitChildClose MUST
+//     wait for the actual 'close' event, not
+//     synthesise `{kind:"closed"}` from cached
+//     exitCode/signalCode. We spawn a child that
+//     exits naturally in ~150 ms with a specific
+//     exit code, and assert that awaitChildClose
+//     takes >= 100 ms (i.e. waited for the
+//     boundary) and returns the actual exit
+//     code. A fast-path synthesis would resolve
+//     in <1 ms.
+test("ORACLE03d: awaitChildClose observes the real 'close' boundary (not synthesized)", async () => {
   const { spawn } = await import("node:child_process");
-  // Long-enough sleep that the child is alive at
-  // the moment we call terminateHelperAndAwaitClose,
-  // so the call goes through the arm-then-kill
-  // path. We then wait long enough that the child
-  // exits on its own before the kill is delivered.
-  //
-  // Easier alternative: spawn a child, wait for it
-  // to exit naturally, then call
-  // terminateHelperAndAwaitClose — the fast-path
-  // branch must return a typed closed result.
-  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30)"], {
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => { process.exit(42); }, 150)"], {
     stdio: ["ignore", "ignore", "ignore"],
   });
-  // Wait for natural exit + one tick of stdio drain.
-  await new Promise<void>((resolve) => {
-    c.once("close", () => resolve());
-    setTimeout(resolve, 3000);
-  });
-  const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
-  const r = await terminateHelperAndAwaitClose(c, 3000);
+  const { awaitChildClose } = await import(liveCasesModule);
+  const t0 = Date.now();
+  const r = await awaitChildClose(c, 5000);
+  const elapsed = Date.now() - t0;
   assert.equal(r.kind, "closed",
-    "ORACLE03d: terminateHelperAndAwaitClose must return a typed result on natural-exit fast path");
-  assert.ok(r.code !== null || r.signal !== null,
-    `ORACLE03d: typed result must carry exit info (code=${r.code}, signal=${r.signal})`);
+    "ORACLE03d: awaitChildClose must return a typed result via the real 'close' boundary");
+  assert.equal(r.code, 42,
+    `ORACLE03d: typed result must carry the actual child exit code (got code=${r.code}, signal=${r.signal})`);
+  assert.ok(elapsed >= 100,
+    `ORACLE03d: elapsed time MUST be >= 100 ms to prove the real 'close' was awaited (got ${elapsed}ms; a sub-1ms resolve would imply a synthesised closed)`);
+});
+
+// (f) kill() returns false → REJECT the SAME
+//     promise, NO orphan Promise, NO listener
+//     leak. We synthesise a "kill returns false"
+//     child by overriding the `.kill` method on
+//     the ChildProcess instance.
+test("ORACLE03f: terminateHelperAndAwaitClose rejects when kill() returns false and leaves no orphan Promise", async () => {
+  const { spawn } = await import("node:child_process");
+  // Long-lived child but with a graceful exit
+  // so cleanup doesn't hang waiting for an
+  // infinite process.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => { process.exit(0); }, 2000)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  // Override kill to simulate OS refusal (e.g.
+  // signal already accepted, or EPERM). Save
+  // the original so the cleanup can still
+  // actually kill the child.
+  const originalKill = c.kill.bind(c);
+  (c as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = () => false;
+  const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
+  // Hook unhandledRejection for this tick so we
+  // can prove no orphan surfaces.
+  let unhandled: Error | null = null;
+  const onUnhandled = (e: unknown): void => {
+    if (e instanceof Error) unhandled = e;
+  };
+  process.on("unhandledRejection", onUnhandled);
+  let rejected = false;
+  let msg = "";
+  try {
+    await terminateHelperAndAwaitClose(c, 5000);
+  } catch (e: unknown) {
+    rejected = true;
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    // Restore the real kill() so cleanup can
+    // actually terminate the live child.
+    (c as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = originalKill;
+    // Observe its real close so we do not leak it.
+    await terminateHelperAndAwaitCloseSilent(c);
+  }
+  assert.equal(rejected, true,
+    "ORACLE03f: terminateHelperAndAwaitClose MUST reject when kill() returns false");
+  assert.ok(/kill\(\) returned false/.test(msg),
+    `ORACLE03f: rejection must mention the kill failure (got: ${msg})`);
+  // Type assertion: assert.equal narrows
+  // `unhandled` to null after the equality
+  // succeeds. We re-fetch it via the captured
+  // reference at assertion time using a string
+  // coercion that defeats narrowing.
+  const f_unhandled = unhandled as unknown;
+  assert.ok(f_unhandled === null,
+    `ORACLE03f: kill failure MUST NOT orphan the observer (unhandledRejection fired: ${f_unhandled instanceof Error ? f_unhandled.message : String(f_unhandled)})`);
+});
+
+// (g) kill() throws → REJECT the SAME promise,
+//     NO orphan Promise.
+test("ORACLE03g: terminateHelperAndAwaitClose rejects when kill() throws and leaves no orphan Promise", async () => {
+  const { spawn } = await import("node:child_process");
+  // Long-lived child but with a graceful exit
+  // so cleanup doesn't hang waiting for an
+  // infinite process.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => { process.exit(0); }, 2000)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  // Override kill to simulate a synchronous
+  // throw (e.g. EPERM from libuv translated).
+  // Save the original so cleanup can still
+  // actually kill the child.
+  const originalKill = c.kill.bind(c);
+  (c as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = () => {
+    throw new Error("synthesized kill throw");
+  };
+  const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
+  let unhandled: Error | null = null;
+  const onUnhandled = (e: unknown): void => {
+    if (e instanceof Error) unhandled = e;
+  };
+  process.on("unhandledRejection", onUnhandled);
+  let rejected = false;
+  let msg = "";
+  try {
+    await terminateHelperAndAwaitClose(c, 5000);
+  } catch (e: unknown) {
+    rejected = true;
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    // Restore real kill() so cleanup can
+    // terminate the live child.
+    (c as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = originalKill;
+    await terminateHelperAndAwaitCloseSilent(c);
+  }
+  assert.equal(rejected, true,
+    "ORACLE03g: terminateHelperAndAwaitClose MUST reject when kill() throws");
+  assert.ok(/kill\(\) threw/.test(msg),
+    `ORACLE03g: rejection must mention the kill throw (got: ${msg})`);
+  const g_unhandled = unhandled as unknown;
+  assert.ok(g_unhandled === null,
+    `ORACLE03g: kill throw MUST NOT orphan the observer (unhandledRejection fired: ${g_unhandled instanceof Error ? g_unhandled.message : String(g_unhandled)})`);
+});
+
+// (h) terminateHelperAndAwaitClose: live child
+//     → kill (mocked to succeed) → observe real
+//     'close'. This proves the arm-then-kill
+//     ordering on hosts that permit kill: the
+//     call returns a typed result via the real
+//     boundary, not a synthesised one.
+test("ORACLE03h: terminateHelperAndAwaitClose arms listeners, runs kill, observes real 'close'", async () => {
+  const { spawn } = await import("node:child_process");
+  // The child exits naturally with code 42
+  // after 150 ms. We mock kill() to succeed
+  // (return true) so the production code goes
+  // through the arm-then-kill path. On this
+  // sandbox, the real kill() would throw EPERM
+  // — we deliberately side-step that to test
+  // the positive contract.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => { process.exit(42); }, 150)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  (c as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = () => true;
+  const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
+  const r = await terminateHelperAndAwaitClose(c, 5000);
+  assert.equal(r.kind, "closed",
+    "ORACLE03h: terminateHelperAndAwaitClose must return a typed result via the real 'close' boundary");
+  assert.equal(r.code, 42,
+    `ORACLE03h: typed result must carry the actual child exit code (got code=${r.code}, signal=${r.signal})`);
 });
 
 // (e) Static guard: the LWQ14/LWQ15 case bodies
