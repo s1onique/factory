@@ -31,6 +31,15 @@ import {
   udsPathTooLong,
   type LiveRunHandle,
 } from "./_wstart_live_helpers.js";
+import {
+  liveFixtureRegistrySize,
+  proveChildAbsent,
+  registerWitnessSpawn,
+  snapshotLiveFixtures,
+  sweepAndProve,
+  unregisterLiveFixture,
+  type LiveFixtureEntry,
+} from "../ledger-writer/_live_registry.js";
 
 const STRICT = process.env.FACTORY_STRICT_WITNESS_START_LIVE === "1";
 const REQUIRED = 3;
@@ -39,6 +48,27 @@ let pass = 0;
 let fail = 0;
 let skip = 0;
 let residue = 0;
+
+/**
+ * CORRECTION02 (Phase A): every real witness child
+ * returned by startWitness MUST be registered in the
+ * live registry, and MUST be unregistered ONLY after
+ * `proveChildAbsent` succeeded. Signal-sent is not
+ * proof-of-cleanup (Q15).
+ */
+async function terminateAndProveWitness(entry: LiveFixtureEntry): Promise<boolean> {
+  const child = entry.ref as import("node:child_process").ChildProcess;
+  // Best-effort SIGTERM first; let the witness exit
+  // cleanly (it may be writing witness_lost, etc.).
+  try { child.kill("SIGTERM"); } catch { /* */ }
+  // Give it a small grace period, then escalate.
+  await new Promise((res) => setTimeout(res, 100));
+  const absent = await proveChildAbsent(child);
+  if (absent) {
+    unregisterLiveFixture(entry);
+  }
+  return absent;
+}
 
 function emit(rec: unknown): void {
   process.stdout.write(JSON.stringify(rec) + "\n");
@@ -72,10 +102,25 @@ async function teardown(run: LiveRunHandle): Promise<void> {
   try { await fs.rm(run.controlDir, { recursive: true, force: true }); } catch { /* */ }
 }
 
+/**
+ * Phase A post-suite residue oracle.
+ *
+ * CORRECTION02: residue is now derived from the live
+ * registry (`sweepAndProve()` + `liveFixtureRegistrySize()`),
+ * matching the LedgerWriter qualification. A standalone
+ * integer set to 0 in setup is no longer enough — every
+ * registered fixture MUST be proven absent before it is
+ * unregistered.
+ */
+function computeResidue(): number {
+  return liveFixtureRegistrySize();
+}
+
 test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => {
   exec += 1;
   let run: LiveRunHandle | { skip: true; reason: string } | null = null;
   let r: Awaited<ReturnType<typeof startWitness>> | null = null;
+  let witnessEntry: LiveFixtureEntry | null = null;
   try {
     const s = await setupLiveRun("a");
     if ("skip" in s) { skip += 1; return; }
@@ -92,7 +137,15 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
       assert.ok(r.value.identity.witnessId.length > 0);
       assert.notEqual(r.value.child.pid, null,
         "WSTART-LIVE01: child.pid must be set after successful spawn (Node 'spawn' fired)");
-      try { r.value.child.kill("SIGTERM"); } catch { /* */ }
+      // CORRECTION02: register the witness in the live
+      // registry so the strict lane's residue oracle
+      // cannot certify WITNESS_START_LIVE_RESIDUE=0
+      // without proving the witness actually disappeared.
+      witnessEntry = registerWitnessSpawn({
+        child: r.value.child as unknown as import("node:child_process").ChildProcess,
+        witnessInstanceId: r.value.identity.witnessInstanceId,
+        runDir: run.runDir,
+      });
     } else {
       assert.fail("WSTART-LIVE01: start must succeed on a live run; got " + JSON.stringify(r.failure));
     }
@@ -116,10 +169,15 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
     }
     // Identity tuple: the committed intent's runId/missionId
     // envelope (runId lives at the envelope level; missionId
-    // at the envelope level too). Verify runId equality.
+    // at the envelope level too). Verify BOTH equalities.
+    // CORRECTION02: previous WSTART-LIVE01 only checked
+    // run_id; the committed mission_id was never asserted.
     const envRunId = (intent as Record<string, unknown>)["run_id"];
     assert.equal(envRunId, "run-live",
       "WSTART-LIVE01: committed intent runId must equal spec.runId");
+    const envMissionId = (intent as Record<string, unknown>)["mission_id"];
+    assert.equal(envMissionId, "mis-live",
+      "WSTART-LIVE01: committed intent missionId must equal spec.missionId");
     // Identity tuple: spawn spec carried the same witnessId
     // and witnessInstanceId as the committed intent's
     // payload.
@@ -149,6 +207,14 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
     fail += 1;
     throw e;
   } finally {
+    // CORRECTION02: prove the witness child is gone BEFORE
+    // unregistering it. This is the residue oracle that
+    // makes WITNESS_START_LIVE_RESIDUE meaningful.
+    if (witnessEntry !== null) {
+      const absent = await terminateAndProveWitness(witnessEntry);
+      assert.equal(absent, true,
+        "WSTART-LIVE01: witness child must be proven absent before unregistering (residue oracle)");
+    }
     void r;
     if (run !== null && !("skip" in run)) {
       await teardown(run);
@@ -293,8 +359,25 @@ test("WSTART-LIVE03: durable intent then spawn ENOENT (bad nodePath)", async () 
 });
 
 after(async () => {
+  // CORRECTION02: residue is now DERIVED from the live
+  // registry, not from a standalone integer. The post-
+  // suite sweep attempts to prove every registered
+  // fixture absent (children: ESRCH via kill loop;
+  // paths: lstat ENOENT). Anything that cannot be
+  // proven absent is residue.
+  const failed = await sweepAndProve();
+  residue = failed.length + computeResidue();
   if (STRICT && residue > 0) {
     fail += 1;
+  }
+  // eslint-disable-next-line no-console
+  console.log(`WITNESS_START_LIVE_RESIDUE=${residue}`);
+  if (residue > 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      "WITNESS_START_LIVE_RESIDUE_DETAIL=" +
+        JSON.stringify(snapshotLiveFixtures()),
+    );
   }
   const disposition =
     fail === 0 && skip === 0 && residue === 0 && pass === REQUIRED

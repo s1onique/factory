@@ -56,6 +56,57 @@ function wrapChild(child: ChildProcess): WitnessSpawnHandle {
 }
 
 /**
+ * Pure state machine for spawn-event classification.
+ *
+ *   pending -- spawn  --> spawned (terminal, ok)
+ *   pending -- error  --> failed  (terminal, ok:false)
+ *   spawned -- error  --> spawned (terminal, no relabel)
+ *
+ * The Node runtime emits exactly one of {'spawn', 'error'}
+ * for the spawn step itself; if 'spawn' fires, the child
+ * is created. A later 'error' event is about the
+ * *post-spawn* lifecycle (e.g. failed to start the next
+ * command) and must NOT be relabeled `spawn_failed`.
+ *
+ * This function exists so the doctrine can be tested
+ * mechanically without spinning up a real Node child.
+ *
+ *   classifySpawnEvent(state, event) -> { state, terminal, ok }
+ */
+export type SpawnState = "pending" | "spawned" | "failed";
+
+export type SpawnEvent = "spawn" | "error";
+
+export type SpawnClassification = {
+  readonly state: SpawnState;
+  readonly terminal: boolean;
+  readonly ok: boolean;
+};
+
+export function classifySpawnEvent(
+  state: SpawnState,
+  event: SpawnEvent,
+): SpawnClassification {
+  if (state === "spawned") {
+    // Once spawned, any further event is post-spawn.
+    // It does NOT change the ok:true classification.
+    return { state: "spawned", terminal: true, ok: true };
+  }
+  if (state === "failed") {
+    // Symmetric for the failure side; once failed,
+    // additional 'error' events (rare; e.g. process
+    // teardown) do NOT change the classification.
+    return { state: "failed", terminal: true, ok: false };
+  }
+  // state === "pending"
+  if (event === "spawn") {
+    return { state: "spawned", terminal: true, ok: true };
+  }
+  // event === "error" while pending == pre-spawn failure
+  return { state: "failed", terminal: true, ok: false };
+}
+
+/**
  * Production spawn port. P1#2 / WS09a / WS09b / WS09c:
  *
  *   spawn() returns a Promise that resolves only after

@@ -351,7 +351,7 @@ export function computeWitnessStartCommitId(
  * Derive a grammar-valid EventId for a witness_start_requested
  * intent.
  *
- *   eventId = "w-start-" + sha256(identity).slice(0,16)
+ *   eventId = "w-start-" + sha256(identity)
  *
  * Why a hash:
  *   - the canonical identity tuple contains slash-bearing
@@ -362,13 +362,19 @@ export function computeWitnessStartCommitId(
  *     the grammar check (P1#4). That was a type-system
  *     escape hatch, not a real conversion.
  *
- * Why sha256-prefix-16:
+ * Why the full SHA-256 digest (64 hex chars):
  *   - deterministic from the identity
- *   - bounded (≤128 chars total: "w-start-" + 16 hex = 24)
+ *   - bounded (≤72 chars total: "w-start-" + 64 hex),
+ *     comfortably under IDENTIFIER_GRAMMAR's 128-char cap
  *   - uses only ASCII alphanumerics + hyphen (grammar-clean)
- *   - collision risk is bounded by the writer's seq
- *     authority (eventId is informational; seq is
- *     authoritative)
+ *   - 256 bits is meaningfully stronger than any prefix
+ *     we could truncate to; identity uniqueness is not
+ *     justified by truncating when we have the budget
+ *
+ * Note: EventId is informational. The writer's seq is the
+ * authoritative ordering key. EventId uniqueness is for
+ * observability only; same identity -> same EventId ->
+ * writers and readers can dedup or cross-reference.
  */
 export function makeEventIdFromIdentity(
   identity: WitnessStartIdentity,
@@ -383,7 +389,6 @@ export function makeEventIdFromIdentity(
   ].join("\u0001");
   const hex = createHash("sha256")
     .update(canonical, "utf8")
-    .digest("hex")
-    .slice(0, 16);
+    .digest("hex");
   return makeEventId("w-start-" + hex);
 }

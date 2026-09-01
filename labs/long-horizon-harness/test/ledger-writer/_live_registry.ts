@@ -292,3 +292,33 @@ export function registerHelperSpawn(args: {
   registerLiveFixture(entry);
   return entry;
 }
+
+/**
+ * (FOUNDATION04 CORRECTION02) Register a witness child
+ * produced by Phase A's `startWitness` gate. The entry
+ * MUST be unregistered ONLY after `proveChildAbsent`
+ * succeeded. Without this registration, the strict
+ * lane could certify WITNESS_START_LIVE_RESIDUE=0
+ * without proving the witness actually disappeared
+ * (Q15: signal-sent is not proof-of-cleanup).
+ *
+ * `witnessInstanceId` is recorded as the note so the
+ * residue sweep can identify which witness (if any)
+ * failed to clean up.
+ */
+export function registerWitnessSpawn(args: {
+  readonly child: import("node:child_process").ChildProcess;
+  readonly witnessInstanceId: string;
+  readonly runDir: string;
+}): LiveFixtureEntry {
+  const entry: LiveFixtureEntry = {
+    kind: "helper_child",
+    ref: args.child,
+    pid: args.child.pid,
+    note:
+      `witness instance=${args.witnessInstanceId} ` +
+      `runDir=${args.runDir}`,
+  };
+  registerLiveFixture(entry);
+  return entry;
+}

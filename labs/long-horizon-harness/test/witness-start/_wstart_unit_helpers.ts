@@ -33,6 +33,8 @@ export interface FakeCommit extends WitnessIntentCommitPort {
   lastPayloadKind: string | null;
   lastObservedAt: number | null;
   lastEventId: string | null;
+  lastRunId: string | null;
+  lastMissionId: string | null;
   stageNext(result: IntentCommitResult): void;
   /**
    * Convenience: stage the success shorthand
@@ -78,6 +80,8 @@ export function makeFakeCommit(): FakeCommit {
     lastPayloadKind: null,
     lastObservedAt: null,
     lastEventId: null,
+    lastRunId: null,
+    lastMissionId: null,
     stageNext(result: IntentCommitResult): void {
       staged = result;
     },
@@ -104,6 +108,8 @@ export function makeFakeCommit(): FakeCommit {
       c.lastPayloadKind = args.payload.kind;
       c.lastObservedAt = args.observedAt;
       c.lastEventId = args.eventId;
+      c.lastRunId = args.runId;
+      c.lastMissionId = args.missionId;
       if (rejectReason !== null) {
         const reason = rejectReason;
         rejectReason = null;

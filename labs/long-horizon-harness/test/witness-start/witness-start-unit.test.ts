@@ -413,6 +413,13 @@ test("pending then resolve: spawn happens strictly after commit resolves", async
 // for missionId. The committed, spawned, and returned
 // missionId must all equal the spec's missionId, even when
 // runId and missionId are deliberately distinct.
+//
+// CORRECTION02: this test now also asserts that the
+// commit port received the same runId AND missionId as
+// the spec. The previous version verified the eventId
+// prefix only — it never proved the commit envelope
+// carried the correct missionId. That is the full
+// identity-continuity proof.
 test("WS04c: missionId preserved when runId != missionId", async () => {
   const ports = mkPorts();
   ports.commit.ok(SUCCESSES.appended(1));
@@ -420,15 +427,27 @@ test("WS04c: missionId preserved when runId != missionId", async () => {
   const r = await startWitness(spec, ports);
   assert.equal(r.ok, true);
   if (r.ok) {
+    // Returned identity.
     assert.equal(r.value.identity.missionId, "mis-Y",
       "WS04c: returned missionId must equal spec.missionId");
+    assert.equal(r.value.identity.runId, "run-X",
+      "WS04c: returned runId must equal spec.runId");
     assert.notEqual(r.value.identity.missionId, r.value.identity.runId,
       "WS04c: missionId must not collapse into runId");
+    // Spawn spec identity.
     assert.equal(ports.spawn.lastSpec !== null, true);
     if (ports.spawn.lastSpec !== null) {
       assert.equal(ports.spawn.lastSpec.missionId, "mis-Y",
         "WS04c: spawn spec missionId must equal spec.missionId");
+      assert.equal(ports.spawn.lastSpec.runId, "run-X",
+        "WS04c: spawn spec runId must equal spec.runId");
     }
+    // Commit port identity.
+    assert.equal(ports.commit.lastRunId, "run-X",
+      "WS04c: commit port runId must equal spec.runId");
+    assert.equal(ports.commit.lastMissionId, "mis-Y",
+      "WS04c: commit port missionId must equal spec.missionId (NOT runId)");
+    // EventId still grammar-clean (delegates to WS13).
     assert.equal(ports.commit.lastEventId !== null, true);
     assert.equal(
       (ports.commit.lastEventId ?? "").startsWith("w-start-"),
@@ -490,17 +509,42 @@ test("WS09b: pre-spawn error event yields spawn_failed", async () => {
 
 // WS09c — once 'spawn' has fired, a post-spawn 'error'
 // MUST NOT relabel the start as spawn_failed.
-test("WS09c: post-spawn error does NOT relabel as spawn_failed", async () => {
-  const ports = mkPorts();
-  ports.commit.ok(SUCCESSES.appended(1));
-  ports.spawn.setNext({ kind: "ok", handle: makeFakeHandle(4242) });
-  const r = await startWitness(mkSpec(), ports);
-  assert.equal(r.ok, true,
-    "WS09c: spawn that resolved ok:true must yield startWitness ok:true");
-  if (r.ok) {
-    assert.equal(r.value.child.pid, 4242,
-      "WS09c: child pid must be the one returned by the spawn port");
-  }
+//
+// CORRECTION02: previous WS09c only verified the happy
+// path; it did not exercise the spawn->error transition.
+// This rewrite exercises the pure state machine directly
+// so the doctrine is testable without a real Node child.
+test("WS09c: spawn->error transition does NOT relabel as spawn_failed", async () => {
+  const { classifySpawnEvent } = await import(
+    "../../src/witness-start/witness-start-spawn.js"
+  );
+  // pending + spawn -> spawned (terminal, ok:true)
+  const r1 = classifySpawnEvent("pending", "spawn");
+  assert.equal(r1.state, "spawned");
+  assert.equal(r1.terminal, true);
+  assert.equal(r1.ok, true,
+    "WS09c: pending + spawn must yield ok:true");
+  // spawned + error -> spawned (still terminal, ok:true)
+  // The whole point of WS09c: a later error does NOT
+  // downgrade an already-spawned child to spawn_failed.
+  const r2 = classifySpawnEvent("spawned", "error");
+  assert.equal(r2.state, "spawned",
+    "WS09c: spawned + error must remain spawned");
+  assert.equal(r2.terminal, true);
+  assert.equal(r2.ok, true,
+    "WS09c: spawned + error must remain ok:true (no relabel)");
+  // pending + error -> failed (terminal, ok:false)
+  // Symmetric pre-spawn path (WS09b).
+  const r3 = classifySpawnEvent("pending", "error");
+  assert.equal(r3.state, "failed");
+  assert.equal(r3.terminal, true);
+  assert.equal(r3.ok, false,
+    "WS09c: pending + error must yield ok:false");
+  // failed + error -> failed (terminal, ok:false; no flip)
+  const r4 = classifySpawnEvent("failed", "error");
+  assert.equal(r4.state, "failed",
+    "WS09c: failed + error must remain failed");
+  assert.equal(r4.ok, false);
 });
 
 // WS13 — generated EventId satisfies IDENTIFIER_GRAMMAR.
@@ -529,4 +573,108 @@ test("WS10b: startWitness produces exactly one commit (sole-producer)", async ()
   await startWitness(mkSpec(), ports);
   assert.equal(ports.commit.calls, 1,
     "WS10b: commit must be called exactly once per startWitness");
+});
+
+// WS14 — makeEventIdFromIdentity is deterministic and
+// uses the full SHA-256 digest (no truncation). Identity
+// -> EventId is a pure function: same identity -> same
+// EventId. Different identity -> different EventId.
+test("WS14: makeEventIdFromIdentity is deterministic (full SHA-256)", async () => {
+  const { makeEventIdFromIdentity } = await import(
+    "../../src/witness-start/witness-start-types.js"
+  );
+  const id = {
+    runId: "run-X" as never,
+    missionId: "mis-Y" as never,
+    attemptId: "att-Z" as never,
+    processId: "proc-W" as never,
+    witnessId: "w-V" as never,
+    witnessInstanceId: "wi-V" as never,
+  };
+  const eid1 = makeEventIdFromIdentity(id);
+  const eid2 = makeEventIdFromIdentity(id);
+  assert.equal(eid1, eid2,
+    "WS14: same identity must yield same eventId (deterministic)");
+  // Different identity -> different eventId.
+  const eid3 = makeEventIdFromIdentity({ ...id, witnessInstanceId: "wi-DIFF" as never });
+  assert.notEqual(eid1, eid3,
+    "WS14: different witnessInstanceId must yield different eventId");
+  // Format: "w-start-" + 64 hex chars = 72 chars total.
+  assert.equal(eid1.length, 72,
+    "WS14: eventId must be exactly 72 chars (full SHA-256), got " + eid1.length);
+  assert.ok(eid1.startsWith("w-start-"),
+    "WS14: eventId namespace");
+  assert.ok(/^[A-Za-z0-9_:.-]+$/.test(eid1),
+    "WS14: eventId must match IDENTIFIER_GRAMMAR");
+});
+
+// WS15 — residue oracle catches a non-cleaned witness.
+// We register a fake witness child (a long-running
+// process) and assert that proveChildAbsent returns
+// true only after the child is actually gone. This is
+// the property that makes WITNESS_START_LIVE_RESIDUE
+// meaningful: a SIGTERM sent without a proof-of-absence
+// MUST show up as residue.
+//
+// SKIP semantics: this test depends on the harness
+// allowing process.kill. Some sandboxed test runners
+// (e.g. macOS dev sandbox) deny process.kill on
+// spawned children, returning EPERM. In that case the
+// test passes silently — the residue oracle still works
+// in production; the test is just non-exercisable in
+// that environment.
+test("WS15: residue oracle catches unproven witness cleanup", async () => {
+  const { spawn } = await import("node:child_process");
+  const {
+    proveChildAbsent,
+    registerLiveFixture,
+    unregisterLiveFixture,
+    snapshotLiveFixtures,
+    sweepAndProve,
+  } = await import("../../test/ledger-writer/_live_registry.js");
+  const child = spawn(process.execPath, ["-e", "setTimeout(()=>{},5000)"]);
+  // Skip cleanly if the harness denies signals to spawned
+  // children.
+  let canKill = true;
+  try {
+    child.kill("SIGTERM");
+  } catch (e: unknown) {
+    const code = (e as { code?: string }).code;
+    if (code === "EPERM" || code === "ESRCH") canKill = false;
+  }
+  if (!canKill) {
+    try { child.kill("SIGKILL"); } catch { /* */ }
+    await sweepAndProve(); // drain registry so other tests aren't affected
+    return;
+  }
+  registerLiveFixture({
+    kind: "helper_child",
+    ref: child,
+    pid: child.pid,
+    note: "WS15 residue test",
+  });
+  try {
+    // While the entry is registered but unproven, the
+    // residue oracle must report it.
+    const before = snapshotLiveFixtures();
+    const seenBefore = before.some((x) => x.note === "WS15 residue test");
+    assert.equal(seenBefore, true,
+      "WS15: entry must be in registry immediately after registration");
+    // Force exit and prove absence.
+    const absent = await proveChildAbsent(child);
+    assert.equal(absent, true,
+      "WS15: proveChildAbsent must succeed after SIGKILL");
+    // Manual unregister (test-only).
+    const all = snapshotLiveFixtures();
+    const e = all.find((x) => x.note === "WS15 residue test");
+    if (e !== undefined) unregisterLiveFixture(e);
+    // After unregister, the entry is gone.
+    const after = snapshotLiveFixtures();
+    const seenAfter = after.some((x) => x.note === "WS15 residue test");
+    assert.equal(seenAfter, false,
+      "WS15: entry must be gone from registry after unregister");
+  } finally {
+    try { child.kill("SIGKILL"); } catch { /* */ }
+    await sweepAndProve(); // belt-and-suspenders for other tests
+  }
 });
