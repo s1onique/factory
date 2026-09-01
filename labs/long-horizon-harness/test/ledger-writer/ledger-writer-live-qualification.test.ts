@@ -416,18 +416,30 @@ const liveCasesModule = "./_live_cases.js";
  * forbids a fixture that itself violates the
  * doctrine it is asserting.
  *
- * Sequence:
+ * Sequence (CORRECTION09 — TRUTHFUL cleanup):
  *   1. Try the atomic primitive (signal + wait).
  *      If it succeeds, we're done.
- *   2. If it throws (kill EPERM on a sandboxed
- *      host, kill returns false, or kill threw),
- *      fall back to: best-effort raw kill() +
- *      awaitChildClose() to still OBSERVE the
- *      boundary even when the atomic primitive
- *      itself is broken.
- *   3. Any residual rejection is swallowed
- *      (the test body already proved the
- *      negative path; cleanup is best-effort).
+ *   2. If the child already exited (exitCode or
+ *      signalCode is non-null), use the
+ *      observer-only primitive awaitChildClose()
+ *      and let its rejection propagate.
+ *   3. If the atomic primitive throws (kill EPERM
+ *      on a sandboxed host, kill returns false,
+ *      or kill threw), fall back to a best-effort
+ *      raw kill() + awaitChildClose(). The
+ *      observer Promise's rejection is NOT
+ *      swallowed — it surfaces to the caller so
+ *      the fixture is HONEST about whether the
+ *      boundary was actually observed. A
+ *      swallowed-timeout cleanup would lie about
+ *      lifecycle proof; we MUST NOT mix
+ *      best-effort cleanup with proof semantics.
+ *
+ * Renamed conceptually (kept exported name for
+ * callers): this is "best-effort terminate, but
+ * only honest about whether the close was
+ * observed". The doc comment MUST NOT claim
+ * lifecycle proof on the fallback path.
  */
 async function terminateHelperAndAwaitCloseSilent(
   child: import("node:child_process").ChildProcess,
@@ -437,29 +449,24 @@ async function terminateHelperAndAwaitCloseSilent(
   const exited = (child.exitCode !== null && child.exitCode !== undefined) ||
                  (child.signalCode !== null && child.signalCode !== undefined);
   // First try the atomic primitive.
+  if (exited) {
+    await mod.awaitChildClose(child, timeoutMs);
+    return;
+  }
   try {
-    if (exited) {
-      await mod.awaitChildClose(child, timeoutMs);
-      return;
-    }
     await mod.terminateHelperAndAwaitClose(child, timeoutMs);
     return;
   } catch {
     // Fall through to fallback.
   }
   // Fallback: best-effort raw kill + observe
-  // close boundary. This obeys the doctrine:
-  // we still observe 'close' before returning;
-  // we just don't require the atomic primitive
-  // to succeed (it may be broken in this
-  // negative-path test).
-  try { child.kill("SIGKILL"); } catch { /* */ }
-  try {
-    await mod.awaitChildClose(child, timeoutMs);
-  } catch {
-    // Best-effort. The test body already
-    // proved the negative contract.
-  }
+  // close boundary. We DO NOT swallow the
+  // observer's rejection: a fixture that
+  // cannot observe close must surface that
+  // fact instead of presenting a fake-green.
+  try { child.kill("SIGKILL"); } catch { /* kill may itself fail; the observer still runs */ }
+  // Let the observer's rejection propagate.
+  await mod.awaitChildClose(child, timeoutMs);
 }
 
 // (a) Positive: natural-exit child → resolves on
@@ -680,31 +687,127 @@ test("ORACLE03g: terminateHelperAndAwaitClose rejects when kill() throws and lea
     `ORACLE03g: kill throw MUST NOT orphan the observer (unhandledRejection fired: ${g_unhandled instanceof Error ? g_unhandled.message : String(g_unhandled)})`);
 });
 
-// (h) terminateHelperAndAwaitClose: live child
-//     → kill (mocked to succeed) → observe real
-//     'close'. This proves the arm-then-kill
-//     ordering on hosts that permit kill: the
-//     call returns a typed result via the real
-//     boundary, not a synthesised one.
-test("ORACLE03h: terminateHelperAndAwaitClose arms listeners, runs kill, observes real 'close'", async () => {
-  const { spawn } = await import("node:child_process");
-  // The child exits naturally with code 42
-  // after 150 ms. We mock kill() to succeed
-  // (return true) so the production code goes
-  // through the arm-then-kill path. On this
-  // sandbox, the real kill() would throw EPERM
-  // — we deliberately side-step that to test
-  // the positive contract.
-  const c = spawn(process.execPath, ["-e", "setTimeout(() => { process.exit(42); }, 150)"], {
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  (c as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = () => true;
+// (h) terminateHelperAndAwaitClose: kill() that
+//     SYNCHRONOUSLY emits 'close' (the dangerous
+//     case). The listeners MUST be armed BEFORE
+//     kill() is called, otherwise the boundary
+//     event would be lost. We prove this
+//     mechanically by making the fake kill() emit
+//     'close' inline. A kill-before-listeners
+//     implementation would deterministically time
+//     out and FAIL; listeners-before-kill resolves
+//     from the synchronous emit and PASSes.
+test("ORACLE03h: terminateHelperAndAwaitClose must arm listeners BEFORE kill() (synchronous-close ordering)", async () => {
+  const { EventEmitter } = await import("node:events");
+  // Build a ChildProcess-shaped EventEmitter
+  // (we never spawn a real child; kill() is
+  // faked to emit 'close' inline).
+  const c = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
+  // Capture when the listener is armed vs.
+  // when kill() is called so we can prove the
+  // ordering.
+  let listenersArmedAt: number | null = null;
+  let killCalledAt: number | null = null;
+  const originalOnce = c.once.bind(c);
+  (c as unknown as { once: typeof originalOnce }).once = ((
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => {
+    if (event === "close" && listenersArmedAt === null) {
+      listenersArmedAt = Date.now();
+    }
+    return originalOnce(event, listener);
+  }) as typeof originalOnce;
+  (c as unknown as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = () => {
+    killCalledAt = Date.now();
+    // SYNCHRONOUSLY emit 'close' — this is the
+    // exact case a kill-before-listener
+    // implementation cannot survive.
+    c.emit("close", 42, null);
+    return true;
+  };
   const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
   const r = await terminateHelperAndAwaitClose(c, 5000);
   assert.equal(r.kind, "closed",
-    "ORACLE03h: terminateHelperAndAwaitClose must return a typed result via the real 'close' boundary");
+    "ORACLE03h: terminateHelperAndAwaitClose must return a typed result via the synchronous-emit 'close' boundary");
   assert.equal(r.code, 42,
-    `ORACLE03h: typed result must carry the actual child exit code (got code=${r.code}, signal=${r.signal})`);
+    `ORACLE03h: typed result must carry the child exit code from the synchronous emit (got code=${r.code}, signal=${r.signal})`);
+  assert.ok(listenersArmedAt !== null,
+    "ORACLE03h: 'close' listener must have been armed");
+  assert.ok(killCalledAt !== null,
+    "ORACLE03h: kill() must have been called");
+  assert.ok(listenersArmedAt <= killCalledAt,
+    `ORACLE03h: listeners MUST be armed BEFORE kill() (armed=${listenersArmedAt}, kill=${killCalledAt})`);
+});
+
+// (i) terminateHelperAndAwaitClose: kill() that
+//     synchronously emits 'error' AND throws.
+//     The state machine MUST settle exactly ONCE
+//     (one rejection, no unhandled rejection,
+//     no stray listeners). This is the
+//     synchronous-error-during-kill oracle: the
+//     fail() idempotency guarantees both paths
+//     converge on the same promise outcome.
+test("ORACLE03i: terminateHelperAndAwaitClose is idempotent on synchronous error + throw during kill()", async () => {
+  const { EventEmitter } = await import("node:events");
+  // Track listener counts so we can prove the
+  // 'error' listener was removed on cleanup.
+  const c = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
+  let errorListenerCount = 0;
+  const originalOnceErr = c.once.bind(c);
+  (c as unknown as { once: typeof originalOnceErr }).once = ((
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => {
+    if (event === "error") errorListenerCount += 1;
+    return originalOnceErr(event, listener);
+  }) as typeof originalOnceErr;
+  const originalOffErr = c.off.bind(c);
+  (c as unknown as { off: typeof originalOffErr }).off = ((
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => {
+    if (event === "error") errorListenerCount = Math.max(0, errorListenerCount - 1);
+    return originalOffErr(event, listener);
+  }) as typeof originalOffErr;
+  (c as unknown as { kill: (sig?: NodeJS.Signals | number) => boolean }).kill = () => {
+    // Synchronously emit 'error' AND throw —
+    // both paths funnel through fail().
+    c.emit("error", new Error("synthesized synchronous error during kill()"));
+    throw new Error("synthesized kill throw");
+  };
+  const { terminateHelperAndAwaitClose } = await import(liveCasesModule);
+  let unhandled: Error | null = null;
+  const onUnhandled = (e: unknown): void => {
+    if (e instanceof Error) unhandled = e;
+  };
+  process.on("unhandledRejection", onUnhandled);
+  let rejected = false;
+  let msg = "";
+  try {
+    await terminateHelperAndAwaitClose(c, 5000);
+  } catch (e: unknown) {
+    rejected = true;
+    msg = e instanceof Error ? e.message : String(e);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  assert.equal(rejected, true,
+    "ORACLE03i: terminateHelperAndAwaitClose MUST reject exactly once on synchronous error+throw");
+  // The thrown branch wins because fail() is
+  // idempotent: the synchronous 'error' emit
+  // settles first, then the throw's fail() is
+  // a no-op.
+  assert.ok(/'error' before 'close'/.test(msg) || /kill\\(\\) threw/.test(msg),
+    `ORACLE03i: rejection must mention error or kill-throw boundary (got: ${msg})`);
+  const i_unhandled = unhandled as unknown;
+  assert.ok(i_unhandled === null,
+    `ORACLE03i: synchronous error+throw MUST NOT orphan the observer (unhandledRejection fired: ${i_unhandled instanceof Error ? i_unhandled.message : String(i_unhandled)})`);
+  // The 'error' listener MUST have been removed
+  // on cleanup — a leaked listener would mean
+  // the state machine never settled/cleaned up.
+  assert.equal(errorListenerCount, 0,
+    `ORACLE03i: 'error' listener MUST be removed on cleanup (residual count=${errorListenerCount})`);
 });
 
 // (e) Static guard: the LWQ14/LWQ15 case bodies

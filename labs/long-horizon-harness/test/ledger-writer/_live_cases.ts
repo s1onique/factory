@@ -1005,32 +1005,41 @@ export async function awaitChildClose(
  * Combine termination + close-boundary observation
  * into ONE atomic Promise state machine.
  *
- * Sequence:
- *   (a) attempt child.kill("SIGKILL")
- *       throws → reject immediately (no listeners
- *                installed → no synchronous error
- *                event leak)
- *       returns false → reject immediately
- *       returns true → fall through to (b)
- *   (b) install 'close' / 'error' observers +
+ * Sequence (CORRECTION09 — listeners FIRST, kill SECOND):
+ *   (a) install 'close' / 'error' observers +
  *       deadline timer
  *       'close'  → cleanup + resolve
  *       'error'  → cleanup + reject
  *       deadline → cleanup + reject
+ *   (b) attempt child.kill("SIGKILL")
+ *       throws     → idempotent fail() (no-op if
+ *                    already settled by a synchronous
+ *                    'error' emit)
+ *       returns false → idempotent fail()
+ *       returns true → await (a) settles naturally
  *
- * Why install listeners AFTER kill:
- *   Node's ChildProcess.kill() may SYNCHRONOUSLY
- *   emit 'error' (e.g. EPERM). If 'error' is
- *   attached first, the synchronous emit leaks
- *   into our reject path AND the synchronous
- *   throw bubbles out of kill() — producing an
- *   unhandled rejection. Doing kill() first with
- *   no listeners installed means the error
- *   arrives via the throw (which we surface
- *   honestly) or, if kill() returns true, by
- *   the time listeners are attached the only
- *   possible async 'error' is one that arrives
- *   AFTER kill() succeeded.
+ * Why listeners FIRST (CORRECTION09):
+ *   Per Node's documented ChildProcess contract,
+ *   a successful kill() return only proves the
+ *   OS accepted the signal — NOT that the
+ *   process is still alive. After a successful
+ *   kill(), the child can terminate synchronously
+ *   and Node can emit 'close' before our next
+ *   statement attaches a listener, losing the
+ *   boundary event we are awaiting. Doing kill()
+ *   first with no listeners installed reopens
+ *   the exact race CORRECTION06/07 removed.
+ *
+ * Why ONE idempotent state machine (CORRECTION09):
+ *   kill() may synchronously emit 'error' AND
+ *   synchronously throw (e.g. EPERM). If we tried
+ *   to settle once on throw and again on
+ *   synchronous 'error', we would either
+ *   double-reject (an unhandled rejection) or
+ *   leave a stray listener. A single settled
+ *   flag + idempotent fail() makes both paths
+ *   converge on the same promise outcome with
+ *   exactly one resolve/reject.
  *
  * The case body MUST let the rejection propagate;
  * no try/catch around the call. A deadline that
@@ -1041,33 +1050,6 @@ export async function terminateHelperAndAwaitClose(
   child: import("node:child_process").ChildProcess,
   timeoutMs = 2000,
 ): Promise<ChildCloseResult> {
-  // (a) Synchronous kill attempt. No listeners
-  // installed, so a synchronous 'error' emit
-  // would crash Node — we catch the throw and
-  // surface it as a structured rejection.
-  let accepted = false;
-  let killError: unknown;
-  try {
-    accepted = child.kill("SIGKILL");
-  } catch (e: unknown) {
-    killError = e;
-  }
-  if (killError !== undefined) {
-    const msg = killError instanceof Error ? killError.message : String(killError);
-    throw new Error(
-      `terminateHelperAndAwaitClose: kill() threw before 'close' could be observed: ${msg}`,
-    );
-  }
-  if (!accepted) {
-    throw new Error(
-      "terminateHelperAndAwaitClose: kill() returned false (signal not accepted by OS)",
-    );
-  }
-
-  // (b) Async observers + deadline. ONE promise,
-  // ONE cleanup, ONE state machine. Kill failure
-  // already surfaced above; from here, only
-  // 'close', 'error', or deadline can settle.
   return new Promise<ChildCloseResult>((resolve, reject) => {
     let settled = false;
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -1081,7 +1063,7 @@ export async function terminateHelperAndAwaitClose(
       child.off("error", onError);
     }
 
-    const onClose = (
+    const succeed = (
       code: number | null,
       signal: NodeJS.Signals | null,
     ): void => {
@@ -1091,30 +1073,53 @@ export async function terminateHelperAndAwaitClose(
       resolve({ kind: "closed", code, signal });
     };
 
-    const onError = (err: Error): void => {
+    const fail = (err: Error): void => {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error(
+      reject(err);
+    };
+
+    const onClose = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
+      succeed(code, signal);
+    };
+
+    const onError = (err: Error): void => {
+      fail(new Error(
         `terminateHelperAndAwaitClose: 'error' before 'close' (fixture boundary violated): ${err.message}`,
       ));
     };
 
-    // Arm listeners AFTER the synchronous kill
-    // call so we cannot lose the boundary to a
-    // synchronous error emit, and so the
-    // synchronous kill-throw / kill-false cannot
-    // orphan the observer state.
+    // (a) Arm observers + deadline BEFORE the kill
+    // call so a synchronous 'close' or 'error'
+    // emit during kill() cannot be lost.
     child.once("close", onClose);
     child.once("error", onError);
     timeoutHandle = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error(
+      fail(new Error(
         `terminateHelperAndAwaitClose: deadline ${timeoutMs}ms expired before 'close' was observed (fixture boundary violated)`,
       ));
     }, timeoutMs);
+
+    // (b) Issue the kill. Any synchronous throw
+    // or false return routes through fail(); if
+    // a synchronous 'error' emit already settled
+    // the promise, fail() is a no-op.
+    try {
+      if (!child.kill("SIGKILL")) {
+        fail(new Error(
+          "terminateHelperAndAwaitClose: kill() returned false (signal not accepted by OS)",
+        ));
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      fail(new Error(
+        `terminateHelperAndAwaitClose: kill() threw before 'close' could be observed: ${msg}`,
+      ));
+    }
   });
 }
 
