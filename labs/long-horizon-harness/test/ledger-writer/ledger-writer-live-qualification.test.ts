@@ -300,7 +300,22 @@ for (const c of LEDGER_WRITER_LIVE_CASES) {
 after(async () => {
   const failed = await sweepAndProve();
   counters.residue = failed.length + liveFixtureRegistrySize();
+  // CORRECTION02: emit a typed breakdown of residue
+  // observations so the operator can classify the
+  // remaining failures (env denial vs. ownership
+  // defect) instead of seeing one opaque count.
+  const breakdown: Record<string, number> = {};
+  for (const e of failed) {
+    const obs = (e as { observation?: string }).observation ?? "unknown";
+    breakdown[obs] = (breakdown[obs] ?? 0) + 1;
+  }
   emitMatrix();
+  if (Object.keys(breakdown).length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `LEDGER_WRITER_RESIDUE_BREAKDOWN=${JSON.stringify(breakdown)}`,
+    );
+  }
   const r = qualifies(counters, STRICT);
   if (!r.ok) {
     const msg = `LEDGER_WRITER_QUALIFICATION_DISPOSITION=FAIL: ${r.reasons.join("; ")}`;

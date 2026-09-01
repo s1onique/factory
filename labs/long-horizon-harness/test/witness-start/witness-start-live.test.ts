@@ -74,7 +74,12 @@ async function terminateAndProveWitness(
   const child = entry.ref as unknown as import("node:child_process").ChildProcess;
   try { child.kill("SIGTERM"); } catch { /* */ }
   await new Promise((res) => setTimeout(res, 100));
-  const absent = await proveChildAbsent(child);
+  const r = await proveChildAbsent(child);
+  // Only "absent" clears the registry. All other
+  // observations — alive, permission_denied,
+  // identity_unavailable, cleanup_failed — retain
+  // the fixture so the strict lane reports residue.
+  const absent = r.kind === "absent";
   if (absent) {
     unregisterLiveFixture(entry);
   }
@@ -507,8 +512,22 @@ after(async () => {
   if (STRICT && residue > 0) {
     fail += 1;
   }
+  // CORRECTION02: typed residue breakdown so the
+  // operator can tell env denial apart from a real
+  // ownership defect.
+  const breakdown: Record<string, number> = {};
+  for (const e of failed) {
+    const obs = (e as { observation?: string }).observation ?? "unknown";
+    breakdown[obs] = (breakdown[obs] ?? 0) + 1;
+  }
   // eslint-disable-next-line no-console
   console.log(`WITNESS_START_LIVE_RESIDUE=${residue}`);
+  if (Object.keys(breakdown).length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `WITNESS_START_LIVE_RESIDUE_BREAKDOWN=${JSON.stringify(breakdown)}`,
+    );
+  }
   if (residue > 0) {
     // eslint-disable-next-line no-console
     console.log(
@@ -528,6 +547,7 @@ after(async () => {
     failed: fail,
     skipped: skip,
     residue,
+    residueBreakdown: breakdown,
     disposition,
   });
   // eslint-disable-next-line no-console

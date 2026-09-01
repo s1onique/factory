@@ -166,65 +166,122 @@ export async function proveUnlink(p: string): Promise<boolean> {
 }
 
 /**
- * (CORRECTION02/CORRECTION03) Probe the OS-level
- * process existence of `child.pid` and SIGKILL it
- * until the kernel reports ESRCH. This is the only
- * authority on "the process is gone"; Node's
- * `child.exitCode` / `child.signalCode` may stay null
- * indefinitely for detached children when the parent
- * loses visibility into the exit (libuv may not
- * receive SIGCHLD for an immediate SIGKILL on a
- * detached child re-parented to launchd).
+ * Typed residue probe for a child handle. Returns a
+ * discriminator so the strict lane can distinguish:
  *
- * Returns true iff the kernel reports the PID is
- * absent. The bounded budget prevents an infinite
- * wait when the OS itself denies us visibility.
+ *   - "absent"              — kernel ESRCH observed.
+ *   - "alive"               — kernel says it exists,
+ *                              cleanup could not remove
+ *                              it within budget.
+ *   - "permission_denied"   — kill(0) returned EPERM;
+ *                              existence is unknown but
+ *                              permission is denied.
+ *                              MUST be treated as
+ *                              residue (NOT absent).
+ *   - "identity_unavailable"— the handle exposes no
+ *                              usable PID; absence
+ *                              CANNOT be proven.
+ *                              MUST be treated as
+ *                              residue (NOT absent).
+ *   - "cleanup_failed"      — the cleanup signal could
+ *                              not be delivered (EPERM
+ *                              on signal, not on probe)
+ *                              and the kernel still
+ *                              reports the PID alive.
+ *
+ * The residue oracle is a state machine with two
+ * non-overlapping budget phases:
+ *
+ *   Phase 1 (OBSERVE): bounded cheap kernel probes
+ *     via kill(pid, 0). ESRCH exits with "absent".
+ *     EPERM exits with "permission_denied".
+ *
+ *   Phase 2 (CLEANUP): bounded SIGKILL attempts using
+ *     the child handle. PID-reuse safe: we never
+ *     signal the positive PID after Node has already
+ *     observed the exit (that positive integer is
+ *     then at risk of being reassigned to an
+ *     unrelated process).
+ *
+ * Negative-evidence law: missing/invalid PID is
+ * NEVER "absent" — it is "identity_unavailable" and
+ * counts as residue.
  */
+export type ProveChildAbsentResult =
+  | { readonly kind: "absent" }
+  | { readonly kind: "alive" }
+  | { readonly kind: "permission_denied"; readonly errno: string }
+  | { readonly kind: "identity_unavailable" }
+  | { readonly kind: "cleanup_failed"; readonly errno: string };
+
 export async function proveChildAbsent(
   child: OwnedChildPort,
-): Promise<boolean> {
+): Promise<ProveChildAbsentResult> {
   const pid = child.pid;
-  if (typeof pid !== "number" || pid <= 0) {
-    // No PID to probe; treat as already absent.
-    return true;
+  if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) {
+    return { kind: "identity_unavailable" };
   }
-  // Short-circuit if Node already saw the exit AND
-  // the kernel agrees (e.g. parent and child are in
-  // the same session).
-  if (nodeChildExited(child) && processGone(pid)) {
-    return true;
+
+  // Phase 1: OBSERVE. Cheap kernel probes only.
+  const observeDeadline = Date.now() + 250;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const r = kernelProbe(pid);
+    if (r.kind === "absent") return { kind: "absent" };
+    if (r.kind === "permission_denied") {
+      return { kind: "permission_denied", errno: r.errno };
+    }
+    if (Date.now() >= observeDeadline) break;
+    await new Promise((res) => setTimeout(res, 25));
   }
-  const deadlineMs = Date.now() + 5000;
-  // Phase 1: cheap kernel probe (the writer may have
-  // died on its own; we just need the kernel to
-  // report ESRCH).
-  while (Date.now() < deadlineMs) {
-    if (processGone(pid)) return true;
-    await new Promise((r) => setTimeout(r, 25));
+
+  // Phase 2: CLEANUP. PID-reuse safe.
+  const nodeObservedExit = nodeChildExited(child);
+  if (nodeObservedExit) {
+    // Node already saw the exit; the positive PID may
+    // have been reassigned. Re-probe once for the
+    // reap; otherwise classify as "alive" — we cannot
+    // prove absence from positive-PID evidence alone.
+    const r = kernelProbe(pid);
+    if (r.kind === "absent") return { kind: "absent" };
+    if (r.kind === "permission_denied") {
+      return { kind: "permission_denied", errno: r.errno };
+    }
+    return { kind: "alive" };
   }
-  // Phase 2: send SIGKILL repeatedly until the
-  // kernel reports ESRCH or the deadline expires.
-  // Each round gives the kernel a chance to deliver
-  // the signal and propagate the reaped state.
-  while (Date.now() < deadlineMs) {
+
+  // Node has NOT seen the exit. The PID still uniquely
+  // identifies OUR child. Attempt bounded SIGKILL.
+  const cleanupDeadline = Date.now() + 5000;
+  let lastSignalErrno: string | null = null;
+  while (Date.now() < cleanupDeadline) {
     try {
       child.kill("SIGKILL");
-    } catch {
-      // EPERM/ESRCH: re-probe to distinguish.
+      lastSignalErrno = null;
+    } catch (e: unknown) {
+      lastSignalErrno = errnoOf(e);
     }
-    if (processGone(pid)) return true;
-    await new Promise((r) => setTimeout(r, 50));
+    const r = kernelProbe(pid);
+    if (r.kind === "absent") return { kind: "absent" };
+    if (r.kind === "permission_denied") {
+      return { kind: "permission_denied", errno: r.errno };
+    }
+    if (nodeChildExited(child)) {
+      // Node saw the exit between our signal and probe.
+      return { kind: "absent" };
+    }
+    await new Promise((res) => setTimeout(res, 50));
   }
-  return processGone(pid);
+  if (lastSignalErrno !== null) {
+    return { kind: "cleanup_failed", errno: lastSignalErrno };
+  }
+  return { kind: "alive" };
 }
 
 /**
  * Structural probe of Node's ChildProcess exit
- * observation. Returns true iff Node has observed
- * an exit. Note: for detached children the parent
- * may never observe an exit; in that case this
- * returns false and we fall through to the kernel
- * probe in `processGone`.
+ * observation. Used to gate the PID-reuse-safe
+ * cleanup branch.
  */
 function nodeChildExited(child: OwnedChildPort): boolean {
   const c = child as unknown as {
@@ -235,34 +292,59 @@ function nodeChildExited(child: OwnedChildPort): boolean {
     (c.signalCode !== null && c.signalCode !== undefined);
 }
 
+type KernelProbeResult =
+  | { readonly kind: "absent" }
+  | { readonly kind: "alive" }
+  | { readonly kind: "permission_denied"; readonly errno: string };
+
 /**
- * Kernel probe via `kill(pid, 0)`.
+ * Kernel probe via `kill(pid, 0)`. No signal is sent.
+ *
  *   - returns (no error) → process exists, we have
- *     permission to signal it (residue = alive).
+ *     permission to signal it (alive).
  *   - throws ESRCH        → process does not exist.
  *   - throws EPERM        → process exists but we lack
- *     permission to signal it. On macOS this is the
- *     sandbox case for a re-parented child whose
- *     owning session has different credentials. We
- *     MUST count it as alive — only ESRCH proves
- *     absence.
+ *     permission to signal it. Existence is UNKNOWN
+ *     from our vantage — we MUST NOT classify as
+ *     "absent". This is the honest read; we do not
+ *     require proof of session/UID mismatch to record
+ *     the observation.
+ *   - throws other        → treat as unknown, conservative
+ *     "alive". Caller's state machine will retry.
  */
-function processGone(pid: number): boolean {
+function kernelProbe(pid: number): KernelProbeResult {
   try {
     process.kill(pid, 0);
-    return false;
+    return { kind: "alive" };
   } catch (e: unknown) {
-    const code =
-      typeof e === "object" && e !== null && "code" in e
-        ? (e as { code: unknown }).code
-        : undefined;
-    return code === "ESRCH";
+    const code = errnoOf(e);
+    if (code === "ESRCH") return { kind: "absent" };
+    if (code === "EPERM") {
+      return { kind: "permission_denied", errno: code };
+    }
+    return { kind: "alive" };
   }
+}
+
+function errnoOf(e: unknown): string | null {
+  if (typeof e === "object" && e !== null && "code" in e) {
+    const c = (e as { code: unknown }).code;
+    return typeof c === "string" ? c : null;
+  }
+  return null;
 }
 
 /**
  * Sweep all registered fixtures. Returns the residue
  * list (entries that could NOT be proven cleaned).
+ *
+ * CORRECTION02: the per-child probe now returns a
+ * typed result. Only `kind === "absent"` clears the
+ * entry. All other kinds — alive, permission_denied,
+ * identity_unavailable, cleanup_failed — count as
+ * residue and the corresponding entry is retained in
+ * the failure list. The kind itself is recorded in
+ * the matrix stdout for later triage.
  */
 export async function sweepAndProve(): Promise<ReadonlyArray<LiveFixtureEntry>> {
   const failed: LiveFixtureEntry[] = [];
@@ -270,15 +352,24 @@ export async function sweepAndProve(): Promise<ReadonlyArray<LiveFixtureEntry>> 
     const e = registry[i];
     if (e === undefined) continue;
     let proved = false;
+    let observation: string | null = null;
     if (e.kind === "writer_child" || e.kind === "helper_child") {
       const child = e.ref as OwnedChildPort;
-      proved = await proveChildAbsent(child);
+      const r = await proveChildAbsent(child);
+      observation = r.kind;
+      proved = r.kind === "absent";
     } else if (e.path !== undefined) {
       proved = await proveUnlink(e.path);
+      observation = proved ? "absent" : "alive";
     }
     if (proved) {
       unregisterLiveFixture(e);
     } else {
+      // Stash the observation on the entry so the
+      // matrix emitter can show the typed breakdown.
+      if (observation !== null) {
+        (e as { observation?: string }).observation = observation;
+      }
       failed.push(e);
     }
   }

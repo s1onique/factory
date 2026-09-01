@@ -830,9 +830,9 @@ test("WS15b: real-child residue oracle (may SKIP)", async (t) => {
     const before = snapshotLiveFixtures();
     assert.ok(before.some((x) => x.note === marker),
       "WS15b: entry must be in registry immediately after registration");
-    const absent = await proveChildAbsent(child);
-    assert.equal(absent, true,
-      "WS15b: proveChildAbsent must succeed after SIGKILL");
+    const r = await proveChildAbsent(child);
+    assert.equal(r.kind, "absent",
+      `WS15b: proveChildAbsent must report 'absent' after SIGKILL; got ${JSON.stringify(r)}`);
     const all = snapshotLiveFixtures();
     const e = all.find((x) => x.note === marker);
     if (e !== undefined) unregisterLiveFixture(e);
