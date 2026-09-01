@@ -379,6 +379,86 @@ test("ORACLE02: qualification source must not contain the 'uninitialised' sentin
   }
 });
 
+// ORACLE03 — durable fixture invariant (CORRECTION06).
+//
+// LWQ14 and LWQ15 each spawn a helper child, register
+// it, then must NOT return until the child has
+// actually closed. The contract is:
+//
+//   request termination → await 'close' → then return
+//
+// We verify the contract two ways:
+//   (a) awaitChildClose resolves only after the
+//       child's 'close' event has fired (or after
+//       a defensive timeout — we cannot wait
+//       forever for a runaway child).
+//   (b) The lwq14/lwq15 case bodies call
+//       awaitChildClose(c) before the case returns;
+//       a static grep catches any revert.
+test("ORACLE03: awaitChildClose waits for the child lifecycle boundary", async () => {
+  const { spawn } = await import("node:child_process");
+  // Spawn a trivial child that exits on its own.
+  // We don't signal it (some sandboxes block
+  // parent→child signaling); we just observe that
+  // awaitChildClose resolves only after Node has
+  // observed the child's natural exit. The contract
+  // being proven is: awaitChildClose awaits the
+  // lifecycle boundary it owns, period.
+  const c = spawn(process.execPath, ["-e", "setTimeout(() => {}, 50)"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  const start = Date.now();
+  const { awaitChildClose } = await import("./_live_cases.js");
+  await awaitChildClose(c, 3000);
+  const elapsed = Date.now() - start;
+  // After awaitChildClose returns, Node MUST have
+  // observed the exit (the lifecycle boundary it
+  // owns).
+  assert.equal(
+    c.exitCode !== null || c.signalCode !== null,
+    true,
+    `ORACLE03: child exit must be observed by Node before awaitChildClose resolves (elapsed=${elapsed}ms, exitCode=${c.exitCode}, signalCode=${c.signalCode})`,
+  );
+  // And the kernel must have reaped it. Allow a
+  // one-tick retry window for hosts where 'close'
+  // precedes the kernel reap by microseconds.
+  let alive = true;
+  try { process.kill(c.pid ?? -1, 0); } catch { alive = false; }
+  if (alive) {
+    await new Promise((r) => setImmediate(r));
+    try { process.kill(c.pid ?? -1, 0); alive = true; } catch { alive = false; }
+  }
+  assert.equal(alive, false,
+    `ORACLE03: kernel must reap the child after awaitChildClose resolves (pid=${c.pid}, elapsed=${elapsed}ms)`);
+});
+
+test("ORACLE03b: LWQ14 and LWQ15 case bodies call awaitChildClose before returning", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const url = await import("node:url");
+  const src = await fs.promises.readFile(
+    path.join(path.dirname(url.fileURLToPath(import.meta.url)), "_live_cases.ts"),
+    "utf8",
+  );
+  // Slice the LWQ14 and LWQ15 case bodies. Each
+  // must contain `await awaitChildClose(c)` AFTER
+  // the `c.kill` call.
+  const lwq14Start = src.indexOf("const LWQ14: LiveCase");
+  const lwq15Start = src.indexOf("const LWQ15: LiveCase");
+  const lwq14End = lwq15Start > 0 ? lwq15Start : src.length;
+  const lwq15End = src.length;
+  const lwq14 = src.slice(lwq14Start, lwq14End);
+  const lwq15 = src.slice(lwq15Start, lwq15End);
+  for (const [name, body] of [["LWQ14", lwq14], ["LWQ15", lwq15]] as const) {
+    const killIdx = body.indexOf("c.kill(");
+    const awaitIdx = body.indexOf("await awaitChildClose(");
+    assert.ok(
+      killIdx >= 0 && awaitIdx > killIdx,
+      `ORACLE03b: ${name} must call 'await awaitChildClose(c)' AFTER 'c.kill(' (killIdx=${killIdx}, awaitIdx=${awaitIdx})`,
+    );
+  }
+});
+
 // --------------------------------------------------------------------
 // Live case registration — one test per LWQ case.
 // --------------------------------------------------------------------
@@ -460,6 +540,25 @@ after(async () => {
     // eslint-disable-next-line no-console
     console.log(
       `LEDGER_WRITER_RESIDUE_BREAKDOWN=${JSON.stringify(breakdown)}`,
+    );
+    // CORRECTION06: identity emitter — print the
+    // actual residue entries (kind, pid, note,
+    // observation, path) so the operator can tell
+    // whether the surviving entry is a writer child
+    // from a previous case or a helper child that
+    // has not yet finished kernel teardown. This is
+    // a diagnostic; it does NOT change behavior.
+    // eslint-disable-next-line no-console
+    console.log(
+      `LEDGER_WRITER_RESIDUE_ENTRIES=${JSON.stringify(
+        failed.map((e) => ({
+          kind: e.kind,
+          pid: e.pid,
+          note: e.note,
+          path: e.path,
+          observation: (e as { observation?: string }).observation ?? null,
+        })),
+      )}`,
     );
   }
   const r = qualifies(counters, STRICT);

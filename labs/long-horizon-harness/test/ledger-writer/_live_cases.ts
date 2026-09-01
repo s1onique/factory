@@ -886,6 +886,58 @@ const LWQ13: LiveCase = {
 // helper child processes)
 // --------------------------------------------------------------------
 
+/**
+ * CORRECTION06: durable fixture invariant.
+ *
+ * A case owning a ChildProcess MUST NOT report cleanup
+ * complete until it observes the subprocess lifecycle
+ * boundary it owns. Concretely:
+ *
+ *   request termination (signal)
+ *   → await `'close'`  (after exit + stdio closure)
+ *   → then return
+ *
+ * The previous contract —
+ *   `c.kill("SIGKILL"); return;`
+ * — returns the moment the signal is dispatched. The
+ * kernel may still hold the pid for a few ms (zombie,
+ * in-flight stdio drain, or even just SIGKILL delivery
+ * latency). When the after-suite residue sweep runs
+ * immediately after the case returns, it observes
+ * `kill(pid, 0)` → alive → records residue for a child
+ * the case has in fact killed. The case body has the
+ * ownership and the responsibility; sleeping inside the
+ * sweep would only relocate the race, not close it.
+ *
+ * This helper centralises the boundary so every helper
+ * case uses the same shutdown contract.
+ *
+ * Exported so ORACLE03 can lock in the contract.
+ */
+export async function awaitChildClose(child: import("node:child_process").ChildProcess, timeoutMs = 2000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // Already exited; close may still be pending if
+    // stdio hasn't drained yet. Wait for it anyway
+    // so we observe the boundary Node owns.
+  }
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+    child.once("error", () => resolve());
+  });
+  // If the child is already past 'exit', close may
+  // have already fired before our listener attached.
+  // In that case resolve immediately; the kernel
+  // teardown is the authoritative boundary.
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // give Node one tick to drain
+    await new Promise((r) => setImmediate(r));
+  }
+  await Promise.race([
+    closed,
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
 const LWQ14: LiveCase = {
   id: "LWQ14",
   title: "SOCK05 WHO timeout → unknown_socket",
@@ -913,7 +965,10 @@ const LWQ14: LiveCase = {
       if (probe.ok) assert.equal(probe.value, "unknown_socket");
       const stat = await fs.lstat(sp);
       assert.equal(stat.isSocket(), true);
+      // CORRECTION06: signal + await 'close' so the
+      // after-suite sweep sees pid_absent, not alive.
       try { c.kill("SIGKILL"); } catch { /* */ }
+      await awaitChildClose(c);
     } finally {
       await proveUnlink(tmp);
     }
@@ -955,7 +1010,9 @@ const LWQ15: LiveCase = {
       if (probe.ok) assert.equal(probe.value, "unknown_socket");
       const stat = await fs.lstat(sp);
       assert.equal(stat.isSocket(), true);
+      // CORRECTION06: signal + await 'close'.
       try { c.kill("SIGKILL"); } catch { /* */ }
+      await awaitChildClose(c);
     } finally {
       await proveUnlink(tmp);
     }
