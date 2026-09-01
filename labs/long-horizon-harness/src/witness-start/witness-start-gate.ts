@@ -89,6 +89,13 @@ function mapLedgerError(e: WitnessLedgerError): IntentPersistenceFailure {
       return { kind: "writer_unavailable", socketPath: e.socketPath };
     case "writer_crashed":
       return { kind: "writer_crashed", message: e.message };
+    case "writer_busy":
+      // CORRECTION06: backpressure is its own failure class.
+      // The witness-ledger adapter maps
+      // writer_busy_retries_exhausted to writer_busy here.
+      // The gate fails closed; future revisions can opt
+      // to retry at this layer.
+      return { kind: "writer_busy", reason: e.reason };
     case "invalid_envelope":
       return { kind: "invalid_envelope", reason: e.reason };
     case "conflicting_commit":

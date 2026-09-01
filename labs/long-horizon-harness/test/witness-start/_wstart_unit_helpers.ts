@@ -256,6 +256,14 @@ export const FAILURES = {
     kind: "transport_rejected",
     reason: r,
   }),
+  writer_busy: (r = "writer busy"): IntentPersistenceFailure => ({
+    kind: "writer_busy",
+    reason: r,
+  }),
+  writer_rejected: (r = "append.commitId grammar violation"): IntentPersistenceFailure => ({
+    kind: "writer_rejected",
+    reason: r,
+  }),
 };
 
 export const SUCCESSES = {

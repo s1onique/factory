@@ -40,6 +40,7 @@ import { makeCommitId } from "../ledger-writer/ledger-writer-types.js";
 export type WitnessLedgerError =
   | { readonly kind: "writer_unavailable"; readonly socketPath: string }
   | { readonly kind: "writer_crashed"; readonly message: string }
+  | { readonly kind: "writer_busy"; readonly reason: string }
   | { readonly kind: "invalid_envelope"; readonly reason: string }
   | { readonly kind: "conflicting_commit"; readonly message: string }
   | { readonly kind: "append_failed"; readonly message: string }
@@ -145,13 +146,18 @@ export async function appendWitnessEvidence(args: {
       };
     }
     if (r.error.kind === "writer_busy_retries_exhausted") {
-      // Writer is alive but persistently busy — not a
-      // crash, not a rejection. Surface as writer_rejected
-      // with a clear reason rather than writer_crashed.
+      // CORRECTION06 (backpressure is not rejection):
+      // the writer is alive and acknowledged the request,
+      // but is persistently busy. This is NOT a semantic
+      // rejection (writer_rejected) and NOT a transport
+      // disappearance (writer_crashed). Map to writer_busy
+      // so the gate can decide whether to back off, retry,
+      // or fail closed — without misclassifying temporary
+      // backpressure as permanent failure.
       return {
         ok: false,
         error: {
-          kind: "writer_rejected",
+          kind: "writer_busy",
           reason: r.error.message,
         },
       };
@@ -159,6 +165,10 @@ export async function appendWitnessEvidence(args: {
     // True transport-level failures: socket missing,
     // connect failed, write failed, frame decode failed,
     // timeout. The writer is presumed gone / unreachable.
+    // (A timeout proves "unreachable within the observation
+    // budget", not crash — but the gate must treat it as
+    // a failed commit because we cannot observe the writer
+    // right now.)
     return {
       ok: false,
       error: { kind: "writer_crashed", message: r.error.kind },
