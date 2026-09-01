@@ -24,7 +24,6 @@ import {
   countStartIntents,
   DEFAULT_LIVE_MISSION_ID,
   DEFAULT_LIVE_RUN_ID,
-  findReadyForInstance,
   findStartIntent,
   mkLiveSpec,
   mkTmp,
@@ -34,6 +33,10 @@ import {
   type LiveRunHandle,
 } from "./_wstart_live_helpers.js";
 import { ledgerWriterSocketPath } from "../../src/ledger-writer/ledger-writer-process.js";
+import {
+  awaitWitnessReady,
+  type ExpectedBinding,
+} from "./witness-start-readiness.js";
 import {
   proveChildAbsent,
   registerWitnessSpawn,
@@ -228,9 +231,9 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
     } else {
       assert.fail("WSTART-LIVE01: start must succeed on a live run; got " + JSON.stringify(r.failure));
     }
-    // Give the witness a moment to write witness_ready
-    // before reading the ledger.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // CORRECTION02: the readiness barrier below
+    // (awaitWitnessReady) handles its own polling and
+    // deadline; no 200ms grace sleep is needed.
     const ledger = await readLedger(run.runDir);
     // SOLE INTENT: exactly one witness_start_requested
     // (the supervisor's). The witness process must NOT
@@ -271,15 +274,45 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
       assert.equal(wiId, r.value.identity.witnessInstanceId,
         "WSTART-LIVE01: committed witness_instance_id must equal returned witnessInstanceId");
     }
-    // Corresponding witness_ready for the same witness
-    // instance, if it has been written by the time we read.
-    const ready = findReadyForInstance(ledger, wiId as string);
-    if (ready !== null) {
-      const readyPayload = ready["witness_evidence"] as Record<string, unknown>;
-      assert.equal(readyPayload["witness_id"], "w-start-live",
-        "WSTART-LIVE01: witness_ready.witness_id must equal suggestedWitnessId");
-      assert.equal(readyPayload["witness_instance_id"], wiId,
-        "WSTART-LIVE01: witness_ready.witness_instance_id must equal intent's witness_instance_id");
+    // CORRECTION02 (real readiness proof): the soft
+    // check ("if witness_ready happens to exist in the
+    // ledger") is replaced with a HARD readiness barrier.
+    // We MUST observe a durable witness_ready verified
+    // against the FULL identity (runId, missionId,
+    // witnessId, witnessInstanceId, socketPath) before
+    // LIVE01 PASS. spawn != usable bootstrap; this is
+    // the proof that the real witness reached real
+    // readiness.
+    if (!r.ok) {
+      assert.fail("WSTART-LIVE01: start must succeed before readiness check");
+      return; // unreachable; the assert.fail throws
+    }
+    const expectedBinding: ExpectedBinding = {
+      runId: run.runId,
+      missionId: run.missionId,
+      witnessId: "w-start-live",
+      witnessInstanceId: r.value.identity.witnessInstanceId as string,
+      socketPath: spec.socketPath as string,
+    };
+    const readyR = await awaitWitnessReady({
+      runDir: run.runDir,
+      expected: expectedBinding,
+      child: r.value.child,
+      deadlineMs: 5000,
+      pollIntervalMs: 25,
+    });
+    assert.equal(readyR.kind, "ready",
+      "WSTART-LIVE01: real durable witness_ready MUST be observed for " +
+      "the FULL expected identity within the deadline " +
+      "(spawn != usable bootstrap; got: " + JSON.stringify(readyR) + ")");
+    if (readyR.kind === "ready" && intent !== null) {
+      // Sequence ordering: witness_ready.seq MUST be >
+      // witness_start_requested.seq (durability law:
+      // ready cannot precede intent).
+      const intentSeq = intent["sequence"] as number;
+      assert.ok(readyR.sequence > intentSeq,
+        "WSTART-LIVE01: ready.seq (" + readyR.sequence + ") MUST be > " +
+        "intent.seq (" + intentSeq + ")");
     }
     pass += 1;
   } catch (e) {

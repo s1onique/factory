@@ -45,6 +45,16 @@ import {
  *      runWitnessProcess; the entry-point helper catches
  *      the sentinel and lets the event loop drain.
  *
+ * When the failure happens AFTER bindWitnessServer()
+ * (e.g. the witness_ready durability ack failed), the
+ * witness still owns a listening UDS. The sentinel
+ * alone is insufficient — a listening net.Server keeps
+ * the event loop alive, so process.exitCode alone would
+ * NOT cause exit. The server.close() + socket-unlink
+ * MUST happen first. bootstrapFailWithServer handles
+ * the post-bind failure mode; bootstrapFail is for
+ * pre-bind failures only.
+ *
  * The harness's bounded drain on the child stdio pipes
  * (in `witness-start-spawn.ts`) is what guarantees the
  * parent's pipe reader sees the full diagnostic.
@@ -60,6 +70,46 @@ class BootstrapFailureSentinel extends Error {
 function bootstrapFail(message: string, code: number): never {
   process.stderr.write(message);
   if (!message.endsWith("\n")) process.stderr.write("\n");
+  process.exitCode = code;
+  throw new BootstrapFailureSentinel(code);
+}
+
+/**
+ * Post-bind bootstrap-failure helper. Closes the
+ * listening UDS and unlinks the socket file BEFORE
+ * raising the sentinel; without this the server
+ * keeps the event loop alive and the UDS remains
+ * observable as a zombie authority endpoint.
+ *
+ * Returns a Promise<never> that resolves to a thrown
+ * BootstrapFailureSentinel after the UDS teardown is
+ * drained. Callers MUST `await` this so the sentinel
+ * propagates as a rejection up to the runWitnessProcess
+ * outer catch.
+ *
+ * Teardown sequence:
+ *   1. process.stderr.write(diagnostic) — sync, complete
+ *      before exit code assignment.
+ *   2. server.close() — sync, marks the server as no
+ *      longer accepting connections.
+ *   3. await safeRemoveSocketFile(socketPath) — async,
+ *      must complete before exit.
+ *   4. process.exitCode = code.
+ *   5. throw BootstrapFailureSentinel (the await site
+ *      receives a rejected promise, the outer catch
+ *      in runWitnessProcess swallows it).
+ */
+async function bootstrapFailWithServer(
+  message: string,
+  code: number,
+  server: import("node:net").Server,
+  socketPath: string,
+): Promise<never> {
+  process.stderr.write(message);
+  if (!message.endsWith("\n")) process.stderr.write("\n");
+  server.close();
+  const { safeRemoveSocketFile } = await import("./witness-server.js");
+  await safeRemoveSocketFile(socketPath);
   process.exitCode = code;
   throw new BootstrapFailureSentinel(code);
 }
@@ -222,7 +272,12 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
     },
   });
   if (!readyAck.ok) {
-    bootstrapFail(`witness: ready durability failed`, 1);
+    await bootstrapFailWithServer(
+      `witness: ready durability failed`,
+      1,
+      server,
+      args.socketPath,
+    );
   }
   ctx = {
     ...ctx,

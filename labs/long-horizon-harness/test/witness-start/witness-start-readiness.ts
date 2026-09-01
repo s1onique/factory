@@ -12,22 +12,39 @@
  * Race outcomes (priority order):
  *   - ready
  *       (durable witness_ready verified against the
- *        FULL expected identity, not just instance id)
+ *        FULL expected identity AND the child is
+ *        still alive at observation time)
+ *   - ready_but_child_exited
+ *       (durable witness_ready verified against the
+ *        full identity BUT the child has already
+ *        exited by the time the ledger snapshot was
+ *        taken; the authority is gone)
  *   - evidence_invalid
  *       (a line in events.jsonl failed authoritative
  *        decoding; we fail closed, never ignore)
  *   - child_exited_before_ready
- *       (child exit observed before readiness; the
- *        diagnostic surface from WitnessSpawnHandle
- *        is included)
+ *       (child exit observed before the ledger shows
+ *        a matching witness_ready)
  *   - ready_timeout
  *       (deadline elapsed; no exit; no readiness)
  *
- * Full identity match is required (runId, missionId,
- * witnessId, witnessInstanceId, socketPath). A wrong
- * witness record sharing the expected instance string
- * is rejected — this is the strongest acceptance
- * boundary the ACT specifies.
+ * Race order is ledger-FIRST, child-SECOND. A durable
+ * witness_ready for the expected identity proves
+ * capability existed; if the authority has since
+ * exited, that is a stronger failure (the readiness
+ * was real but the witness is gone).
+ *
+ * Decoder fidelity:
+ *   The witness-evidence payload is decoded by the
+ * canonical `decodePersistedWitnessEvidence` from
+ * `src/witness/witness-evidence-decode.js`. NO
+ * parallel envelope validator. The envelope shape
+ * is checked only by JSON.parse; structural envelope
+ * checks are intentionally absent because the
+ * authoritative wire validator in
+ * `src/ledger-writer/ledger-writer-protocol.ts`
+ * already enforces the full grammar. We deliberately
+ * do NOT duplicate that policy here.
  */
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
@@ -54,6 +71,12 @@ export type AwaitWitnessReadyArgs = {
 export type AwaitWitnessReadyResult =
   | { readonly kind: "ready"; readonly observedAt: number; readonly sequence: number }
   | {
+      readonly kind: "ready_but_child_exited";
+      readonly exit: { readonly code: number | null; readonly signal: NodeJS.Signals | null };
+      readonly observedAt: number;
+      readonly sequence: number;
+    }
+  | {
       readonly kind: "evidence_invalid";
       readonly reason: string;
       readonly lineNumber: number;
@@ -71,17 +94,25 @@ export type AwaitWitnessReadyResult =
   | { readonly kind: "ready_timeout" };
 
 /**
- * Decode a single events.jsonl line through the
- * authoritative envelope + witness-evidence decoders.
+ * Decode a single events.jsonl line. We use the
+ * authoritative witness-evidence decoder for the payload
+ * (`decodePersistedWitnessEvidence`); the envelope shape
+ * is treated as advisory — anything JSON-parseable with
+ * the right `kind === "witness_evidence"` discriminator
+ * is dispatched to the authoritative decoder, which
+ * rejects malformed payloads with a typed error.
  *
- * We do NOT silently swallow malformed lines. The
- * ACT explicitly requires that a malformed durable
- * ledger tail becomes `evidence_invalid` (fail closed).
+ * No parallel structural validator. The frozen
+ * `validateWriterEvent` in
+ * `src/ledger-writer/ledger-writer-protocol.ts`
+ * enforces the full wire grammar; we do NOT duplicate
+ * it here.
  */
 function decodeLine(
   raw: string,
-): { readonly ok: true; readonly envelope: Record<string, unknown>; readonly payload: unknown }
- | { readonly ok: false; readonly reason: string } {
+):
+  | { readonly ok: true; readonly envelope: Record<string, unknown>; readonly payload: unknown }
+  | { readonly ok: false; readonly reason: string } {
   let envelope: unknown;
   try {
     envelope = JSON.parse(raw);
@@ -95,24 +126,6 @@ function decodeLine(
     return { ok: false, reason: "envelope is not an object" };
   }
   const env = envelope as Record<string, unknown>;
-  if (env["schema_version"] !== 2) {
-    return { ok: false, reason: "schema_version is not 2" };
-  }
-  if (typeof env["event_id"] !== "string" || env["event_id"].length === 0) {
-    return { ok: false, reason: "event_id missing or empty" };
-  }
-  if (typeof env["run_id"] !== "string" || env["run_id"].length === 0) {
-    return { ok: false, reason: "run_id missing or empty" };
-  }
-  if (typeof env["mission_id"] !== "string" || env["mission_id"].length === 0) {
-    return { ok: false, reason: "mission_id missing or empty" };
-  }
-  if (typeof env["sequence"] !== "number" || !Number.isInteger(env["sequence"])) {
-    return { ok: false, reason: "sequence missing or not integer" };
-  }
-  if (typeof env["observed_at"] !== "number") {
-    return { ok: false, reason: "observed_at missing or not number" };
-  }
   if (env["kind"] !== "witness_evidence") {
     return { ok: false, reason: "not_witness_evidence" };
   }
@@ -132,24 +145,9 @@ export async function awaitWitnessReady(
   let lastLineNumber = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // 1) Race the child-exit signal FIRST.
-    const exit = args.child.exitInfo();
-    if (exit.exited) {
-      const out = args.child.bootstrapOutput();
-      return {
-        kind: "child_exited_before_ready",
-        exit: { code: exit.code, signal: exit.signal },
-        stdoutSeen: out.stdoutBytesSeen,
-        stderrSeen: out.stderrBytesSeen,
-        stdoutBytes: out.stdout,
-        stderrBytes: out.stderr,
-        stdoutTruncated: out.stdoutTruncated,
-        stderrTruncated: out.stderrTruncated,
-      };
-    }
-
-    // 2) Inspect the authoritative ledger for any
-    //    newly-appended witness_evidence lines.
+    // 1) Ledger-FIRST. The capability proof is the
+    //    durable record; check the authoritative
+    //    events.jsonl first.
     let raw: string;
     try {
       raw = await fs.readFile(eventsPath, "utf8");
@@ -194,12 +192,43 @@ export async function awaitWitnessReady(
             lineNumber: i,
           };
         }
+        // 2) Child-SECOND. The durable record proves
+        //    capability existed. Verify the authority
+        //    is still alive at observation time.
+        const exit = args.child.exitInfo();
+        if (exit.exited) {
+          return {
+            kind: "ready_but_child_exited",
+            exit: { code: exit.code, signal: exit.signal },
+            observedAt: env["observed_at"] as number,
+            sequence: env["sequence"] as number,
+          };
+        }
         return {
           kind: "ready",
           observedAt: env["observed_at"] as number,
           sequence: env["sequence"] as number,
         };
       }
+    }
+
+    // 3) Child-exit-before-ready. The child died without
+    //    leaving a matching durable record. Surface a
+    //    typed diagnostic with the bounded bootstrap
+    //    output.
+    const exit = args.child.exitInfo();
+    if (exit.exited) {
+      const out = args.child.bootstrapOutput();
+      return {
+        kind: "child_exited_before_ready",
+        exit: { code: exit.code, signal: exit.signal },
+        stdoutSeen: out.stdoutBytesSeen,
+        stderrSeen: out.stderrBytesSeen,
+        stdoutBytes: out.stdout,
+        stderrBytes: out.stderr,
+        stdoutTruncated: out.stdoutTruncated,
+        stderrTruncated: out.stderrTruncated,
+      };
     }
 
     if (Date.now() >= deadline) {

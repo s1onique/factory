@@ -51,7 +51,7 @@ const OBSERVED_SHA = (() => {
   }
 })();
 
-const REQUIRED = 3;
+const REQUIRED = 4;
 let exec = 0;
 let pass = 0;
 let fail = 0;
@@ -249,6 +249,59 @@ test("READY-STRICT03: malformed JSON line before any ready returns evidence_inva
         "READY-STRICT03: evidence_invalid must carry a reason");
       assert.equal(r.lineNumber, 0,
         "READY-STRICT03: must identify the offending line number");
+    }
+    pass += 1;
+  } catch (e) {
+    fail += 1;
+    throw e;
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("READY-STRICT04: ready_but_child_exited when durable ready exists but child has died", async () => {
+  exec += 1;
+  const runDir = await mkRunDir();
+  try {
+    // A well-formed witness_ready for the expected identity
+    // is durably committed. The child has ALREADY exited
+    // before we observe. The CORRECTION02 ledger-first
+    // ordering returns ready_but_child_exited, NOT the
+    // old misnamed child_exited_before_ready.
+    const line = mkReadyLine({
+      runId: EXPECTED_BINDING.runId,
+      missionId: EXPECTED_BINDING.missionId,
+      witnessId: EXPECTED_BINDING.witnessId,
+      witnessInstanceId: EXPECTED_BINDING.witnessInstanceId,
+      socketPath: EXPECTED_BINDING.socketPath,
+      controllerFingerprint: "f".repeat(64),
+      witnessFingerprint: "e".repeat(64),
+      sequence: 1,
+    });
+    await fs.writeFile(path.join(runDir, "events.jsonl"), line + "\n");
+    const handle = mkHandle({
+      exited: true,
+      code: 0,
+      signal: null,
+    });
+    const r = await awaitWitnessReady({
+      runDir,
+      child: handle,
+      expected: EXPECTED_BINDING,
+      deadlineMs: 200,
+      pollIntervalMs: 10,
+    });
+    assert.equal(r.kind, "ready_but_child_exited",
+      "READY-STRICT04: durable ready + dead child must yield " +
+      "ready_but_child_exited (the authority is gone even though " +
+      "the durability fact exists). got: " + r.kind);
+    if (r.kind === "ready_but_child_exited") {
+      assert.equal(r.exit.code, 0,
+        "READY-STRICT04: exit code must round-trip");
+      assert.equal(r.sequence, 1,
+        "READY-STRICT04: sequence must round-trip");
+      assert.ok(typeof r.observedAt === "number",
+        "READY-STRICT04: observedAt must round-trip");
     }
     pass += 1;
   } catch (e) {
