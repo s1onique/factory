@@ -34,22 +34,26 @@
  * exited, that is a stronger failure (the readiness
  * was real but the witness is gone).
  *
- * Decoder fidelity:
- *   The witness-evidence payload is decoded by the
- * canonical `decodePersistedWitnessEvidence` from
- * `src/witness/witness-evidence-decode.js`. NO
- * parallel envelope validator. The envelope shape
- * is checked only by JSON.parse; structural envelope
- * checks are intentionally absent because the
- * authoritative wire validator in
- * `src/ledger-writer/ledger-writer-protocol.ts`
- * already enforces the full grammar. We deliberately
- * do NOT duplicate that policy here.
+ * Decoder fidelity (CORRECTION03):
+ *   Durable bytes crossing back from storage into the
+ *   domain are validated by the AUTHORITATIVE decoders,
+ *   never by handwritten checks and never by trusting
+ *   that a writer validated them at some point in the
+ *   past. The envelope goes through FOUNDATION01's
+ *   `decodeEnvelopeFromJsonLine`
+ *   (`src/evidence/ledger-internals.js`), which validates
+ *   schema_version, sequence, observed_at and every
+ *   branded identifier, and which dispatches the
+ *   `witness_evidence` payload to the authoritative
+ *   `decodePersistedWitnessEvidence`. There are no `as`
+ *   assertions at this trust boundary and no parallel
+ *   validator.
  */
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { decodePersistedWitnessEvidence } from "../../src/witness/witness-evidence-decode.js";
+import { decodeEnvelopeFromJsonLine } from "../../src/evidence/ledger-internals.js";
+import type { EventEnvelope } from "../../src/evidence/codec-types.js";
 import type { WitnessSpawnHandle } from "../../src/witness-start/witness-start-types.js";
 
 export type ExpectedBinding = {
@@ -94,46 +98,63 @@ export type AwaitWitnessReadyResult =
   | { readonly kind: "ready_timeout" };
 
 /**
- * Decode a single events.jsonl line. We use the
- * authoritative witness-evidence decoder for the payload
- * (`decodePersistedWitnessEvidence`); the envelope shape
- * is treated as advisory — anything JSON-parseable with
- * the right `kind === "witness_evidence"` discriminator
- * is dispatched to the authoritative decoder, which
- * rejects malformed payloads with a typed error.
+ * Decode a single events.jsonl line through the
+ * authoritative pipeline:
  *
- * No parallel structural validator. The frozen
- * `validateWriterEvent` in
- * `src/ledger-writer/ledger-writer-protocol.ts`
- * enforces the full wire grammar; we do NOT duplicate
- * it here.
+ *   durable bytes
+ *     → decodeEnvelopeFromJsonLine (FOUNDATION01
+ *       authoritative envelope decoder: schema_version,
+ *       sequence, observed_at, branded identifiers)
+ *     → kind === "witness_evidence"
+ *     → decodePersistedWitnessEvidence (authoritative
+ *       witness-evidence decoder, invoked BY the envelope
+ *       decoder)
+ *
+ * No handwritten envelope checks; no `as` casts. A
+ * malformed durable envelope is `evidence_invalid`, even
+ * if its witness payload happens to be well-formed.
  */
 function decodeLine(
   raw: string,
 ):
-  | { readonly ok: true; readonly envelope: Record<string, unknown>; readonly payload: unknown }
+  | {
+      readonly ok: true;
+      readonly envelope: Extract<EventEnvelope, { readonly kind: "witness_evidence" }>;
+    }
   | { readonly ok: false; readonly reason: string } {
-  let envelope: unknown;
+  // A non-witness_evidence envelope is not an error: the
+  // ledger legitimately interleaves lifecycle and
+  // process_evidence records. We must distinguish "not for
+  // us" from "invalid", so peek at the discriminator with a
+  // parse that carries no authority.
+  let peeked: unknown;
   try {
-    envelope = JSON.parse(raw);
+    peeked = JSON.parse(raw);
   } catch (e: unknown) {
     return {
       ok: false,
       reason: "malformed JSON: " + (e instanceof Error ? e.message : String(e)),
     };
   }
-  if (typeof envelope !== "object" || envelope === null) {
+  if (typeof peeked !== "object" || peeked === null) {
     return { ok: false, reason: "envelope is not an object" };
   }
-  const env = envelope as Record<string, unknown>;
-  if (env["kind"] !== "witness_evidence") {
+  if ((peeked as Record<string, unknown>)["kind"] !== "witness_evidence") {
     return { ok: false, reason: "not_witness_evidence" };
   }
-  const payloadR = decodePersistedWitnessEvidence(env["witness_evidence"]);
-  if (payloadR.ok === false) {
-    return { ok: false, reason: payloadR.error.reason };
+  // Authoritative decode. This is the trust boundary.
+  const envR = decodeEnvelopeFromJsonLine(raw);
+  if (envR.ok === false) {
+    return { ok: false, reason: envR.error.reason };
   }
-  return { ok: true, envelope: env, payload: payloadR.value };
+  const env = envR.value;
+  if (!(env.schema_version === 2 && env.kind === "witness_evidence")) {
+    return {
+      ok: false,
+      reason: "authoritative decode did not yield a witness_evidence envelope",
+    };
+  }
+  return { ok: true, envelope: env };
 }
 
 export async function awaitWitnessReady(
@@ -170,17 +191,12 @@ export async function awaitWitnessReady(
           };
         }
         const env = decoded.envelope;
-        const payload = decoded.payload as {
-          kind?: string;
-          witness_id?: string;
-          witness_instance_id?: string;
-          socket_path?: string;
-        };
+        const payload = env.witness_evidence;
         if (payload.kind !== "witness_ready") continue;
         const e = args.expected;
         const matches =
-          env["run_id"] === e.runId &&
-          env["mission_id"] === e.missionId &&
+          env.run_id === e.runId &&
+          env.mission_id === e.missionId &&
           payload.witness_id === e.witnessId &&
           payload.witness_instance_id === e.witnessInstanceId &&
           payload.socket_path === e.socketPath;
@@ -200,14 +216,14 @@ export async function awaitWitnessReady(
           return {
             kind: "ready_but_child_exited",
             exit: { code: exit.code, signal: exit.signal },
-            observedAt: env["observed_at"] as number,
-            sequence: env["sequence"] as number,
+            observedAt: env.observed_at,
+            sequence: env.sequence,
           };
         }
         return {
           kind: "ready",
-          observedAt: env["observed_at"] as number,
-          sequence: env["sequence"] as number,
+          observedAt: env.observed_at,
+          sequence: env.sequence,
         };
       }
     }

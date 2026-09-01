@@ -16,7 +16,13 @@ import {
   encodeProtocolError,
 } from "./witness-codec-messages.js";
 import { generateEd25519Keypair, sha256Hex, signWithKeyObject } from "./witness-crypto.js";
-import { safeRemoveSocketFile } from "./witness-server.js";
+import { rollbackSocketAfterClose } from "./witness-server.js";
+// safeRemoveSocketFile is intentionally exported from
+// ./witness-server.js (best-effort stale-socket cleanup), but
+// the live rollback is now performed by rollbackSocketAfterClose
+// so the close-before-unlink law (CORRECTION04) cannot be
+// silently bypassed by ad-hoc call sites. We do not import it
+// here because we no longer call it directly.
 import { WITNESS_PROTOCOL_VERSION } from "./witness-protocol.js";
 import { applyRuntimeInput } from "./witness-runtime-sm.js";
 import { getSequence } from "./witness-runtime-sm-helpers.js";
@@ -299,12 +305,22 @@ export function currentCtx(): WitnessRuntimeContext {
   return liveCtx;
 }
 
+/**
+ * CORRECTION03 (close boundary) / CORRECTION04 (close-before-unlink):
+ * the normal-lifecycle shutdown uses the same bounded close
+ * boundary as the bootstrap rollback, routed through the
+ * single doctrine site `rollbackSocketAfterClose`. `process.exit`
+ * still terminates unconditionally, but reaping the accepted
+ * connections first means in-flight sockets are torn down
+ * deliberately rather than severed by process death, and the
+ * pathname is only unlinked when the kernel close boundary
+ * has been positively observed.
+ */
 export async function shutdown(
   server: import("node:net").Server,
   socketPath: string,
   code: number,
 ): Promise<void> {
-  server.close();
-  await safeRemoveSocketFile(socketPath);
+  await rollbackSocketAfterClose(server, socketPath);
   process.exit(code);
 }

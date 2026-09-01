@@ -87,13 +87,30 @@ function bootstrapFail(message: string, code: number): never {
  * propagates as a rejection up to the runWitnessProcess
  * outer catch.
  *
- * Teardown sequence:
+ * Teardown sequence (CORRECTION03, refined CORRECTION04):
  *   1. process.stderr.write(diagnostic) — sync, complete
  *      before exit code assignment.
- *   2. server.close() — sync, marks the server as no
- *      longer accepting connections.
- *   3. await safeRemoveSocketFile(socketPath) — async,
- *      must complete before exit.
+ *   2. await closeServerBounded(server) — stops admission,
+ *      DESTROYS every accepted connection we own, and awaits
+ *      the real `'close'` event under a bound. `close()`
+ *      alone is not closure: Node documents it as
+ *      asynchronous, completing only once all connections
+ *      have ended. Any surviving accepted socket would pin
+ *      the event loop and `process.exitCode` would never be
+ *      honored.
+ *   3. Close-before-unlink law (CORRECTION04): a pathname
+ *      for an authority-bearing Unix socket may be removed
+ *      ONLY after the kernel close boundary has been
+ *      positively observed. POSIX/Linux explicitly permits
+ *      unlinking a Unix-domain socket pathname while
+ *      processes still hold the socket; existing references
+ *      keep working. A timeout means SERVER_CLOSE=UNPROVEN;
+ *      removing the pathname in that state would erase the
+ *      identity that a future actor might race to
+ *      re-create at the same path. Pathname is RETAINED
+ *      whenever `outcome.closed !== true`, with a typed
+ *      residue line so the failure is observable, not
+ *      silent. We never claim closure we did not observe.
  *   4. process.exitCode = code.
  *   5. throw BootstrapFailureSentinel (the await site
  *      receives a rejected promise, the outer catch
@@ -107,9 +124,16 @@ async function bootstrapFailWithServer(
 ): Promise<never> {
   process.stderr.write(message);
   if (!message.endsWith("\n")) process.stderr.write("\n");
-  server.close();
-  const { safeRemoveSocketFile } = await import("./witness-server.js");
-  await safeRemoveSocketFile(socketPath);
+  const { rollbackSocketAfterClose } = await import("./witness-server.js");
+  const { removed, outcome } = await rollbackSocketAfterClose(server, socketPath);
+  process.stderr.write(
+    "witness: bootstrap rollback: server_closed=" +
+    String(outcome.closed) +
+    " destroyed_connections=" + String(outcome.destroyedConnections) +
+    " close_timed_out=" + String(outcome.timedOut) +
+    " socket_path_retained=" + String(!removed) +
+    (removed ? "" : " socket_path=" + JSON.stringify(socketPath)) + "\n",
+  );
   process.exitCode = code;
   throw new BootstrapFailureSentinel(code);
 }

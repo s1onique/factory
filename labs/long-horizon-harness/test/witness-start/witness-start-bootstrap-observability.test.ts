@@ -285,8 +285,19 @@ test("BOOTOBS08: real witness helper bootstrap-fail on invalid protocol_version"
 });
 
 
-// BOOTOBS09: a real production POST-bind bootstrap failure.
-test("BOOTOBS09: real witness helper post-bind failure (readyAck fail) tears down UDS", async () => {
+// BOOTOBS09A/09B: a real production POST-bind bootstrap failure.
+//
+// CORRECTION03 (test-truthfulness law):
+//   On a long-path host (UDS path > 100 bytes) the witness
+//   fails at BIND, never reaching the post-bind rollback this
+//   test names. Counting that pre-bind failure as PASS
+//   evidence for post-bind cleanup is a false green. The test
+//   is therefore split:
+//     09A — pre-bind long-path diagnostic (informational)
+//     09B — REQUIRED post-bind rollback; explicitly skipped
+//           as BLOCKED_BY_ENVIRONMENT on a long-path host and
+//           mandatory in the short-path qualification lane.
+test("BOOTOBS09: real witness helper post-bind failure (readyAck fail) tears down UDS", async (t) => {
   const { promises: fs2 } = await import("node:fs");
   const path2 = await import("node:path");
   const scratchRoot = path2.default.resolve(
@@ -354,28 +365,236 @@ test("BOOTOBS09: real witness helper post-bind failure (readyAck fail) tears dow
       handle.bootstrapOutput().stderr,
     );
     if (captured.includes("socket_path_too_long")) {
-      // Long-path host: skip the strict post-bind check
-      // (the UDS is rejected at bind, not at readyAck).
-      // The diagnostic is captured; the bootstrap path
-      // is exercised; the test is meaningful as a
-      // regression on the flush-safe diagnostic.
-      assert.ok(true, "BOOTOBS09 (long-path host): bind-fail diagnostic captured");
-    } else {
-      assert.equal(handle.exitInfo().code, 1,
-        "BOOTOBS09: exit code must be 1 (readyAck failure -> " +
-        "bootstrapFailWithServer(code=1))");
-      assert.ok(captured.includes("ready durability failed"),
-        "BOOTOBS09: stderr MUST include the post-bind diagnostic " +
-        "(captured=" + JSON.stringify(captured) + ")");
-      await assert.rejects(
-        () => fs2.stat(socketPath),
-        (e: unknown) => (e as { code?: string }).code === "ENOENT",
-        "BOOTOBS09: socket file MUST be unlinked after post-bind " +
-        "bootstrap failure (regression check on " +
-        "bootstrapFailWithServer)",
+      // BOOTOBS09A (pre-bind long-path diagnostic). This host
+      // cannot execute the post-bind capability. We record that
+      // truthfully instead of asserting ok(true): the named
+      // capability (post-bind rollback) is NOT proven here.
+      process.stdout.write(
+        "BOOTOBS09B=BLOCKED_BY_ENVIRONMENT " +
+        "reason=socket_path_too_long uds_bytes=" +
+        String(Buffer.byteLength(socketPath, "utf8")) + "\n",
       );
+      assert.equal(handle.exitInfo().code, 1,
+        "BOOTOBS09A: pre-bind long-path failure must exit 1");
+      t.skip(
+        "BOOTOBS09B=BLOCKED_BY_ENVIRONMENT: UDS path exceeds the " +
+        "100-byte budget on this host, so the witness fails at bind " +
+        "and the post-bind rollback capability is NOT exercised. " +
+        "The short-path qualification lane MUST execute BOOTOBS09B.",
+      );
+      return;
     }
+    // BOOTOBS09B (required post-bind rollback).
+    assert.equal(handle.exitInfo().code, 1,
+      "BOOTOBS09B: exit code must be 1 (readyAck failure -> " +
+      "bootstrapFailWithServer(code=1))");
+    assert.ok(captured.includes("ready durability failed"),
+      "BOOTOBS09B: stderr MUST include the post-bind diagnostic " +
+      "(captured=" + JSON.stringify(captured) + ")");
+    assert.ok(captured.includes("server_closed=true"),
+      "BOOTOBS09B: rollback MUST observe the real net.Server " +
+      "'close' event, not merely call close() " +
+      "(captured=" + JSON.stringify(captured) + ")");
+    assert.ok(captured.includes("close_timed_out=false"),
+      "BOOTOBS09B: the bounded close MUST NOT time out " +
+      "(captured=" + JSON.stringify(captured) + ")");
+    await assert.rejects(
+      () => fs2.stat(socketPath),
+      (e: unknown) => (e as { code?: string }).code === "ENOENT",
+      "BOOTOBS09B: socket file MUST be unlinked after post-bind " +
+      "bootstrap failure (regression check on " +
+      "bootstrapFailWithServer)",
+    );
   } finally {
     await fs2.rm(runDir, { recursive: true, force: true });
   }
 });
+
+// BOOTOBS10: post-bind COMPLETE resource closure with an
+// adversarial accepted connection.
+//
+// Doctrine (post-bind resource-closure law):
+//   `net.Server.close()` only stops admission; the server
+//   is closed only once every accepted connection has ended
+//   and the `'close'` event fires. A connected-but-idle peer
+//   would otherwise pin the event loop forever, so
+//   `process.exitCode` would never be honored and the
+//   witness would not exit.
+//
+// This exercises the REAL production transport
+// (`listenOnUnixSocket` + `closeServerBounded`) rather than a
+// simulation, and does so with a short UDS path so it runs on
+// every host (long-path hosts cannot spawn a bound witness).
+test("BOOTOBS10: bounded close reaps an accepted connection and observes 'close'", async () => {
+  const { promises: fs2 } = await import("node:fs");
+  const path2 = await import("node:path");
+  const net2 = await import("node:net");
+  const { listenOnUnixSocket, closeServerBounded, rollbackSocketAfterClose } =
+    await import("../../src/witness/witness-server.js");
+
+  // The socket directory must be 0o700 (ensureSocketDirectory).
+  //
+  // UDS paths have a ~100-byte budget and the per-user tmpdir on
+  // macOS (/var/folders/...) already exceeds it. A RELATIVE
+  // socket path resolved against the test runner's cwd is short
+  // on every host, so this capability is never
+  // environment-blocked (unlike BOOTOBS09B, which must spawn a
+  // real witness process with absolute paths).
+  const scratch = path2.default.join(process.cwd(), ".scratch");
+  await fs2.mkdir(scratch, { recursive: true });
+  const dir = await fs2.mkdtemp(path2.default.join(scratch, ".b10-"));
+  await fs2.chmod(dir, 0o700);
+  const socketPath = path2.default.join(
+    path2.default.relative(process.cwd(), dir),
+    "w.sock",
+  );
+  try {
+    const bindR = await listenOnUnixSocket({
+      socketPath,
+      onFrame: () => null,
+    });
+    assert.equal(bindR.ok, true,
+      "BOOTOBS10: the real transport must bind (error=" +
+      JSON.stringify(bindR.ok ? null : bindR.error) + ")");
+    if (!bindR.ok) return;
+    const server = bindR.value;
+
+    // Adversarial client: connects and stays connected, sending
+    // nothing. This is the interleaving that made the previous
+    // rollback unprovable.
+    const client = net2.default.createConnection(socketPath);
+    await new Promise<void>((resolve, reject) => {
+      client.once("connect", () => resolve());
+      client.once("error", reject);
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(server.listening, true,
+      "BOOTOBS10: precondition — server is listening with a live peer");
+
+    const outcome = await closeServerBounded(server, 2000);
+    assert.equal(outcome.closed, true,
+      "BOOTOBS10: the server's real 'close' event MUST be observed " +
+      "even with an accepted connection outstanding");
+    assert.equal(outcome.timedOut, false,
+      "BOOTOBS10: the bounded close MUST NOT hit its deadline");
+    assert.equal(outcome.destroyedConnections, 1,
+      "BOOTOBS10: the accepted connection MUST be owned and destroyed " +
+      "by the rollback (got: " + outcome.destroyedConnections + ")");
+    assert.equal(server.listening, false,
+      "BOOTOBS10: the server handle must no longer be listening");
+
+    // CORRECTION05 — close-before-unlink integration proof:
+    // the rollback helper above closeServerBounded sees a
+    // proven-close outcome and removes the path. This is
+    // the production counterpart to BOOTOBS11's pure-policy
+    // test of the timeout branch.
+    await rollbackSocketAfterClose(server, socketPath, 2000);
+    await assert.rejects(
+      () => fs2.stat(socketPath),
+      (e: unknown) => (e as { code?: string }).code === "ENOENT",
+      "BOOTOBS10: socket pathname MUST be absent after a " +
+      "rollbackSocketAfterClose that observed a proven close",
+    );
+    client.destroy();
+  } finally {
+    await fs2.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// BOOTOBS11: close-before-unlink timeout — pathname MUST be
+// retained, residue MUST surface.
+//
+// Doctrine (close-before-unlink law, CORRECTION04):
+//   A pathname for an authority-bearing Unix socket may be
+//   removed ONLY after the kernel close boundary has been
+//   positively observed. POSIX/Linux explicitly permits
+//   unlinking a Unix-domain socket pathname while processes
+//   still hold the socket; existing references keep working.
+//
+// `timeout !== absence of resource death`, and
+// `timeout !== permission to erase identity`.
+//
+// CORRECTION05 — observation API purity:
+//   `closeServerBounded` is the AUTHORITATIVE observation of
+//   the server's `'close'` boundary. It MUST NOT be told
+//   what to claim by callers — including tests. The
+//   deterministic timeout branch is exercised by testing the
+//   PURE policy function `decideSocketRollback`, which is
+//   the single source of truth for the close-before-unlink
+//   law. No fabrication seam exists in `closeServerBounded`,
+//   `rollbackSocketAfterClose`, or `decideSocketRollback`
+//   itself.
+test("BOOTOBS11: decideSocketRollback is the single source of truth for close-before-unlink", async () => {
+  const { decideSocketRollback } = await import(
+    "../../src/witness/witness-server.js"
+  );
+
+  // Proven close ⇒ remove_path (kernel close was observed).
+  {
+    const d = decideSocketRollback({
+      closed: true,
+      destroyedConnections: 0,
+      timedOut: false,
+    });
+    assert.equal(d.kind, "remove_path",
+      "BOOTOBS11[policy]: proven close MUST yield remove_path");
+  }
+
+  // Close timed out ⇒ retain_path (do NOT erase identity).
+  {
+    const d = decideSocketRollback({
+      closed: false,
+      destroyedConnections: 0,
+      timedOut: true,
+    });
+    assert.equal(d.kind, "retain_path",
+      "BOOTOBS11[policy]: timed-out close MUST yield retain_path");
+  }
+
+  // Close timed out but some connections were reaped ⇒ still
+  // retain_path. The reaped-connections counter is residue,
+  // not proof.
+  {
+    const d = decideSocketRollback({
+      closed: false,
+      destroyedConnections: 3,
+      timedOut: true,
+    });
+    assert.equal(d.kind, "retain_path",
+      "BOOTOBS11[policy]: close boundary not observed ⇒ " +
+      "retain_path regardless of destroyedConnections count");
+  }
+
+  // Closed=false with timedOut=false is a degenerate
+  // observation the production API never emits; the policy
+  // MUST still refuse to unlink (fail-closed on any
+  // non-proven-close observation).
+  {
+    const d = decideSocketRollback({
+      closed: false,
+      destroyedConnections: 0,
+      timedOut: false,
+    });
+    assert.equal(d.kind, "retain_path",
+      "BOOTOBS11[policy]: a non-proven close (any reason) MUST " +
+      "yield retain_path; close-before-unlink is fail-closed");
+  }
+});
+
+// BOOTOBS11-INTEGRATION (CORRECTION05 deliberately omitted):
+// A real-transport test that exercises the unproven-close
+// branch cannot be produced without a fabrication seam in
+// `closeServerBounded`. CORRECTION03's accepted-socket
+// ownership registry is intentionally aggressive: any peer
+// delivered to the `'connection'` listener is owned by the
+// server and is destroyed by `closeServerBounded` before the
+// bounded deadline. The remaining in-the-kernel race window
+// (a connection accepted by the kernel but not yet delivered
+// to the `'connection'` listener) is not reachable from a
+// Node test driver without racing the SUT. The pure policy
+// test BOOTOBS11 covers the timeout branch deterministically;
+// the proven-close branch is covered by BOOTOBS10's
+// `rollbackSocketAfterClose` integration. The unproven-close
+// integration test would require either the fabrication
+// seam (now removed by CORRECTION05) or a concurrency
+// control surface that is out of scope for Phase A.

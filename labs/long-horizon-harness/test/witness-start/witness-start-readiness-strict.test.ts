@@ -51,7 +51,7 @@ const OBSERVED_SHA = (() => {
   }
 })();
 
-const REQUIRED = 4;
+const REQUIRED = 6;
 let exec = 0;
 let pass = 0;
 let fail = 0;
@@ -302,6 +302,109 @@ test("READY-STRICT04: ready_but_child_exited when durable ready exists but child
         "READY-STRICT04: sequence must round-trip");
       assert.ok(typeof r.observedAt === "number",
         "READY-STRICT04: observedAt must round-trip");
+    }
+    pass += 1;
+  } catch (e) {
+    fail += 1;
+    throw e;
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("READY-STRICT05: malformed envelope with valid witness payload returns evidence_invalid", async () => {
+  exec += 1;
+  const runDir = await mkRunDir();
+  try {
+    // CORRECTION03: durable bytes crossing back from storage
+    // MUST pass the AUTHORITATIVE envelope decoder. This line
+    // carries a perfectly valid witness_ready payload for the
+    // expected identity, but the envelope is invalid: the
+    // run_id violates the identifier grammar and event_id is
+    // absent. The readiness oracle MUST fail closed rather
+    // than trust a writer that supposedly validated it.
+    const bad = JSON.stringify({
+      schema_version: 2,
+      run_id: "not a legal id!!",
+      mission_id: EXPECTED_BINDING.missionId,
+      sequence: 1,
+      observed_at: Date.now(),
+      kind: "witness_evidence",
+      witness_evidence: {
+        kind: "witness_ready",
+        witness_id: EXPECTED_BINDING.witnessId,
+        witness_instance_id: EXPECTED_BINDING.witnessInstanceId,
+        historical_witness_pid: 12345,
+        socket_path: EXPECTED_BINDING.socketPath,
+        witness_public_key: "a".repeat(64),
+        witness_public_key_fingerprint: "e".repeat(64),
+        controller_public_key_fingerprint: "f".repeat(64),
+        protocol_version: 1,
+      },
+    });
+    await fs.writeFile(path.join(runDir, "events.jsonl"), bad + "\n");
+    const r = await awaitWitnessReady({
+      runDir,
+      child: mkHandle(),
+      expected: EXPECTED_BINDING,
+      deadlineMs: 200,
+      pollIntervalMs: 10,
+    });
+    assert.equal(r.kind, "evidence_invalid",
+      "READY-STRICT05: malformed envelope MUST yield evidence_invalid " +
+      "even when the witness payload is valid (got: " + r.kind + ")");
+    pass += 1;
+  } catch (e) {
+    fail += 1;
+    throw e;
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("READY-STRICT06: non-integer sequence / null observed_at returns evidence_invalid", async () => {
+  exec += 1;
+  const runDir = await mkRunDir();
+  try {
+    // CORRECTION03: the old handwritten decoder cast
+    // `observed_at`/`sequence` with `as number`, so these
+    // values could reach the readiness result unvalidated.
+    // The authoritative envelope decoder rejects them.
+    const bad = JSON.stringify({
+      schema_version: 2,
+      event_id: "e-1",
+      run_id: EXPECTED_BINDING.runId,
+      mission_id: EXPECTED_BINDING.missionId,
+      sequence: "lol-not-an-int",
+      observed_at: null,
+      kind: "witness_evidence",
+      witness_evidence: {
+        kind: "witness_ready",
+        witness_id: EXPECTED_BINDING.witnessId,
+        witness_instance_id: EXPECTED_BINDING.witnessInstanceId,
+        historical_witness_pid: 12345,
+        socket_path: EXPECTED_BINDING.socketPath,
+        witness_public_key: "a".repeat(64),
+        witness_public_key_fingerprint: "e".repeat(64),
+        controller_public_key_fingerprint: "f".repeat(64),
+        protocol_version: 1,
+      },
+    });
+    await fs.writeFile(path.join(runDir, "events.jsonl"), bad + "\n");
+    const r = await awaitWitnessReady({
+      runDir,
+      child: mkHandle(),
+      expected: EXPECTED_BINDING,
+      deadlineMs: 200,
+      pollIntervalMs: 10,
+    });
+    assert.equal(r.kind, "evidence_invalid",
+      "READY-STRICT06: invalid sequence/observed_at MUST yield " +
+      "evidence_invalid (got: " + r.kind + ")");
+    if (r.kind === "evidence_invalid") {
+      assert.ok(/sequence|observed_at/.test(r.reason),
+        "READY-STRICT06: reason must name the offending envelope field " +
+        "(got: " + r.reason + ")");
     }
     pass += 1;
   } catch (e) {

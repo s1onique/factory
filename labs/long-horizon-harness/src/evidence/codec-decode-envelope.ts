@@ -31,6 +31,7 @@ import {
   decodePersistedEvent,
   decodePersistedProcessEvidence,
 } from "./codec-decode-internals.js";
+import { decodePersistedWitnessEvidence } from "../witness/witness-evidence-decode.js";
 
 /**
  * Translate an {@link InvalidId} into the evidence-layer {@link InvalidEvidence}.
@@ -181,8 +182,44 @@ export function decodeEnvelope(
       process_evidence: pev.value,
     });
   }
+  if (kindRaw === "witness_evidence") {
+    // FOUNDATION01_CODEC_COMPATIBILITY_CORRECTION (CORRECTION03,
+    // recorded CORRECTION04): the decoder previously REJECTED
+    // 'witness_evidence' envelopes as "Unknown v2 envelope
+    // kind", even though `codec-types.ts` and `codec-encode.ts`
+    // already defined the kind and emitted it. That asymmetry
+    // meant the readiness read path had to JSON.parse the line
+    // and trust the writer. Witness-evidence envelopes are now
+    // first-class on both encode and decode sides (see
+    // encodeWitnessEvidenceEnvelope in codec-encode.ts and
+    // decodePersistedWitnessEvidence in
+    // witness-evidence-decode.ts). The payload is dispatched to
+    // the AUTHORITATIVE witness decoder; this decoder never
+    // approximates that schema.
+    const we = v["witness_evidence"];
+    if (typeof we !== "object" || we === null) {
+      return err({
+        kind: "invalid_evidence",
+        reason: "witness_evidence envelope MUST carry a non-null 'witness_evidence' payload.",
+      });
+    }
+    const wev = decodePersistedWitnessEvidence(we);
+    if (wev.ok === false) {
+      return err(wev.error);
+    }
+    return ok({
+      schema_version: 2,
+      event_id: eid.value,
+      run_id: r.value,
+      mission_id: m.value,
+      sequence,
+      observed_at: observedAt,
+      kind: "witness_evidence",
+      witness_evidence: wev.value,
+    });
+  }
   return err({
     kind: "invalid_evidence",
-    reason: `Unknown v2 envelope 'kind' '${kindRaw}'. Expected 'lifecycle' or 'process_evidence'.`,
+    reason: `Unknown v2 envelope 'kind' '${kindRaw}'. Expected 'lifecycle', 'process_evidence' or 'witness_evidence'.`,
   });
 }
