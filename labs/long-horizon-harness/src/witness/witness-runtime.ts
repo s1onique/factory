@@ -76,24 +76,21 @@ export async function runWitnessProcess(args: WitnessProcessArgs): Promise<void>
   };
 
   const key = generateEd25519Keypair();
-  // F04-D33: durable witness_start_requested BEFORE spawn.
-  const startAck = await appendWitnessEvidence({
-    binding,
-    runId,
-    missionId,
-    eventId: eventId("w-start"),
-    observedAt: Date.now(),
-    commitId: `w-start-${witnessInstanceId}`,
-    payload: {
-      kind: "witness_start_requested",
-      witness_id: witnessId,
-      witness_instance_id: witnessInstanceId,
-    },
-  });
-  if (!startAck.ok) {
-    process.stderr.write(`witness: start durability failed\n`);
-    process.exit(1);
-  }
+
+  // PHASE A (B0-QUALIFICATION06 -> Phase A correction):
+  // The witness process no longer writes its own
+  // witness_start_requested record. Intent ownership is
+  // exclusively the supervisor's: the supervisor's
+  // startWitness gate commits the start intent BEFORE
+  // spawning the witness, and the witness is now
+  // authoritative only for post-creation evidence
+  // (witness_ready, witness_command_requested/result,
+  // witness_lost, etc.).
+  //
+  // If a witness process starts without a prior
+  // witness_start_requested in the ledger, the projector
+  // will reject its witness_ready with `ready_before_start`.
+  // This is the load-bearing doctrine of Phase A.
 
   const bootstrap: WitnessBootstrapConfig = {
     binding: {

@@ -54,7 +54,10 @@
  * + pure functions (commitId derivation, validation).
  */
 
+import { createHash } from "node:crypto";
+
 import type { AttemptId, MissionId, RunId } from "../domain/ids.js";
+import { makeEventId } from "../domain/ids.js";
 import type { ProcessId } from "../process/process-types.js";
 import type { WitnessId, WitnessInstanceId } from "../witness/witness-types.js";
 import type { PersistedWitnessEvidence } from "../witness/witness-types-persisted.js";
@@ -185,6 +188,11 @@ export type IntentCommitResult =
  * The pre-spawn commit port. Production binds this to the
  * existing appendWitnessEvidence adapter; tests bind it to a
  * fake that lets WS01..WS06 stage each outcome.
+ *
+ * P1#4 correction: the port carries an explicit eventId
+ * parameter. The gate is the sole producer of valid
+ * EventIds; the adapter MUST NOT manufacture them. The
+ * eventId MUST satisfy IDENTIFIER_GRAMMAR.
  */
 export interface WitnessIntentCommitPort {
   commit(args: {
@@ -193,6 +201,7 @@ export interface WitnessIntentCommitPort {
     readonly missionId: MissionId;
     readonly observedAt: number;
     readonly commitId: string;
+    readonly eventId: import("../domain/ids.js").EventId;
     readonly payload: Extract<
       PersistedWitnessEvidence,
       { readonly kind: "witness_start_requested" }
@@ -204,9 +213,26 @@ export interface WitnessIntentCommitPort {
  * The spawn port. Production adapter wraps node:child_process.
  * Tests count SPAWN_CALLS, observe the spec, and may inject
  * synthetic spawn failures (WS08) or successful spawns.
+ *
+ * ASYNC by contract (P1#2 / WS09): the Promise MUST NOT
+ * resolve ok:true before the underlying Node `'spawn'`
+ * event has fired. The Node documentation is explicit:
+ *
+ *   "The 'spawn' event is emitted once the child process
+ *    has spawned successfully. If the child process does
+ *    not spawn successfully, the 'error' event is emitted
+ *    instead."
+ *
+ * Source: Node.js Child Process documentation. A returned
+ * ChildProcess object is NOT proof of OS-level witness
+ * creation. Only `'spawn'` is.
+ *
+ * Implementations MUST attach listeners synchronously
+ * inside spawn() before returning the Promise, so no event
+ * can be missed.
  */
 export interface WitnessSpawnPort {
-  spawn(spec: WitnessSpawnSpec): WitnessSpawnSpecResult;
+  spawn(spec: WitnessSpawnSpec): Promise<WitnessSpawnSpecResult>;
 }
 
 export type WitnessSpawnSpecResult =
@@ -235,10 +261,18 @@ export type WitnessSpawnSpec = {
  * Identity factory. Production binds this to mint WitnessId
  * + WitnessInstanceId; tests wrap it to count
  * IDENTITY_FACTORY_CALLS (WS04).
+ *
+ * P1#1 correction: the factory MUST receive missionId.
+ * Phase A's identity-continuity law requires the
+ * committed missionId == spec.missionId == spawned
+ * missionId == returned missionId, byte-for-byte. A
+ * factory that silently substitutes runId for missionId
+ * breaks that law invisibly.
  */
 export interface WitnessIdentityFactory {
   allocate(args: {
     readonly runId: RunId;
+    readonly missionId: MissionId;
     readonly attemptId: AttemptId;
     readonly processId: ProcessId;
     readonly suggestedWitnessId: WitnessId;
@@ -259,38 +293,31 @@ export type WitnessSpecValidation =
 export function validateWitnessStartSpec(
   spec: WitnessStartSpec,
 ): WitnessSpecValidation {
-  const mustBe = (cond: boolean, msg: string): string | null =>
-    cond ? null : msg;
-
   const reasons: string[] = [];
-  const push = (r: string | null): void => {
-    if (r !== null) reasons.push(r);
-  };
+  const req = (
+    cond: boolean, msg: string,
+  ): void => { if (!cond) reasons.push(msg); };
 
-  push(mustBe(typeof spec.runDir === "string" && spec.runDir.length > 0,
-    "runDir required"));
-  push(mustBe(typeof spec.controlDir === "string" && spec.controlDir.length > 0,
-    "controlDir required"));
-  push(mustBe(typeof spec.socketPath === "string" && spec.socketPath.length > 0,
-    "socketPath required"));
-  push(mustBe(typeof spec.ledgerWriterSocketPath === "string" && spec.ledgerWriterSocketPath.length > 0,
-    "ledgerWriterSocketPath required (B0 freeze: writer binding is mandatory)"));
-  push(mustBe(spec.runId.length > 0, "runId required"));
-  push(mustBe(spec.missionId.length > 0, "missionId required"));
-  push(mustBe(spec.attemptId.length > 0, "attemptId required"));
-  push(mustBe(spec.processId.length > 0, "processId required"));
-  push(mustBe(spec.suggestedWitnessId.length > 0,
-    "suggestedWitnessId required"));
-  push(mustBe(Number.isInteger(spec.protocolVersion) && spec.protocolVersion > 0,
-    "protocolVersion must be a positive integer"));
-  push(mustBe(Number.isInteger(spec.bootstrapLeaseMs) && spec.bootstrapLeaseMs > 0,
-    "bootstrapLeaseMs must be a positive integer"));
-  push(mustBe(typeof spec.witnessesEntry === "string" && spec.witnessesEntry.length > 0,
-    "witnessesEntry required"));
-  push(mustBe(typeof spec.tsxLoader === "string" && spec.tsxLoader.length > 0,
-    "tsxLoader required"));
-  push(mustBe(typeof spec.nodePath === "string" && spec.nodePath.length > 0,
-    "nodePath required"));
+  req(typeof spec.runDir === "string" && spec.runDir.length > 0, "runDir required");
+  req(typeof spec.controlDir === "string" && spec.controlDir.length > 0, "controlDir required");
+  req(typeof spec.socketPath === "string" && spec.socketPath.length > 0, "socketPath required");
+  req(typeof spec.ledgerWriterSocketPath === "string" && spec.ledgerWriterSocketPath.length > 0,
+    "ledgerWriterSocketPath required (B0 freeze: writer binding is mandatory)");
+  req(spec.runId.length > 0, "runId required");
+  req(spec.missionId.length > 0, "missionId required");
+  req(spec.attemptId.length > 0, "attemptId required");
+  req(spec.processId.length > 0, "processId required");
+  req(spec.suggestedWitnessId.length > 0, "suggestedWitnessId required");
+  req(Number.isInteger(spec.protocolVersion) && spec.protocolVersion > 0,
+    "protocolVersion must be a positive integer");
+  req(Number.isInteger(spec.bootstrapLeaseMs) && spec.bootstrapLeaseMs > 0,
+    "bootstrapLeaseMs must be a positive integer");
+  req(typeof spec.witnessesEntry === "string" && spec.witnessesEntry.length > 0,
+    "witnessesEntry required");
+  req(typeof spec.tsxLoader === "string" && spec.tsxLoader.length > 0,
+    "tsxLoader required");
+  req(typeof spec.nodePath === "string" && spec.nodePath.length > 0,
+    "nodePath required");
 
   if (reasons.length > 0) {
     return { ok: false, reason: reasons.join("; ") };
@@ -318,4 +345,45 @@ export function computeWitnessStartCommitId(
   identity: WitnessStartIdentity,
 ): string {
   return `w-start/${identity.runId}/${identity.attemptId}/${identity.processId}/${identity.witnessId}/${identity.witnessInstanceId}`;
+}
+
+/**
+ * Derive a grammar-valid EventId for a witness_start_requested
+ * intent.
+ *
+ *   eventId = "w-start-" + sha256(identity).slice(0,16)
+ *
+ * Why a hash:
+ *   - the canonical identity tuple contains slash-bearing
+ *     tokens; embedding it directly would violate
+ *     IDENTIFIER_GRAMMAR (no slashes allowed)
+ *   - the previous implementation concatenated
+ *     "w-start-" + commitId, which used `as never` to bypass
+ *     the grammar check (P1#4). That was a type-system
+ *     escape hatch, not a real conversion.
+ *
+ * Why sha256-prefix-16:
+ *   - deterministic from the identity
+ *   - bounded (≤128 chars total: "w-start-" + 16 hex = 24)
+ *   - uses only ASCII alphanumerics + hyphen (grammar-clean)
+ *   - collision risk is bounded by the writer's seq
+ *     authority (eventId is informational; seq is
+ *     authoritative)
+ */
+export function makeEventIdFromIdentity(
+  identity: WitnessStartIdentity,
+): import("../domain/ids.js").EventId {
+  const canonical = [
+    identity.runId,
+    identity.missionId,
+    identity.attemptId,
+    identity.processId,
+    identity.witnessId,
+    identity.witnessInstanceId,
+  ].join("\u0001");
+  const hex = createHash("sha256")
+    .update(canonical, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  return makeEventId("w-start-" + hex);
 }

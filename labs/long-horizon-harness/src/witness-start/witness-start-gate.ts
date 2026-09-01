@@ -30,6 +30,7 @@ import type {
   WitnessIntentCommitPort,
   WitnessSpawnPort,
   WitnessSpecValidation,
+  WitnessSpawnSpecResult,
   WitnessStartFailure,
   WitnessStartIdentity,
   WitnessStartSpec,
@@ -39,12 +40,20 @@ import type {
 } from "./witness-start-types.js";
 import {
   computeWitnessStartCommitId,
+  makeEventIdFromIdentity,
   validateWitnessStartSpec,
 } from "./witness-start-types.js";
 
 /**
  * Production commit port: thin adapter over
  * appendWitnessEvidence.
+ *
+ * P1#4 correction: the adapter accepts an explicit
+ * eventId from the gate (already grammar-valid) and
+ * passes it through. It does NOT manufacture an eventId
+ * itself. The previous "w-start-" + commitId cast was a
+ * type-system escape hatch producing an invalid EventId
+ * (slashes embedded).
  */
 function appendWitnessEvidencePort(): WitnessIntentCommitPort {
   return {
@@ -56,7 +65,7 @@ function appendWitnessEvidencePort(): WitnessIntentCommitPort {
         binding: args.binding as WitnessLedgerBinding,
         runId: args.runId,
         missionId: args.missionId,
-        eventId: ("w-start-" + args.commitId) as never,
+        eventId: args.eventId,
         observedAt: args.observedAt,
         commitId: args.commitId,
         payload: args.payload,
@@ -95,6 +104,10 @@ function mapLedgerError(e: WitnessLedgerError): IntentPersistenceFailure {
  * Production identity factory: mints a fresh
  * WitnessInstanceId. The WitnessId is taken from the spec.
  * IDENTITY_FACTORY_CALLS is 1 per WS04.
+ *
+ * P1#1 correction: missionId MUST come from args.missionId,
+ * not from any other field. The previous version silently
+ * substituted args.runId, corrupting missionId continuity.
  */
 function defaultIdentityFactory(): WitnessIdentityFactory {
   return {
@@ -107,7 +120,7 @@ function defaultIdentityFactory(): WitnessIdentityFactory {
       );
       return {
         runId: args.runId,
-        missionId: args.runId as never,
+        missionId: args.missionId,
         attemptId: args.attemptId,
         processId: args.processId,
         witnessId: args.suggestedWitnessId,
@@ -158,9 +171,12 @@ export async function startWitness(
     };
   }
 
-  // 2. Allocate identity exactly once (WS04).
+  // 2. Allocate identity exactly once (WS04). The factory
+  //    receives missionId explicitly; production must not
+  //    substitute any other field for it (P1#1).
   const startIdentity: WitnessStartIdentity = identity.allocate({
     runId: spec.runId,
+    missionId: spec.missionId,
     attemptId: spec.attemptId,
     processId: spec.processId,
     suggestedWitnessId: spec.suggestedWitnessId,
@@ -175,6 +191,14 @@ export async function startWitness(
     witness_id: startIdentity.witnessId,
     witness_instance_id: startIdentity.witnessInstanceId,
   };
+  // P1#4: the EventId must satisfy the project's
+  // IDENTIFIER_GRAMMAR (^[A-Za-z0-9_.:-]{1,128}$). It MUST
+  // NOT embed the slash-bearing commitId; the cast
+  // `as never` used to bypass this was a type-system
+  // escape hatch, not a real conversion. We derive a
+  // bounded, slash-free, deterministic EventId from the
+  // identity via sha256.
+  const eventId = makeEventIdFromIdentity(startIdentity);
   const commitResult: IntentCommitResult = await (async (): Promise<IntentCommitResult> => {
     try {
       return await commit.commit({
@@ -186,6 +210,7 @@ export async function startWitness(
         missionId: startIdentity.missionId,
         observedAt: now(),
         commitId,
+        eventId,
         payload,
       });
     } catch (e: unknown) {
@@ -212,6 +237,13 @@ export async function startWitness(
   }
 
   // 4. Spawn. Only reached after durable ACK.
+  //
+  // P1#2 correction: the spawn port is ASYNC. Its Promise
+  // must not resolve ok:true before Node's `'spawn'` event
+  // has fired (WS09 / WS09a). This is what gives the
+  // algebra a real meaning: ok:true is now "OS witness
+  // creation observed" (Node semantics), not "Node
+  // returned a ChildProcess object."
   if (spawnPort === undefined) {
     return {
       ok: false,
@@ -221,23 +253,39 @@ export async function startWitness(
       },
     };
   }
-  const spawnResult = spawnPort.spawn({
-    runDir: spec.runDir,
-    controlDir: spec.controlDir,
-    socketPath: spec.socketPath,
-    runId: startIdentity.runId,
-    missionId: startIdentity.missionId,
-    attemptId: startIdentity.attemptId,
-    processId: startIdentity.processId,
-    witnessId: startIdentity.witnessId,
-    witnessInstanceId: startIdentity.witnessInstanceId,
-    protocolVersion: spec.protocolVersion,
-    bootstrapLeaseMs: spec.bootstrapLeaseMs,
-    ledgerWriterSocketPath: spec.ledgerWriterSocketPath,
-    witnessesEntry: spec.witnessesEntry,
-    tsxLoader: spec.tsxLoader,
-    nodePath: spec.nodePath,
-  });
+  // Try/catch around the await to surface a synchronous
+  // throw from the spawn port (rare but possible if the
+  // port adapter is malformed) as a typed failure.
+  let spawnResult: WitnessSpawnSpecResult;
+  try {
+    spawnResult = await spawnPort.spawn({
+      runDir: spec.runDir,
+      controlDir: spec.controlDir,
+      socketPath: spec.socketPath,
+      runId: startIdentity.runId,
+      missionId: startIdentity.missionId,
+      attemptId: startIdentity.attemptId,
+      processId: startIdentity.processId,
+      witnessId: startIdentity.witnessId,
+      witnessInstanceId: startIdentity.witnessInstanceId,
+      protocolVersion: spec.protocolVersion,
+      bootstrapLeaseMs: spec.bootstrapLeaseMs,
+      ledgerWriterSocketPath: spec.ledgerWriterSocketPath,
+      witnessesEntry: spec.witnessesEntry,
+      tsxLoader: spec.tsxLoader,
+      nodePath: spec.nodePath,
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      failure: {
+        kind: "spawn_failed",
+        identity: startIdentity,
+        cause: { kind: "spawn_threw", message: msg },
+      },
+    };
+  }
   if (!spawnResult.ok) {
     return {
       ok: false,

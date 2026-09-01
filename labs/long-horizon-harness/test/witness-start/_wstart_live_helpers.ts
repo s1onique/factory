@@ -195,6 +195,53 @@ export function findStartIntent(
 }
 
 /**
+ * Count witness_start_requested records in the ledger.
+ * WSTART-LIVE01 (Phase A) requires this to be exactly 1.
+ */
+export function countStartIntents(
+  ledger: ReadonlyArray<Record<string, unknown>>,
+): number {
+  let n = 0;
+  for (const env of ledger) {
+    if (
+      env["kind"] === "witness_evidence" &&
+      env["witness_evidence"] !== undefined &&
+      (env["witness_evidence"] as Record<string, unknown>)["kind"]
+        === "witness_start_requested"
+    ) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * Find a witness_ready entry whose witness_instance_id
+ * matches the given instance. WSTART-LIVE01 (Phase A)
+ * uses this to verify the witness that became ready is
+ * the same identity that was durably authorized.
+ */
+export function findReadyForInstance(
+  ledger: ReadonlyArray<Record<string, unknown>>,
+  witnessInstanceId: string,
+): Record<string, unknown> | null {
+  for (const env of ledger) {
+    if (
+      env["kind"] === "witness_evidence" &&
+      env["witness_evidence"] !== undefined &&
+      (env["witness_evidence"] as Record<string, unknown>)["kind"]
+        === "witness_ready" &&
+      (env["witness_evidence"] as Record<string, unknown>)[
+        "witness_instance_id"
+      ] === witnessInstanceId
+    ) {
+      return env;
+    }
+  }
+  return null;
+}
+
+/**
  * Check whether a child process is alive by signal 0.
  */
 export function pidAlive(pid: number): boolean {

@@ -5,7 +5,6 @@ import type {
   WitnessSpawnPort,
   WitnessSpawnSpec,
   WitnessSpawnSpecResult,
-  WitnessSpawnFailure,
 } from "./witness-start-types.js";
 
 function buildArgv(spec: WitnessSpawnSpec): string[] {
@@ -56,9 +55,31 @@ function wrapChild(child: ChildProcess): WitnessSpawnHandle {
   return handle;
 }
 
+/**
+ * Production spawn port. P1#2 / WS09a / WS09b / WS09c:
+ *
+ *   spawn() returns a Promise that resolves only after
+ *   the underlying Node `'spawn'` event has fired. A
+ *   pre-spawn `'error'` event (ENOENT, EACCES, etc.)
+ *   resolves the Promise with a `spawn_failed` result
+ *   BEFORE the supervisor ever observes ok:true. A
+ *   post-spawn `'error'` (or 'exit') does NOT trigger
+ *   `spawn_failed`; the spawned witness is already
+ *   authoritative and its lifecycle is owned by the
+ *   supervisor / recovery layer.
+ *
+ * Node documentation reference:
+ *   "The 'spawn' event is emitted once the child process
+ *    has spawned successfully. If the child process does
+ *    not spawn successfully, the 'error' event is emitted
+ *    instead."
+ *
+ * The listeners are attached SYNCHRONOUSLY inside spawn()
+ * before any I/O can complete, so no event can be missed.
+ */
 export function nodeSpawnWitnessPort(): WitnessSpawnPort {
   return {
-    spawn(spec: WitnessSpawnSpec): WitnessSpawnSpecResult {
+    spawn(spec: WitnessSpawnSpec): Promise<WitnessSpawnSpecResult> {
       const argv = buildArgv(spec);
       let child: ChildProcess;
       try {
@@ -67,13 +88,38 @@ export function nodeSpawnWitnessPort(): WitnessSpawnPort {
           detached: false,
         });
       } catch (e: unknown) {
+        // Synchronous throw from spawn (very rare; usually
+        // invalid options or OOM). Map to spawn_threw.
         const msg = e instanceof Error ? e.message : String(e);
-        return {
+        return Promise.resolve({
           ok: false,
-          failure: { kind: "spawn_threw", message: msg } satisfies WitnessSpawnFailure,
-        };
+          failure: { kind: "spawn_threw", message: msg },
+        });
       }
-      return { ok: true, handle: wrapChild(child) };
+      return new Promise<WitnessSpawnSpecResult>((resolve) => {
+        let settled = false;
+        const settle = (r: WitnessSpawnSpecResult): void => {
+          if (settled) return;
+          settled = true;
+          resolve(r);
+        };
+        // Attach listeners synchronously so no event can
+        // be lost between spawn() returning and us listening.
+        child.once("spawn", () => {
+          settle({ ok: true, handle: wrapChild(child) });
+        });
+        child.once("error", (err: Error) => {
+          settle({
+            ok: false,
+            failure: { kind: "spawn_error_event", message: err.message },
+          });
+        });
+        // WS09c: a POST-spawn 'error' (e.g. the spawned
+        // process later emits 'error') does NOT trigger
+        // spawn_failed. We deliberately do NOT attach a
+        // listener to that case; the supervisor / recovery
+        // layer owns post-spawn lifecycle.
+      });
     },
   };
 }

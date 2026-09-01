@@ -23,6 +23,7 @@ import type {
 } from "../../src/witness-start/witness-start-types.js";
 
 export type StagedSpawn =
+  | { readonly kind: "pending" }
   | { readonly kind: "ok"; readonly handle: WitnessSpawnHandle }
   | { readonly kind: "failure"; readonly failure: WitnessSpawnFailure };
 
@@ -31,6 +32,7 @@ export interface FakeCommit extends WitnessIntentCommitPort {
   lastCommitId: string | null;
   lastPayloadKind: string | null;
   lastObservedAt: number | null;
+  lastEventId: string | null;
   stageNext(result: IntentCommitResult): void;
   /**
    * Convenience: stage the success shorthand
@@ -50,6 +52,14 @@ export interface FakeSpawn extends WitnessSpawnPort {
   calls: number;
   lastSpec: WitnessSpawnSpec | null;
   setNext(stage: StagedSpawn): void;
+  /**
+   * Settle a previously-pending spawn with an outcome.
+   * Mirrors the resolvePending pattern on FakeCommit.
+   * Used by WS09a to assert that the gate does not resolve
+   * before the spawn Promise has been settled by the
+   * underlying Node `'spawn'` event.
+   */
+  resolvePending(result: WitnessSpawnSpecResult): void;
 }
 
 export interface FakeIdentity extends WitnessIdentityFactory {
@@ -67,6 +77,7 @@ export function makeFakeCommit(): FakeCommit {
     lastCommitId: null,
     lastPayloadKind: null,
     lastObservedAt: null,
+    lastEventId: null,
     stageNext(result: IntentCommitResult): void {
       staged = result;
     },
@@ -92,6 +103,7 @@ export function makeFakeCommit(): FakeCommit {
       c.lastCommitId = args.commitId;
       c.lastPayloadKind = args.payload.kind;
       c.lastObservedAt = args.observedAt;
+      c.lastEventId = args.eventId;
       if (rejectReason !== null) {
         const reason = rejectReason;
         rejectReason = null;
@@ -127,22 +139,46 @@ export function makeFakeSpawn(): FakeSpawn {
     kind: "ok",
     handle: makeFakeHandle(),
   };
+  let pendingResolve:
+    | ((r: WitnessSpawnSpecResult) => void)
+    | null = null;
   const s: FakeSpawn = {
     calls: 0,
     lastSpec: null,
     setNext(stage: StagedSpawn): void {
       staged = stage;
     },
-    spawn(spec: WitnessSpawnSpec): WitnessSpawnSpecResult {
+    resolvePending(result: WitnessSpawnSpecResult): void {
+      if (pendingResolve === null) {
+        throw new Error("FakeSpawn.resolvePending: no spawn is pending");
+      }
+      const pr = pendingResolve;
+      pendingResolve = null;
+      pr(result);
+    },
+    spawn(spec: WitnessSpawnSpec): Promise<WitnessSpawnSpecResult> {
       s.calls += 1;
       s.lastSpec = spec;
-      if (staged === null) {
-        return { ok: true, handle: makeFakeHandle() };
+      // Pending: defer until resolvePending.
+      if (staged !== null && staged.kind === "pending") {
+        staged = null;
+        return new Promise<WitnessSpawnSpecResult>((resolve) => {
+          pendingResolve = resolve;
+        });
       }
-      if (staged.kind === "ok") {
-        return { ok: true, handle: staged.handle };
+      // Synchronous (immediate) outcome.
+      if (staged !== null && staged.kind === "ok") {
+        const h = staged.handle;
+        staged = null;
+        return Promise.resolve({ ok: true, handle: h });
       }
-      return { ok: false, failure: staged.failure };
+      if (staged !== null && staged.kind === "failure") {
+        const f = staged.failure;
+        staged = null;
+        return Promise.resolve({ ok: false, failure: f });
+      }
+      // Default: ok with a fresh handle.
+      return Promise.resolve({ ok: true, handle: makeFakeHandle() });
     },
   };
   return s;
@@ -163,9 +199,13 @@ export function makeFakeIdentity(
       n += 1;
       const wid = "w-n" + n.toString();
       const wii = "wi-n" + n.toString();
+      // P1#1 correction: missionId MUST come from
+      // args.missionId, never from args.runId. Tests that
+      // want a specific identity pass `base`; otherwise
+      // pass through.
       const id: WitnessStartIdentity = {
         runId: base.runId ?? args.runId,
-        missionId: base.missionId ?? (args.runId as never),
+        missionId: base.missionId ?? args.missionId,
         attemptId: base.attemptId ?? args.attemptId,
         processId: base.processId ?? args.processId,
         witnessId: base.witnessId ?? (wid as never),
