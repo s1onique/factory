@@ -38,9 +38,6 @@ import * as path from "node:path";
 import { connect } from "node:net";
 
 import { startWriterServer } from "../../src/ledger-writer/ledger-writer-server.js";
-import {
-  acquireLedgerWriterLease,
-} from "../../src/ledger-writer/ledger-writer-lease.js";
 import { makeLedgerWriterInstanceId } from "../../src/ledger-writer/ledger-writer-types.js";
 import {
   encodeFrame,
@@ -82,17 +79,12 @@ test("SHUT12 production inFlightCount tracks request lifecycle (B0-CORR06)", asy
   }
   const tmp = await mkTmp();
   try {
-    // Acquire the lease directly so startWriterServer's
-    // acquisition path does not collide with our test.
-    const lease = await acquireLedgerWriterLease({
-      runDir: tmp,
-      instanceId: makeLedgerWriterInstanceId("lw-shut12"),
-      runId: "r",
-      missionId: "m",
-    });
-    assert.equal(lease.ok, true, `lease acquire failed: ${JSON.stringify(lease)}`);
-    if (!lease.ok) return;
-
+    // CORRECTION05: do NOT pre-acquire the lease.
+    // `startWriterServer` IS the production lease
+    // acquisition path. Pre-acquiring here would cause
+    // it to see lease_held and return path_collision.
+    // Sole-writer authority belongs to startWriterServer
+    // exactly once.
     const sp = `${tmp}/s`;
     const start = await startWriterServer({
       runDir: tmp,

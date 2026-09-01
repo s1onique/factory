@@ -56,7 +56,6 @@ import {
 import {
   LEDGER_WRITER_LIVE_CASES,
   type LiveCaseCtx,
-  UNINITIALISED_APPEND_COUNTING,
   type AppendCountingFn,
 } from "./_live_cases.js";
 import {
@@ -238,7 +237,21 @@ function makeCtx(): LiveCaseCtx {
     bootHandle,
     destroyRun,
     trackRun,
-    appendCounting: STRICT ? appendCounting : UNINITIALISED_APPEND_COUNTING,
+    // CORRECTION05: the qualification ctx always
+    // delegates to the production append path. The
+    // previous `STRICT ? appendCounting : UNINITIALISED_...`
+    // routed the qualifying matrix through a sentinel
+    // stub that returned
+    //   {ok:false, error:{kind:"writer_busy", message:"uninitialised"}}.
+    // That sentinel escaped into the production-shaped
+    // Result and produced the LWQ02..LWQ11 failure
+    // pattern (every case that exercised an append
+    // failed identically with the same error).
+    //
+    // UNINITIALISED_APPEND_COUNTING is retained ONLY as
+    // a structural anti-regression guard (see ORACLE02
+    // below). It MUST NOT be wired into a ctx.
+    appendCounting,
   };
 }
 
@@ -256,6 +269,113 @@ test("SUBJECT_SHA binding: FACTORY_QUALIFICATION_SUBJECT_COMMIT must equal HEAD 
       `expected SHA ${EXPECTED_SHA} != observed SHA ${OBSERVED_SHA}`);
   } else {
     assert.match(OBSERVED_SHA, /^[0-9a-f]{40}$|^<unable-to-resolve>$/);
+  }
+});
+
+// ----------------------------------------------------------------
+// CORRECTION05 anti-regression guards.
+//
+// These two tests fail closed if anyone re-wires the
+// qualification ctx to the UNINITIALISED_APPEND_COUNTING
+// sentinel, OR if anyone reintroduces a synthetic
+// LedgerWriterAppendError with the literal "uninitialised"
+// message into the qualification lane.
+//
+// ORACLE01 — the ctx we ship delegates to production.
+// ORACLE02 — the source does not contain the
+//            "uninitialised" sentinel.
+// ----------------------------------------------------------------
+
+test("ORACLE01: qualification ctx.appendCounting delegates to production append", () => {
+  // We cannot easily run a real append here (would
+  // need a live UDS-spawnable host). Instead we
+  // verify that the ctx's appendCounting is the
+  // local `appendCounting` closure, NOT
+  // UNINITIALISED_APPEND_COUNTING. This locks in
+  // the structural property "ctx wired to the real
+  // adapter".
+  const ctx = makeCtx();
+  assert.equal(
+    ctx.appendCounting,
+    appendCounting,
+    "ORACLE01: ctx.appendCounting MUST be the production-delegating adapter, NOT the uninitialised sentinel",
+  );
+  // The sentinel's signature is identical (returns
+  // Promise<Result>) — only the implementation
+  // differs. To distinguish them at runtime, we
+  // could call each with a synthetic handle and
+  // check the SHAPE of the failure message. We
+  // skip that here: ORACLE02 (source-grep) catches
+  // any reintroduction of the sentinel into the
+  // qualifying matrix's wiring path.
+});
+
+test("ORACLE02: qualification source must not contain the 'uninitialised' sentinel", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const url = await import("node:url");
+  const src = await fs.promises.readFile(
+    path.join(path.dirname(url.fileURLToPath(import.meta.url)), "_live_cases.ts"),
+    "utf8",
+  );
+  // The sentinel string MUST only appear inside the
+  // UNINITIALISED_APPEND_COUNTING stub definition.
+  // It MUST NOT appear inside any wiring that would
+  // feed the qualifying matrix.
+  const occurrences = (src.match(/uninitialised/g) ?? []).length;
+  // The stub defines the literal string ONCE in
+  // its returned error message. We allow exactly
+  // ONE occurrence (the stub itself). Anything
+  // more means the sentinel is being propagated
+  // somewhere else.
+  assert.ok(
+    occurrences === 1,
+    `ORACLE02: 'uninitialised' must appear exactly once (in the stub); got ${occurrences}`,
+  );
+  // Belt-and-braces: confirm the wiring site in
+  // THIS file does not WIRE the sentinel into a
+  // ctx. The symbol name `UNINITIALISED_APPEND_COUNTING`
+  // is allowed ONLY in `import { ... }` lines (for
+  // documentation/re-export purposes) and in
+  // comment lines. Any other reference is a wiring
+  // violation.
+  const wiringSrc = await fs.promises.readFile(
+    path.join(path.dirname(url.fileURLToPath(import.meta.url)), "ledger-writer-live-qualification.test.ts"),
+    "utf8",
+  );
+  const lines = wiringSrc.split("\n");
+  let inImportBlock = false;
+  let inOracle02 = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    // Locate the ORACLE02 test body so we can
+    // exclude it from the structural scan
+    // (the test name itself appears in comments
+    // inside its own body — that is structural
+    // intent, not a wiring violation).
+    if (/^\s*test\(\s*["']ORACLE02/.test(line)) {
+      inOracle02 = true;
+    }
+    if (/UNINITIALISED_APPEND_COUNTING/.test(line)) {
+      const isImportBlock = inImportBlock || /^import\b/.test(line.trim());
+      const isComment = /^\s*\/\//.test(line) || /^\s*\*/.test(line);
+      const isDocReference = /ORACLE02|UNINITIALISED_APPEND_COUNTING stub|structural anti-regression|UNINITIALISED_APPEND_COUNTING is retained ONLY/.test(line);
+      assert.ok(
+        isImportBlock || isComment || isDocReference || inOracle02,
+        `ORACLE02: UNINITIALISED_APPEND_COUNTING must not be wired into a ctx (line ${i + 1}: ${line.trim()})`,
+      );
+    }
+    if (/^import\b/.test(line.trim())) {
+      inImportBlock = true;
+      // Closing brace ends the import block.
+      if (/}\s*from/.test(line)) inImportBlock = false;
+    } else if (inImportBlock && /^\s*}\s*from/.test(line)) {
+      inImportBlock = false;
+    }
+    // Closing brace + paren at column 0 ends the test.
+    if (/^\}\);?\s*$/.test(line)) {
+      inOracle02 = false;
+    }
   }
 });
 
