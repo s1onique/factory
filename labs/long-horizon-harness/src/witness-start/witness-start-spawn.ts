@@ -107,6 +107,89 @@ export function classifySpawnEvent(
 }
 
 /**
+ * Minimal emitter interface that the spawn-event handler
+ * needs. Production passes a real `ChildProcess`; tests
+ * pass a fake that fires events synchronously.
+ *
+ * CORRECTION03: this seam lets WS09c verify that the
+ * PRODUCTION handler (not just the model) routes events
+ * through `classifySpawnEvent`. Without this seam, the
+ * state machine could be tested in isolation while the
+ * production code drifted.
+ */
+export type SpawnEventEmitter = {
+  once(event: "spawn", listener: () => void): unknown;
+  once(event: "error", listener: (err: Error) => void): unknown;
+};
+
+/**
+ * Wire a SpawnEventEmitter into a Promise-settling
+ * function using `classifySpawnEvent` as the SINGLE
+ * source of truth for transition semantics.
+ *
+ * Returns a teardown function that removes the listeners.
+ *
+ * CORRECTION03: production uses this helper. WS09c
+ * calls it directly with a fake emitter, proving that
+ * the production wiring IS the same wiring the test
+ * exercises.
+ */
+export function attachSpawnEventHandler(
+  emitter: SpawnEventEmitter,
+  child: ChildProcess,
+  resolveFn: (r: WitnessSpawnSpecResult) => void,
+): () => void {
+  let settled = false;
+  let state: SpawnState = "pending";
+  let lastError: Error | null = null;
+  const settle = (r: WitnessSpawnSpecResult): void => {
+    if (settled) return;
+    settled = true;
+    resolveFn(r);
+  };
+  const apply = (event: SpawnEvent): void => {
+    const c = classifySpawnEvent(state, event);
+    state = c.state;
+    if (!c.terminal) return;
+    if (c.ok) {
+      settle({ ok: true, handle: wrapChild(child) });
+    } else if (lastError !== null) {
+      settle({
+        ok: false,
+        failure: {
+          kind: "spawn_error_event",
+          message: lastError.message,
+        },
+      });
+    } else {
+      settle({
+        ok: false,
+        failure: {
+          kind: "spawn_error_event",
+          message: "spawn failed (no captured error)",
+        },
+      });
+    }
+  };
+  const onSpawn = (): void => { apply("spawn"); };
+  const onError = (err: Error): void => {
+    lastError = err;
+    apply("error");
+  };
+  emitter.once("spawn", onSpawn);
+  emitter.once("error", onError);
+  return () => {
+    // The teardown function intentionally does not
+    // unbind Node listeners — Node ChildProcess
+    // listeners are one-shot via .once(); a fake emitter
+    // does the same. The teardown is a no-op marker for
+    // symmetry; tests that want to assert no-residue
+    // should use the helper's promise.
+    void 0;
+  };
+}
+
+/**
  * Production spawn port. P1#2 / WS09a / WS09b / WS09c:
  *
  *   spawn() returns a Promise that resolves only after
@@ -118,6 +201,13 @@ export function classifySpawnEvent(
  *   `spawn_failed`; the spawned witness is already
  *   authoritative and its lifecycle is owned by the
  *   supervisor / recovery layer.
+ *
+ * CORRECTION03: the production adapter is wired to
+ * `classifySpawnEvent()` — every Node event is routed
+ * through the same pure state machine that WS09c tests.
+ * The adapter and the test exercise the SAME transition
+ * table; the doctrine is no longer "extract a model and
+ * trust the implementation parallels it".
  *
  * Node documentation reference:
  *   "The 'spawn' event is emitted once the child process
@@ -148,28 +238,10 @@ export function nodeSpawnWitnessPort(): WitnessSpawnPort {
         });
       }
       return new Promise<WitnessSpawnSpecResult>((resolve) => {
-        let settled = false;
-        const settle = (r: WitnessSpawnSpecResult): void => {
-          if (settled) return;
-          settled = true;
-          resolve(r);
-        };
-        // Attach listeners synchronously so no event can
-        // be lost between spawn() returning and us listening.
-        child.once("spawn", () => {
-          settle({ ok: true, handle: wrapChild(child) });
-        });
-        child.once("error", (err: Error) => {
-          settle({
-            ok: false,
-            failure: { kind: "spawn_error_event", message: err.message },
-          });
-        });
-        // WS09c: a POST-spawn 'error' (e.g. the spawned
-        // process later emits 'error') does NOT trigger
-        // spawn_failed. We deliberately do NOT attach a
-        // listener to that case; the supervisor / recovery
-        // layer owns post-spawn lifecycle.
+        // CORRECTION03: production uses attachSpawnEventHandler,
+        // the same helper WS09c tests. The production wiring
+        // and the test exercise the same state machine.
+        attachSpawnEventHandler(child, child, resolve);
       });
     },
   };

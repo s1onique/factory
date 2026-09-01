@@ -32,7 +32,6 @@ import {
   type LiveRunHandle,
 } from "./_wstart_live_helpers.js";
 import {
-  liveFixtureRegistrySize,
   proveChildAbsent,
   registerWitnessSpawn,
   snapshotLiveFixtures,
@@ -50,18 +49,24 @@ let skip = 0;
 let residue = 0;
 
 /**
- * CORRECTION02 (Phase A): every real witness child
- * returned by startWitness MUST be registered in the
+ * CORRECTION02/CORRECTION03 (Phase A): every real witness
+ * child returned by startWitness MUST be registered in the
  * live registry, and MUST be unregistered ONLY after
  * `proveChildAbsent` succeeded. Signal-sent is not
  * proof-of-cleanup (Q15).
+ *
+ * CORRECTION03 type hygiene: `registerWitnessSpawn`
+ * accepts a narrow `OwnedChildPort` (pid + kill). The
+ * witness's child ref is widened to that port at the
+ * registration boundary; `proveChildAbsent` operates on
+ * the real ChildProcess (single explicit cast inside
+ * this helper).
  */
-async function terminateAndProveWitness(entry: LiveFixtureEntry): Promise<boolean> {
-  const child = entry.ref as import("node:child_process").ChildProcess;
-  // Best-effort SIGTERM first; let the witness exit
-  // cleanly (it may be writing witness_lost, etc.).
+async function terminateAndProveWitness(
+  entry: LiveFixtureEntry,
+): Promise<boolean> {
+  const child = entry.ref as unknown as import("node:child_process").ChildProcess;
   try { child.kill("SIGTERM"); } catch { /* */ }
-  // Give it a small grace period, then escalate.
   await new Promise((res) => setTimeout(res, 100));
   const absent = await proveChildAbsent(child);
   if (absent) {
@@ -102,20 +107,6 @@ async function teardown(run: LiveRunHandle): Promise<void> {
   try { await fs.rm(run.controlDir, { recursive: true, force: true }); } catch { /* */ }
 }
 
-/**
- * Phase A post-suite residue oracle.
- *
- * CORRECTION02: residue is now derived from the live
- * registry (`sweepAndProve()` + `liveFixtureRegistrySize()`),
- * matching the LedgerWriter qualification. A standalone
- * integer set to 0 in setup is no longer enough — every
- * registered fixture MUST be proven absent before it is
- * unregistered.
- */
-function computeResidue(): number {
-  return liveFixtureRegistrySize();
-}
-
 test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => {
   exec += 1;
   let run: LiveRunHandle | { skip: true; reason: string } | null = null;
@@ -142,7 +133,11 @@ test("WSTART-LIVE01: durable intent then real spawn (sole intent)", async () => 
       // cannot certify WITNESS_START_LIVE_RESIDUE=0
       // without proving the witness actually disappeared.
       witnessEntry = registerWitnessSpawn({
-        child: r.value.child as unknown as import("node:child_process").ChildProcess,
+        // CORRECTION03 type hygiene: r.value.child is a
+        // WitnessSpawnHandle (narrow). registerWitnessSpawn
+        // accepts the narrower OwnedChildPort (pid + kill).
+        // No `as unknown as ChildProcess` widening.
+        child: r.value.child,
         witnessInstanceId: r.value.identity.witnessInstanceId,
         runDir: run.runDir,
       });
@@ -359,14 +354,15 @@ test("WSTART-LIVE03: durable intent then spawn ENOENT (bad nodePath)", async () 
 });
 
 after(async () => {
-  // CORRECTION02: residue is now DERIVED from the live
-  // registry, not from a standalone integer. The post-
-  // suite sweep attempts to prove every registered
-  // fixture absent (children: ESRCH via kill loop;
-  // paths: lstat ENOENT). Anything that cannot be
-  // proven absent is residue.
+  // CORRECTION03: single-source residue count.
+  // `sweepAndProve()` returns the set of fixtures that
+  // could NOT be proven absent; it ALSO leaves them in
+  // the registry (so the strict lane fails closed).
+  // Therefore `failed.length === liveFixtureRegistrySize()`.
+  // Using `failed.length + liveFixtureRegistrySize()` would
+  // double-count. We use one source — `failed.length`.
   const failed = await sweepAndProve();
-  residue = failed.length + computeResidue();
+  residue = failed.length;
   if (STRICT && residue > 0) {
     fail += 1;
   }

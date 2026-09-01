@@ -294,27 +294,47 @@ export function registerHelperSpawn(args: {
 }
 
 /**
- * (FOUNDATION04 CORRECTION02) Register a witness child
- * produced by Phase A's `startWitness` gate. The entry
- * MUST be unregistered ONLY after `proveChildAbsent`
- * succeeded. Without this registration, the strict
- * lane could certify WITNESS_START_LIVE_RESIDUE=0
- * without proving the witness actually disappeared
- * (Q15: signal-sent is not proof-of-cleanup).
+ * Narrow port for any "owned child" the live lane can
+ * terminate and prove absent.
+ *
+ *   pid:    observed child PID (set by Node's spawn())
+ *   kill:   send a signal (best-effort; does NOT prove exit)
+ *
+ * The residue oracle does NOT require anything else from
+ * the child. In particular, it does NOT need the full
+ * ChildProcess interface — that would force the test
+ * harness to widen `r.value.child` (a narrower
+ * WitnessSpawnHandle) to a wider type, which is a
+ * coupling tax (CORRECTION03 P2).
+ */
+export type OwnedChildPort = {
+  readonly pid: number | null;
+  kill(signal?: NodeJS.Signals): boolean;
+};
+
+/**
+ * (FOUNDATION04 CORRECTION02/CORRECTION03) Register a
+ * witness child produced by Phase A's `startWitness`
+ * gate. The entry MUST be unregistered ONLY after
+ * `proveChildAbsent` succeeded. Without this
+ * registration, the strict lane could certify
+ * WITNESS_START_LIVE_RESIDUE=0 without proving the
+ * witness actually disappeared (Q15: signal-sent is not
+ * proof-of-cleanup).
  *
  * `witnessInstanceId` is recorded as the note so the
  * residue sweep can identify which witness (if any)
  * failed to clean up.
  */
 export function registerWitnessSpawn(args: {
-  readonly child: import("node:child_process").ChildProcess;
+  readonly child: OwnedChildPort;
   readonly witnessInstanceId: string;
   readonly runDir: string;
 }): LiveFixtureEntry {
   const entry: LiveFixtureEntry = {
     kind: "helper_child",
     ref: args.child,
-    pid: args.child.pid,
+    pid: args.child.pid ?? undefined,
     note:
       `witness instance=${args.witnessInstanceId} ` +
       `runDir=${args.runDir}`,
