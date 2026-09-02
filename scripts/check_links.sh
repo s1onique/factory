@@ -32,6 +32,17 @@ check_link_text() {
 echo "=== Factory Link Sanity Check ==="
 echo ""
 
+# Verify the Git worktree topology first, because link sanity is only
+# meaningful on the canonical main worktree (FACTORY_GIT_WORKTREE_POLICY).
+echo "Checking Git worktree topology..."
+if bash "$(dirname "$0")/verify_worktree_policy.sh"; then
+    echo "  ✓ worktree topology is canonical"
+else
+    echo "  ✗ worktree topology is NOT canonical (see verify_worktree_policy.sh)"
+    ERRORS=$((ERRORS + 1))
+fi
+echo ""
+
 # Verify key paths exist
 echo "Checking key paths..."
 check_path "README.md" "README.md"

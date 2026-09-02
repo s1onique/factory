@@ -27,7 +27,16 @@ Doctrine answers: *What have we learned that holds across projects? What guidanc
 
 ## Current Doctrine
 
-This section is under development. Doctrine pages will be added as patterns are validated across multiple projects.
+This section lists the Factory doctrines that are evidence-backed and
+mechanically enforceable.
+
+### Adopted doctrines
+
+- **[Git Worktree Policy](./git-worktree-policy.md)** —
+  `FACTORY_GIT_WORKTREE_POLICY`. The Factory repository uses exactly
+  one authoritative Git working tree (the main worktree). Linked
+  worktrees are forbidden as a Factory workflow isolation mechanism.
+  Enforced by `scripts/verify_worktree_policy.sh`.
 
 ### Planned doctrine topics
 

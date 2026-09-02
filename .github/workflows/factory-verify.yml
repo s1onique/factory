@@ -1,0 +1,28 @@
+name: Factory verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  factory-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run FACTORY_GIT_WORKTREE_POLICY verifier
+        run: bash scripts/verify_worktree_policy.sh
+
+      - name: Run adversarial tests for the worktree policy
+        run: bash tests/worktree_policy/test_worktree_policy.sh
+
+      - name: Run top-level Factory gate
+        run: bash scripts/verify_factory.sh
+
+      - name: git diff --check
+        run: git diff --check HEAD
