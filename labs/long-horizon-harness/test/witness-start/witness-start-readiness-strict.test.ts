@@ -89,6 +89,19 @@ function mkHandle(overrides?: {
     on: () => ({}),
     bootstrapOutput: () => out,
     exitInfo: () => exit,
+    // CORRECTION10: fake terminal-output barrier.
+    whenBootstrapOutputClosed: () => Promise.resolve({
+      stdout: {
+        bytesSeen: (overrides?.stdout ?? "").length,
+        bytesRetained: (overrides?.stdout ?? "").length,
+        truncated: false,
+      },
+      stderr: {
+        bytesSeen: (overrides?.stderr ?? "").length,
+        bytesRetained: (overrides?.stderr ?? "").length,
+        truncated: false,
+      },
+    }),
   };
 }
 

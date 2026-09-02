@@ -192,7 +192,9 @@ export type WitnessExitInfo = {
  * The handle is intentionally narrow. It does NOT expose
  * raw mutable Node streams (that would let tests hide
  * pipe-pressure bugs). The diagnostic surface is the
- * read-only `bootstrapOutput()` and `exitInfo()` methods.
+ * read-only `bootstrapOutput()` and `exitInfo()` methods
+ * plus the terminal-output barrier
+ * `whenBootstrapOutputClosed()` (CORRECTION10).
  */
 export type WitnessSpawnHandle = {
   readonly pid: number | null;
@@ -203,7 +205,9 @@ export type WitnessSpawnHandle = {
    * Bounded, drain-continuous child stdio evidence.
    * Always non-null; safe to call after the child has
    * exited (the bounded buffer has already absorbed
-   * whatever the kernel delivered).
+   * whatever the kernel delivered), but the values
+   * returned are FINAL ONLY when the
+   * `whenBootstrapOutputClosed()` barrier has resolved.
    */
   bootstrapOutput(): WitnessBootstrapOutput;
   /**
@@ -211,6 +215,24 @@ export type WitnessSpawnHandle = {
    * the child is still running; `exited: true` once.
    */
   exitInfo(): WitnessExitInfo;
+  /**
+   * Terminal-output-accounting barrier (CORRECTION10).
+   *
+   * Resolves when both stdout and stderr bounded drains
+   * have observed their terminal lifecycle boundary
+   * (`'end'` or `'close'` on the underlying Readable),
+   * yielding the FINAL stats for each stream. The
+   * returned `bytesSeen` / `truncated` are authoritative
+   * after this resolves; before this resolves,
+   * `bootstrapOutput()` returns partial values.
+   *
+   * Rejects if either stream errors before terminal end.
+   * Never fabricates a deadline-resolved success.
+   */
+  whenBootstrapOutputClosed(): Promise<{
+    readonly stdout: import("./witness-start-bootstrap-output.js").BoundedOutputStats;
+    readonly stderr: import("./witness-start-bootstrap-output.js").BoundedOutputStats;
+  }>;
 };
 
 /**

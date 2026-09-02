@@ -1,5 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { drainBounded } from "./witness-start-bootstrap-output.js";
+import {
+  drainBounded,
+  type BoundedOutputStats,
+  type DrainCompletion,
+} from "./witness-start-bootstrap-output.js";
 import type {
   WitnessBootstrapOutput,
   WitnessExitInfo,
@@ -123,6 +127,60 @@ export function wrapChild(child: ChildProcess): WitnessSpawnHandle {
     }
     return handle;
   };
+
+  // CORRECTION10: terminal-output-accounting barrier.
+  //
+  // Each stream's drain owns its own `whenEnded()`; the
+  // composed `whenBootstrapOutputClosed()` awaits both
+  // and exposes the terminal stats as the authority.
+  //
+  // Streams that were never piped (`stdout: 'ignore'`)
+  // have no drain → no barrier → we substitute a
+  // pre-resolved `{kind:"ended", stats: zero}` so the
+  // composed barrier is just-as-awaitable in tests
+  // that exercise the unpipe edge.
+  const zeroCompletion: Promise<DrainCompletion> = Promise.resolve({
+    kind: "ended",
+    stats: { bytesSeen: 0, bytesRetained: 0, truncated: false },
+  });
+  const stdoutCompletion: Promise<DrainCompletion> =
+    stdoutDrain !== null
+      ? stdoutDrain.whenEnded()
+      : zeroCompletion;
+  const stderrCompletion: Promise<DrainCompletion> =
+    stderrDrain !== null
+      ? stderrDrain.whenEnded()
+      : zeroCompletion;
+
+  const whenBootstrapOutputClosed = (): Promise<{
+    readonly stdout: BoundedOutputStats;
+    readonly stderr: BoundedOutputStats;
+  }> => {
+    return Promise.all([stdoutCompletion, stderrCompletion]).then(
+      ([so, se]) => {
+        // CORRECTION10 terminal-output-accounting law:
+        // a stream that errored before terminal end does
+        // NOT yield a final byte count. We surface the
+        // partial stats AND re-throw so callers cannot
+        // silently get a `kind:"ended"` mint from a stream
+        // that never reached terminal.
+        if (so.kind === "stream_error") {
+          throw new Error(
+            "wrapChild: stdout drained with stream_error before terminal end: " +
+              so.error.message,
+          );
+        }
+        if (se.kind === "stream_error") {
+          throw new Error(
+            "wrapChild: stderr drained with stream_error before terminal end: " +
+              se.error.message,
+          );
+        }
+        return { stdout: so.stats, stderr: se.stats };
+      },
+    );
+  };
+
   const handle: WitnessSpawnHandle = {
     pid: child.pid === undefined ? null : child.pid,
     kill: (signal?: NodeJS.Signals): boolean => {
@@ -143,6 +201,7 @@ export function wrapChild(child: ChildProcess): WitnessSpawnHandle {
       };
     },
     exitInfo: (): WitnessExitInfo => exit,
+    whenBootstrapOutputClosed,
   };
   return handle;
 }

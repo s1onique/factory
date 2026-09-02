@@ -146,6 +146,13 @@ export function makeFakeHandle(pid = 99999): WitnessSpawnHandle {
       stderrTruncated: false,
     }),
     exitInfo: () => ({ pid, code: null, signal: null, exited: false }),
+    // CORRECTION10: fake terminal-output barrier.
+    // Tests of unit scope never exercise the live boundary;
+    // they rely on this pre-resolved zero-stats barrier.
+    whenBootstrapOutputClosed: () => Promise.resolve({
+      stdout: { bytesSeen: 0, bytesRetained: 0, truncated: false },
+      stderr: { bytesSeen: 0, bytesRetained: 0, truncated: false },
+    }),
   };
 }
 

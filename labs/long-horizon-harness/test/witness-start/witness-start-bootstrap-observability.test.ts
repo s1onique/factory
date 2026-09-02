@@ -14,6 +14,23 @@
  *   stdout/stderr, the owner MUST continuously drain
  *   those pipes even after the retained evidence cap is
  *   reached.
+ *
+ * Doctrine (terminal-output-accounting law — CORRECTION10):
+ *   Exact byte-accounting on a child's stdio is
+ *   authoritative ONLY after the bounded drains owning
+ *   those streams have observed their terminal lifecycle
+ *   boundary (`'end'` / `'close'` on the underlying
+ *   Readable). Node's documented `'exit'` fires BEFORE
+ *   the streams close; reading `bootstrapOutput()`
+ *   immediately after `'exit'` is a partial count.
+ *   The wall-clock fence `setTimeout(N)` after `'exit'`
+ *   is not a substitute for observing the terminal
+ *   boundary. Tests below use the `whenBootstrapOutputClosed()`
+ *   barrier exactly so this property is mechanically
+ *   enforced — exact-equality assertions appear ONLY
+ *   after the barrier resolves, and the barrier itself
+ *   is built from stream lifecycle events, not from
+ *   elapsed time.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -122,13 +139,16 @@ test("BOOTOBS05: wrapChild captures exit code and signal", async () => {
   assert.equal(exit.signal, null, "BOOTOBS05: signal must be null on normal exit");
 });
 
-test("BOOTOBS06: child emitting >> cap cannot deadlock the parent (pipe-drain law)", async () => {
+test("BOOTOBS06: child emitting >> cap cannot deadlock the parent; exact byte accounting after terminal barrier (pipe-drain + terminal-output-accounting laws)", async () => {
   // Generate enough output to fill any kernel pipe
-  // buffer (64 KiB default on macOS, 64 KiB on Linux) and
-  // also exceed the 64 KiB default bounded-buffer cap.
-  // If the supervisor stopped reading, the child would
-  // block on the next write, the test would time out,
-  // and the host burn would deadlock in production.
+  // buffer (64 KiB default on macOS, 64 KiB on Linux)
+  // and also exceed the 64 KiB default bounded-buffer
+  // cap. The owner MUST keep draining so the child
+  // never blocks. Once the terminal stream lifecycle
+  // boundary has been observed (the
+  // whenBootstrapOutputClosed() barrier), the
+  // accounting MUST be exact — no `>=`, no probabilistic
+  // fence, no sleep.
   const child: ChildProcess = spawn(
     process.execPath,
     ["-e",
@@ -139,19 +159,31 @@ test("BOOTOBS06: child emitting >> cap cannot deadlock the parent (pipe-drain la
   const handle = wrapChild(child);
   const start = Date.now();
   await new Promise<void>((r) => child.once("exit", () => r()));
-  // Wait a tick so the bounded drain completes after the
-  // child exits. The drain runs asynchronously on the
-  // parent's event loop; the child exit event fires
-  // before the last bytes are tallied.
-  await new Promise((r) => setTimeout(r, 250));
+  // CORRECTION10: await the terminal-output barrier that
+  // owns the underlying Readables. After this resolves,
+  // `stdout` and `stderr` drain stats are FINAL.
+  const term = await handle.whenBootstrapOutputClosed();
   const dt = Date.now() - start;
   assert.ok(dt < 5000,
     "BOOTOBS06: child must exit promptly even with >cap stdout (took " + dt + "ms)");
-  const out = handle.bootstrapOutput();
-  assert.ok(out.stdoutBytesSeen >= 256 * 1024,
-    "BOOTOBS06: stdoutBytesSeen must reflect all bytes written");
-  assert.equal(out.stdoutTruncated, true,
+  // Exact-equality accounting — only valid AFTER the
+  // terminal barrier resolves. A `>=` assertion would
+  // hide a partial-count regression.
+  assert.equal(term.stdout.bytesSeen, 256 * 1024,
+    "BOOTOBS06: stdoutBytesSeen must EXACTLY equal 256*1024 after terminal barrier");
+  assert.equal(term.stdout.truncated, true,
     "BOOTOBS06: stdout must be marked truncated past the cap");
+  assert.ok(term.stdout.bytesRetained <= 64 * 1024,
+    "BOOTOBS06: retained stdout must be <= the configured cap (bytesRetained=" +
+      term.stdout.bytesRetained + ")");
+  // Cross-check: bootstrapOutput() agrees with the
+  // terminal barrier snapshot (drain has stopped
+  // accepting new data post-terminal).
+  const out = handle.bootstrapOutput();
+  assert.equal(out.stdoutBytesSeen, term.stdout.bytesSeen,
+    "BOOTOBS06: bootstrapOutput() and terminal barrier agree on bytesSeen");
+  assert.equal(out.stdoutTruncated, term.stdout.truncated,
+    "BOOTOBS06: bootstrapOutput() and terminal barrier agree on truncated bit");
 });
 
 // BOOTOBS07: a real Node child emitting a multi-line
@@ -598,3 +630,134 @@ test("BOOTOBS11: decideSocketRollback is the single source of truth for close-be
 // integration test would require either the fabrication
 // seam (now removed by CORRECTION05) or a concurrency
 // control surface that is out of scope for Phase A.
+
+// CORRECTION10 — terminal-output-accounting oracles.
+//
+// These tests lock in the property that
+// `whenBootstrapOutputClosed()` is the SINGLE source of
+// terminal accounting; exact-equality assertions appear
+// ONLY after the barrier resolves; the barrier itself is
+// built from `'end'` / `'close'` / `'error'` lifecycle
+// events (never from wall-clock fences).
+
+/**
+ * BOOTOBS12 — Real Node child that exits while final
+ * buffered stdout data is in flight. After the child
+ * has emitted ALL its bytes and exited, the
+ * `whenBootstrapOutputClosed()` barrier MUST wait for
+ * the last bytes to land in the drain and then report
+ * the EXACT count. If we resolved on `'exit'` alone,
+ * the last few bytes (still in the kernel pipe) would
+ * NOT be observed and the assertion would fail.
+ */
+test("BOOTOBS12: terminal barrier waits for final buffered stdout after exit (exact byte count)", async () => {
+  const child: ChildProcess = spawn(
+    process.execPath,
+    ["-e",
+     // Emit three 64 KiB blocks, then a small trailing
+     // byte after 'exit' is requested via
+     // setImmediate so the bytes arrive AFTER the
+     // child's exit event but BEFORE the stream is
+     // closed. This is the exact race the doctrine
+     // describes: if we settled on 'exit' alone, the
+     // trailing byte would be lost.
+     "const big = Buffer.alloc(64 * 1024, 0x42);" +
+     "process.stdout.write(big);" +
+     "process.stdout.write(big);" +
+     "process.stdout.write(big);" +
+     "setImmediate(() => { process.stdout.write('TAIL'); process.exit(0); });",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const handle = wrapChild(child);
+  await new Promise<void>((r) => child.once("exit", () => r()));
+  // Use the terminal-output barrier; do NOT take stats
+  // before it resolves.
+  const term = await handle.whenBootstrapOutputClosed();
+  // 3 * 64 KiB + 4 trailing bytes = 196608 + 4 = 196612
+  assert.equal(term.stdout.bytesSeen, 196612,
+    "BOOTOBS12: stdoutBytesSeen must EXACTLY include the 'TAIL' that landed post-exit " +
+      "(got " + term.stdout.bytesSeen + ", expected 196612)");
+  assert.equal(term.stdout.truncated, true,
+    "BOOTOBS12: 192 KiB > 64 KiB cap; truncated must be true");
+});
+
+/**
+ * BOOTOBS13 — Child emits far above the retention cap.
+ * `bytesSeen` is exact (the drain still counts every
+ * byte the kernel delivered); `bytesRetained` is
+ * bounded by the cap; the parent does not deadlock.
+ * This is the sanity check that the new
+ * `whenBootstrapOutputClosed()` pathway does not
+ * regress the existing pipe-drain accounting.
+ */
+test("BOOTOBS13: bounded drain + terminal barrier agree on retained-vs-seen under heavy load", async () => {
+  const cap = 64 * 1024;
+  const child: ChildProcess = spawn(
+    process.execPath,
+    ["-e",
+     // Write all 1 MiB synchronously respecting back-
+     // pressure, then exit ONLY after stdout reports
+     // drained. This guarantees every byte the producer
+     // intended to send reaches the kernel pipe before
+     // exit, isolating the test from any race in
+     // exit-vs-flush.
+     "const block = 'x'.repeat(4096);" +
+     "let i = 0;" +
+     "function drainNext() {" +
+     "  if (i >= 256) { process.exit(0); return; }" +
+     "  if (!process.stdout.write(block)) {" +
+     "    process.stdout.once('drain', drainNext);" +
+     "  } else {" +
+     "    i++; setImmediate(drainNext);" +
+     "  }" +
+     "}" +
+     "drainNext();",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const handle = wrapChild(child);
+  await new Promise<void>((r) => child.once("exit", () => r()));
+  const term = await handle.whenBootstrapOutputClosed();
+  assert.equal(term.stdout.bytesSeen, 256 * 4096,
+    "BOOTOBS13: bytesSeen must EXACTLY equal 256 * 4096 = 1048576");
+  assert.equal(term.stdout.bytesRetained, cap,
+    "BOOTOBS13: bytesRetained must EXACTLY equal the default 64 KiB cap");
+  assert.equal(term.stdout.truncated, true,
+    "BOOTOBS13: 1 MiB >> 64 KiB → truncated");
+});
+
+/**
+ * BOOTOBS14 — Readable emits `'error'` before terminal
+ * end. `drainBounded` MUST surface the typed error and
+ * `whenEnded()` MUST settle with `{kind:"stream_error", error}`
+ * (NOT with a synthesized `kind:"ended"`). A regression
+ * here would mean a stream that errored before
+ * completing could silently mint a fake `ended` record,
+ * which is exactly the failure mode the doctrine
+ * forbids.
+ */
+test("BOOTOBS14: stream error before terminal end → typed DrainCompletion (no synthesized ended)", async () => {
+  const r = new Readable({ read() { /* pull-mode */ } });
+  const d = drainBounded(r, 1024);
+  r.push(Buffer.from("partial"));
+  // Force an error before end is observed.
+  (r as unknown as { destroy: (e?: Error) => void }).destroy(
+    new Error("synthetic-stream-error"),
+  );
+  const c = await d.whenEnded();
+  assert.equal(c.kind, "stream_error",
+    "BOOTOBS14: stream that errored MUST yield kind=stream_error (no fake mint)");
+  if (c.kind === "stream_error") {
+    assert.ok(/synthetic-stream-error/.test(c.error.message),
+      "BOOTOBS14: the typed error must be the underlying stream error");
+  }
+  // Sanity: partial bytesSeen is what the drain observed
+  // before the error. We do NOT exact-assert (the kernel
+  // may deliver additional bytes asynchronously around
+  // the error), but we DO require partial > 0 because
+  // the test pushed "partial" before destroying.
+  const s = d.stats();
+  assert.ok(s.bytesSeen >= 7,
+    "BOOTOBS14: stats must reflect what the drain consumed (>= 7 bytes), got " + s.bytesSeen);
+});

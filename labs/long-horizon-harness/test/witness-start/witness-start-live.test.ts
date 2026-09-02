@@ -405,6 +405,10 @@ test("WSTART-LIVE02: ledger failure then zero child", async () => {
             signal: NodeJS.Signals | null;
             exited: boolean;
           };
+          whenBootstrapOutputClosed: () => Promise<{
+            stdout: { bytesSeen: number; bytesRetained: number; truncated: boolean };
+            stderr: { bytesSeen: number; bytesRetained: number; truncated: boolean };
+          }>;
         };
       }> => {
         spawnCalls += 1;
@@ -423,6 +427,10 @@ test("WSTART-LIVE02: ledger failure then zero child", async () => {
               stderrTruncated: false,
             }),
             exitInfo: () => ({ pid: 1, code: null, signal: null, exited: false }),
+            whenBootstrapOutputClosed: () => Promise.resolve({
+              stdout: { bytesSeen: 0, bytesRetained: 0, truncated: false },
+              stderr: { bytesSeen: 0, bytesRetained: 0, truncated: false },
+            }),
           },
         };
       },

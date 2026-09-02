@@ -70,7 +70,24 @@ function parseRestartLine(line: string): RestartRecord | null {
   return out;
 }
 
-async function tmpDir(): Promise<string> { return await fs.mkdtemp(join(process.cwd(), ".tmp-home", "cpcrash-")); }
+// Fixture-precondition law (CORRECTION10):
+//   A test must construct every filesystem precondition
+//   it requires; existence created by another test, a
+//   previous command, or a developer workspace is NOT a
+//   valid fixture. .tmp-home is owned by THIS test
+//   process; we create it recursively before mkdtemp
+//   because mkdtemp does not create missing parents.
+//
+// The helper accepts an optional `base` parameter so
+// the fixture-precondition oracle (REC-TMP01) can use
+// a hermetic parent that definitely does not exist
+// before the call, without affecting the run-dir base
+// the rest of the matrix relies on.
+const TMP_HOME_BASE = join(process.cwd(), ".tmp-home", "cpcrash");
+async function tmpDir(base: string = TMP_HOME_BASE): Promise<string> {
+  await fs.mkdir(base, { recursive: true });
+  return await fs.mkdtemp(join(base, "run-"));
+}
 
 interface CrashOutcome { exitCode: number | null; signal: NodeJS.Signals | null; barrier: BarrierRecord | null; ownership: OwnershipFailureRecord | null; stderr: string; stdout: string; }
 async function runCrashSupervisor(opts: { runDir: string; attemptId: string; processId: string; crashPoint: "CP03" | "CP04" | "CP06" | "CP07" | "CP10" }): Promise<CrashOutcome> {
@@ -197,6 +214,91 @@ async function recordLedgerDecision(runDir: string, attemptId: string, processId
   if (!r.ok) return { error: r.error };
   return r.decision;
 }
+
+// REC-TMP01..03 (CORRECTION10):
+//   Fixture-precondition oracles. The fresh-worktree
+//   failure (.tmp-home missing) was masked by ambient
+//   state on developer workspaces. These oracles
+//   MEASURE the precondition law mechanically:
+//
+//     REC-TMP01: with .tmp-home/cpcrash absent,
+//                tmpDir() succeeds (it owns the parent).
+//     REC-TMP02: tmpDir() always returns a unique path
+//                across N invocations.
+//     REC-TMP03: cleaning each returned dir leaves
+//                .tmp-home/cpcrash present (the parent
+//                survives children — proves the helper
+//                does not accidentally rmdir the parent).
+test("REC-TMP01: tmpDir(base) self-constructs the parent when definitely absent", async () => {
+  // Hermetic parent seam (CORRECTION10 refinement): use a
+  // base directory that this test process knows does not
+  // exist (a fresh tmpdir-anchored path), so the assertion
+  // "parent was absent before tmpDir()" can be proved
+  // mechanically instead of inferring from test order.
+  //
+  // We do NOT touch the shared TMP_HOME_BASE; an isolated
+  // base cannot interfere with concurrent REC-LIVE tests
+  // and supports reproducibility from a clean worktree.
+  const tmpRoot = await fs.mkdtemp(join(process.cwd(), ".tmp-home", "tmp01-"));
+  const absentBase = join(tmpRoot, "absent-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8));
+  // Mechanical absence proof (no `void pre;`): the lstat
+  // MUST throw ENOENT before the helper call.
+  await assert.rejects(
+    async () => { await fs.lstat(absentBase); },
+    (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT",
+    "REC-TMP01[pre]: the hermetic parent path MUST be absent before tmpDir()",
+  );
+  // Now exercise the helper. If it throws ENOENT, the
+  // fixture-precondition law is broken.
+  const d = await tmpDir(absentBase);
+  try {
+    const parentStat = await fs.lstat(absentBase);
+    assert.equal(parentStat.isDirectory(), true,
+      `REC-TMP01: ${absentBase} must be a directory after tmpDir(base)`);
+    const childStat = await fs.lstat(d);
+    assert.equal(childStat.isDirectory(), true,
+      `REC-TMP01: ${d} must be the freshly created run dir`);
+    assert.ok(d.startsWith(absentBase + "/") || d.startsWith(absentBase + "\\"),
+      `REC-TMP01: ${d} must be located under ${absentBase}`);
+  } finally {
+    // Clean up the entire hermetic root (parent + child).
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("REC-TMP02: tmpDir() returns a unique dir per call", async () => {
+  const N = 5;
+  const seen = new Set<string>();
+  const all: string[] = [];
+  for (let i = 0; i < N; i += 1) {
+    const d = await tmpDir();
+    assert.equal(seen.has(d), false,
+      `REC-TMP02: duplicate dir returned: ${d}`);
+    seen.add(d);
+    all.push(d);
+  }
+  // Verify each exists and is a directory.
+  for (const d of all) {
+    const s = await fs.lstat(d);
+    assert.equal(s.isDirectory(), true,
+      `REC-TMP02: ${d} must exist as a directory`);
+  }
+  for (const d of all) {
+    await fs.rm(d, { recursive: true, force: true });
+  }
+});
+
+test("REC-TMP03: removing a tmpDir() child leaves the parent intact", async () => {
+  const parent = join(process.cwd(), ".tmp-home", "cpcrash");
+  const d = await tmpDir();
+  assert.equal((await fs.lstat(d)).isDirectory(), true,
+    "REC-TMP03: precondition — child dir must exist before removal");
+  await fs.rm(d, { recursive: true, force: true });
+  const still = await fs.lstat(parent);
+  assert.equal(still.isDirectory(), true,
+    `REC-TMP03: parent ${parent} must still be a directory after child removal ` +
+    `(tmpDir helper must not accidentally remove the parent)`);
+});
 
 function probePid(pid: number): { state: "absent" | "alive" | "denied" | "error"; code: string | null } {
   try { process.kill(pid, 0); return { state: "alive", code: null }; }
