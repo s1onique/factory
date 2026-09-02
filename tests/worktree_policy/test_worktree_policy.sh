@@ -134,14 +134,65 @@ else
 fi
 
 # GWT-T07 — LLM/coding-agent entrypoint coverage.
+#
+# Required coverage:
+#   - AGENTS.md                            (canonical LLM entrypoint)
+#   - .clinerules/00-agents.md             (Cline compatibility shim)
+#   - docs/doctrine/README.md              (doctrine index)
+#   - docs/doctrine/git-worktree-policy.md (canonical doctrine)
+#
+# Per-file requirements:
+#   - AGENTS.md                  must reference FACTORY_GIT_WORKTREE_POLICY
+#   - .clinerules/00-agents.md   must reference AGENTS.md
+#                                must NOT restate GWT01..GWT10
+#   - docs/doctrine/README.md    must reference FACTORY_GIT_WORKTREE_POLICY
+#   - docs/doctrine/git-worktree-policy.md
+#                                must reference FACTORY_GIT_WORKTREE_POLICY
+#
+# AGENTS.md must also NOT restate the GWT0x laws.
 echo ""
 echo "--- GWT-T07 LLM entrypoint coverage ---"
-required_pointers=("AGENTS.md" "docs/doctrine/README.md" "docs/doctrine/git-worktree-policy.md")
 coverage_fail=0
-for f in "${required_pointers[@]}"; do
+
+# AGENTS.md must exist and reference the canonical doctrine name.
+if [ -f "${repo_root}/AGENTS.md" ]; then
+    if grep -q "FACTORY_GIT_WORKTREE_POLICY" "${repo_root}/AGENTS.md"; then
+        echo "  PASS  AGENTS.md references FACTORY_GIT_WORKTREE_POLICY"
+    else
+        echo "  FAIL  AGENTS.md does NOT reference FACTORY_GIT_WORKTREE_POLICY"
+        coverage_fail=1
+    fi
+else
+    echo "  FAIL  AGENTS.md is missing"
+    coverage_fail=1
+fi
+
+# .clinerules/00-agents.md must exist, reference AGENTS.md, and NOT
+# restate the GWT0x laws.
+cline_entrypoint="${repo_root}/.clinerules/00-agents.md"
+if [ -f "${cline_entrypoint}" ]; then
+    if grep -q "AGENTS\.md" "${cline_entrypoint}"; then
+        echo "  PASS  .clinerules/00-agents.md references AGENTS.md"
+    else
+        echo "  FAIL  .clinerules/00-agents.md does NOT reference AGENTS.md"
+        coverage_fail=1
+    fi
+    if ! grep -q "GWT0[1-9]" "${cline_entrypoint}" 2>/dev/null; then
+        echo "  PASS  .clinerules/00-agents.md does NOT restate GWT0x laws"
+    else
+        echo "  FAIL  .clinerules/00-agents.md appears to restate GWT0x laws"
+        coverage_fail=1
+    fi
+else
+    echo "  FAIL  .clinerules/00-agents.md is missing"
+    coverage_fail=1
+fi
+
+# Doctrine-index pointer.
+for f in "docs/doctrine/README.md" "docs/doctrine/git-worktree-policy.md"; do
     if [ -f "${repo_root}/${f}" ]; then
         if grep -q "FACTORY_GIT_WORKTREE_POLICY" "${repo_root}/${f}"; then
-            echo "  PASS  ${f} contains pointer to FACTORY_GIT_WORKTREE_POLICY"
+            echo "  PASS  ${f} references FACTORY_GIT_WORKTREE_POLICY"
         else
             echo "  FAIL  ${f} does NOT reference FACTORY_GIT_WORKTREE_POLICY"
             coverage_fail=1
@@ -152,13 +203,19 @@ for f in "${required_pointers[@]}"; do
     fi
 done
 
-# Negative check: AGENTS.md must NOT restate the whole doctrine.
+# AGENTS.md must NOT restate the GWT0x laws (negative check).
 if ! grep -q "GWT0[1-9]" "${repo_root}/AGENTS.md" 2>/dev/null; then
     echo "  PASS  AGENTS.md does NOT restate GWT0x laws"
 else
     echo "  FAIL  AGENTS.md appears to restate GWT0x laws"
     coverage_fail=1
 fi
+
+# Emit the disposition evidence required by the MICROFIX contract.
+echo ""
+echo "  CLINE_ENTRYPOINT_EXISTS=$( [ -f "${cline_entrypoint}" ] && echo yes || echo no )"
+echo "  CLINE_ENTRYPOINT_TARGET=AGENTS.md"
+echo "  CLINE_DOCTRINE_DUPLICATION=$( grep -q "GWT0[1-9]" "${cline_entrypoint}" 2>/dev/null && echo yes || echo no )"
 
 if [ "${coverage_fail}" -eq 0 ]; then
     passes=$((passes + 1))
