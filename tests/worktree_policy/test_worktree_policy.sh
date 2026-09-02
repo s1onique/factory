@@ -28,8 +28,10 @@ run_case() {
     local label="$1"
     local porcelain="$2"
     local expected_disposition="$3"
-    local expected_linked="$4"
-    local expected_detached="$5"
+    local expected_worktree_count="$4"
+    local expected_linked="$5"
+    local expected_detached="$6"
+    local expected_branch="$7"
 
     output="$(FACTORY_WT_PORCELAIN="${porcelain}" bash "${verifier}")" \
         && rc=0 || rc=$?
@@ -37,52 +39,59 @@ run_case() {
     got_disposition="$(echo "${output}" | awk -F= '/FACTORY_GIT_WORKTREE_POLICY_DISPOSITION/ {print $2}')"
     got_linked="$(echo "${output}" | awk -F= '/FACTORY_GIT_WORKTREE_POLICY_LINKED_COUNT/ {print $2}')"
     got_detached="$(echo "${output}" | awk -F= '/FACTORY_GIT_WORKTREE_POLICY_DETACHED_COUNT/ {print $2}')"
-    got_main="$(echo "${output}" | awk -F= '/FACTORY_GIT_WORKTREE_POLICY_MAIN_COUNT/ {print $2}')"
+    got_worktree_count="$(echo "${output}" | awk -F= '/FACTORY_GIT_WORKTREE_POLICY_WORKTREE_COUNT/ {print $2}')"
+    got_branch="$(echo "${output}" | awk -F= '/FACTORY_GIT_WORKTREE_POLICY_BRANCH/ {print $2}')"
 
     if [ "${expected_disposition}" = "OK" ]; then
         if [ "${rc}" -eq 0 ] \
             && [ "${got_disposition}" = "OK" ] \
+            && [ "${got_worktree_count}" = "${expected_worktree_count}" ] \
             && [ "${got_linked}" = "${expected_linked}" ] \
-            && [ "${got_detached}" = "${expected_detached}" ]; then
-            echo "  PASS  ${label}  (main=${got_main}, linked=${got_linked}, detached=${got_detached})"
+            && [ "${got_detached}" = "${expected_detached}" ] \
+            && [ "${got_branch}" = "${expected_branch}" ]; then
+            echo "  PASS  ${label}  (wt=${got_worktree_count}, linked=${got_linked}, detached=${got_detached}, branch=${got_branch})"
             passes=$((passes + 1))
         else
-            echo "  FAIL  ${label}  rc=${rc} got(main=${got_main}, linked=${got_linked}, detached=${got_detached}, disp=${got_disposition})"
+            echo "  FAIL  ${label}  rc=${rc} got(wt=${got_worktree_count}, linked=${got_linked}, detached=${got_detached}, branch=${got_branch}, disp=${got_disposition})"
             failures=$((failures + 1))
         fi
     else
         if [ "${rc}" -ne 0 ] \
             && [ "${got_disposition}" = "FAIL" ] \
+            && [ "${got_worktree_count}" = "${expected_worktree_count}" ] \
             && [ "${got_linked}" = "${expected_linked}" ] \
-            && [ "${got_detached}" = "${expected_detached}" ]; then
-            echo "  PASS  ${label}  (main=${got_main}, linked=${got_linked}, detached=${got_detached})"
+            && [ "${got_detached}" = "${expected_detached}" ] \
+            && [ "${got_branch}" = "${expected_branch}" ]; then
+            echo "  PASS  ${label}  (wt=${got_worktree_count}, linked=${got_linked}, detached=${got_detached}, branch=${got_branch})"
             passes=$((passes + 1))
         else
-            echo "  FAIL  ${label}  rc=${rc} got(main=${got_main}, linked=${got_linked}, detached=${got_detached}, disp=${got_disposition})"
+            echo "  FAIL  ${label}  rc=${rc} got(wt=${got_worktree_count}, linked=${got_linked}, detached=${got_detached}, branch=${got_branch}, disp=${got_disposition})"
             failures=$((failures + 1))
         fi
     fi
 }
 
-# GWT-T01 — canonical topology (single main worktree).
+# GWT-T01 — canonical topology (single main worktree on refs/heads/main).
 run_case "GWT-T01 canonical topology" \
     "$(printf 'worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n')" \
-    "OK" "0" "0"
+    "OK" "1" "0" "0" "refs/heads/main"
 
 # GWT-T02 — detached linked worktree alongside the main one.
+# Last parsed record is the detached one (no `branch` line), so
+# last_parsed_branch in the evidence is empty.
 run_case "GWT-T02 detached linked worktree" \
     "$(printf 'worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n\nworktree /repo-detached\nHEAD bbbb\ndetached\n')" \
-    "FAIL" "1" "1"
+    "FAIL" "2" "1" "1" ""
 
 # GWT-T03 — branch-backed linked worktree.
 run_case "GWT-T03 branch-backed linked worktree" \
     "$(printf 'worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n\nworktree /repo-feature\nHEAD cccc\nbranch refs/heads/feature/x\n')" \
-    "FAIL" "1" "0"
+    "FAIL" "2" "1" "0" "refs/heads/feature/x"
 
 # GWT-T04 — multiple linked worktrees (2 linked + 1 main).
 run_case "GWT-T04 multiple linked worktrees" \
     "$(printf 'worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n\nworktree /repo-detached\nHEAD bbbb\ndetached\n\nworktree /repo-feature\nHEAD cccc\nbranch refs/heads/feature/y\n')" \
-    "FAIL" "2" "1"
+    "FAIL" "3" "2" "1" "refs/heads/feature/y"
 
 # GWT-T05 — parser uses porcelain semantics. Extra unknown keys
 # (such as `locked` / `prunable`) are accepted without changing the
@@ -90,7 +99,14 @@ run_case "GWT-T04 multiple linked worktrees" \
 # / `detached` keys.
 run_case "GWT-T05 extra unknown keys tolerated" \
     "$(printf 'worktree /repo\nHEAD aaaa\nbranch refs/heads/main\nlocked\nprunable gitdir-file\n')" \
-    "OK" "0" "0"
+    "OK" "1" "0" "0" "refs/heads/main"
+
+# GWT-T09 — sole non-main branch worktree. This is the P1 regression
+# test for the canonical-main-branch enforcement: a single worktree
+# on a non-main branch MUST be rejected (GWT03).
+run_case "GWT-T09 sole non-main branch worktree" \
+    "$(printf 'worktree /repo\nHEAD deadbeef\nbranch refs/heads/feature/not-main\n')" \
+    "FAIL" "1" "0" "0" "refs/heads/feature/not-main"
 
 # GWT-T06 — verifier is read-only. Run on the live repository and
 # verify that Git state and worktree topology are unchanged.
