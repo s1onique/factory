@@ -260,8 +260,8 @@ test("SOCK06 malformed WHO → unknown_socket (B0-CORR06)", async (t) => {
     return;
   }
   const tmp = await mkTmp();
+  const sp = path.join(tmp, "s");
   try {
-    const sp = path.join(tmp, "s");
     // CORRECTION10 fixture protocol:
     //   - inlines encodeFrame (no build artifact dep)
     //   - emits "READY\n" on stdout from inside the
@@ -328,15 +328,40 @@ test("SOCK06 malformed WHO → unknown_socket (B0-CORR06)", async (t) => {
     const closed = await terminateHelperAndAwaitClose(c);
     assert.equal(closed.kind, "closed",
       `SOCK06: helper close boundary MUST be observed (got kind=${closed.kind})`);
-    // SOCK06E: after the close boundary is observed,
-    // the UDS pathname MUST be absent (the helper was
-    // killed and Node closed the listening socket).
-    await assert.rejects(
-      async () => { await fs.lstat(sp); },
-      (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT",
-      `SOCK06E: pathname ${sp} MUST be absent after helper close boundary`,
-    );
+    // SOCK06E (CORRECTION11 demoted; CORRECTION12 applied to
+    // this inline test): after the close boundary is observed,
+    // the endpoint MUST no longer answer a probe. The
+    // pathname MAY persist on the filesystem after a SIGKILL
+    // crash — that is platform-dependent and is NOT a
+    // portable invariant. Asserting ENOENT here would fail on
+    // healthy Linux/macOS hosts under specific cleanup paths
+    // and is forbidden by the SOCK06 portability law.
+    //
+    // Acceptable post-close classifications:
+    //   - "absent"          : kernel cleaned up the binding
+    //   - "unknown_socket"  : pathname persists but listener
+    //                         is gone (malformed-WHO probe
+    //                         returned garbage)
+    //   - "path_collision"  : pathname persists as a
+    //                         non-socket (also acceptable;
+    //                         the endpoint cannot answer)
+    //   NOT "live_writer_present" — that would mean the
+    //   probe still sees a live writer, which is the actual
+    //   failure mode we care about.
+    const post = await probeSocketPath(sp);
+    assert.equal(post.ok, true,
+      `SOCK06E[post]: probe must succeed in reporting the endpoint's death (got ${JSON.stringify(post)})`);
+    if (post.ok) {
+      assert.notEqual(post.value, "live_writer_present",
+        `SOCK06E[post]: endpoint MUST NOT classify as live_writer_present after helper close (got ${post.value})`);
+    }
   } finally {
+    // Fixture owner EXPLICITLY removes the UDS pathname as
+    // cleanup so residue does not accumulate across repeated
+    // runs even on hosts where the kernel leaves the binding
+    // intact after SIGKILL. ENOENT is acceptable (the kernel
+    // may already have cleaned it up).
+    try { await fs.unlink(sp); } catch { /* absent is fine */ }
     await rmTmp(tmp);
   }
 });

@@ -6,6 +6,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
 
@@ -239,7 +240,19 @@ test("REC-TMP01: tmpDir(base) self-constructs the parent when definitely absent"
   // We do NOT touch the shared TMP_HOME_BASE; an isolated
   // base cannot interfere with concurrent REC-LIVE tests
   // and supports reproducibility from a clean worktree.
-  const tmpRoot = await fs.mkdtemp(join(process.cwd(), ".tmp-home", "tmp01-"));
+  //
+  // CORRECTION12: the seam's *root* must be created under
+  // a parent that is GUARANTEED to exist on every host —
+  // os.tmpdir() per Node's documented examples
+  // (https://nodejs.org/api/fs.html#fsmkdtempprefix-options-callback).
+  // process.cwd()/.tmp-home may not exist on a clean
+  // worktree, and fs.mkdtemp does not recursively create
+  // missing parents; calling mkdtemp with a missing
+  // grandparent therefore throws ENOENT and the test
+  // fails for fixture-construction reasons rather than
+  // qualifying the helper. os.tmpdir() is the only Node-
+  // documented seam that is always present.
+  const tmpRoot = await fs.mkdtemp(join(tmpdir(), "factory-rec-tmp01-"));
   const absentBase = join(tmpRoot, "absent-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8));
   // Mechanical absence proof (no `void pre;`): the lstat
   // MUST throw ENOENT before the helper call.
