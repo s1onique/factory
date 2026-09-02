@@ -128,17 +128,11 @@ export function wrapChild(child: ChildProcess): WitnessSpawnHandle {
     return handle;
   };
 
-  // CORRECTION10: terminal-output-accounting barrier.
-  //
-  // Each stream's drain owns its own `whenEnded()`; the
-  // composed `whenBootstrapOutputClosed()` awaits both
-  // and exposes the terminal stats as the authority.
-  //
-  // Streams that were never piped (`stdout: 'ignore'`)
-  // have no drain → no barrier → we substitute a
-  // pre-resolved `{kind:"ended", stats: zero}` so the
-  // composed barrier is just-as-awaitable in tests
-  // that exercise the unpipe edge.
+  // CORRECTION10 + CORRECTION11: terminal-output-accounting
+  // barrier. Each stream's drain owns its own `whenEnded()`;
+  // we await both and expose the terminal stats. Streams
+  // that were never piped (`stdout: 'ignore'`) have no
+  // drain → we substitute a pre-resolved zero.
   const zeroCompletion: Promise<DrainCompletion> = Promise.resolve({
     kind: "ended",
     stats: { bytesSeen: 0, bytesRetained: 0, truncated: false },
@@ -152,32 +146,35 @@ export function wrapChild(child: ChildProcess): WitnessSpawnHandle {
       ? stderrDrain.whenEnded()
       : zeroCompletion;
 
+  // Both `stream_error` (CORRECTION10) and `premature_close`
+  // (CORRECTION11) are non-terminal outcomes; we MUST NOT
+  // mint `kind:"ended"` from them. Close-before-end has
+  // undelivered bytes (Node `ERR_STREAM_PREMATURE_CLOSE`).
+  const assertTerminal = (label: string, c: DrainCompletion): BoundedOutputStats => {
+    if (c.kind === "stream_error") {
+      throw new Error(
+        `wrapChild: ${label} drained with stream_error before terminal end: ` +
+          c.error.message,
+      );
+    }
+    if (c.kind === "premature_close") {
+      throw new Error(
+        `wrapChild: ${label} closed prematurely (close before end): ` +
+          c.error.message,
+      );
+    }
+    return c.stats;
+  };
+
   const whenBootstrapOutputClosed = (): Promise<{
     readonly stdout: BoundedOutputStats;
     readonly stderr: BoundedOutputStats;
   }> => {
     return Promise.all([stdoutCompletion, stderrCompletion]).then(
-      ([so, se]) => {
-        // CORRECTION10 terminal-output-accounting law:
-        // a stream that errored before terminal end does
-        // NOT yield a final byte count. We surface the
-        // partial stats AND re-throw so callers cannot
-        // silently get a `kind:"ended"` mint from a stream
-        // that never reached terminal.
-        if (so.kind === "stream_error") {
-          throw new Error(
-            "wrapChild: stdout drained with stream_error before terminal end: " +
-              so.error.message,
-          );
-        }
-        if (se.kind === "stream_error") {
-          throw new Error(
-            "wrapChild: stderr drained with stream_error before terminal end: " +
-              se.error.message,
-          );
-        }
-        return { stdout: so.stats, stderr: se.stats };
-      },
+      ([so, se]) => ({
+        stdout: assertTerminal("stdout", so),
+        stderr: assertTerminal("stderr", se),
+      }),
     );
   };
 

@@ -31,6 +31,22 @@
  *   after the barrier resolves, and the barrier itself
  *   is built from stream lifecycle events, not from
  *   elapsed time.
+ *
+ * Doctrine (end-vs-close algebra — CORRECTION11):
+ *   `'end'` is the ONLY event that authorizes a
+ *   `kind: "ended"` mint. A Readable that emits `'close'`
+ *   without first emitting `'end'` is documented by
+ *   Node as a "Premature close" condition
+ *   (`ERR_STREAM_PREMATURE_CLOSE`); some bytes the
+ *   producer intended to send are lost or undelivered.
+ *   `drainBounded` routes its terminal observation
+ *   through Node's `finished(stream, { cleanup: true })`,
+ *   which surfaces this condition as a rejection, and
+ *   translates it to `kind: "premature_close"`. Tests
+ *   below prove both the positive (clean `'end'`) and
+ *   the negative (`destroy()` without error →
+ *   `kind: "premature_close"`, NEVER `kind: "ended"`)
+ *   pathways.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -690,26 +706,39 @@ test("BOOTOBS12: terminal barrier waits for final buffered stdout after exit (ex
  * This is the sanity check that the new
  * `whenBootstrapOutputClosed()` pathway does not
  * regress the existing pipe-drain accounting.
+ *
+ * CORRECTION11: the producer's backpressure accounting
+ * was previously broken. The old script only incremented
+ * `i` on the `write() === true` branch; under real
+ * backpressure the same `block` would be re-written on
+ * `'drain'` before `i` advanced, so `bytesSeen` was not
+ * deterministically `256 * 4096`. The fixed producer
+ * increments `i` BEFORE branching on the write return,
+ * guaranteeing exactly 256 distinct 4096-byte writes
+ * regardless of backpressure.
  */
 test("BOOTOBS13: bounded drain + terminal barrier agree on retained-vs-seen under heavy load", async () => {
   const cap = 64 * 1024;
   const child: ChildProcess = spawn(
     process.execPath,
     ["-e",
-     // Write all 1 MiB synchronously respecting back-
-     // pressure, then exit ONLY after stdout reports
-     // drained. This guarantees every byte the producer
-     // intended to send reaches the kernel pipe before
-     // exit, isolating the test from any race in
-     // exit-vs-flush.
+     // Write exactly 256 distinct 4096-byte blocks (1 MiB
+     // total) respecting back-pressure, then exit ONLY
+     // after stdout reports drained. The producer MUST
+     // increment `i` BEFORE branching on `write()` return
+     // so the same block is never re-emitted on `'drain'`.
+     // The drain counts every byte the kernel delivered;
+     // bytesSeen is exact.
      "const block = 'x'.repeat(4096);" +
      "let i = 0;" +
      "function drainNext() {" +
      "  if (i >= 256) { process.exit(0); return; }" +
-     "  if (!process.stdout.write(block)) {" +
+     "  const wrote = process.stdout.write(block);" +
+     "  i++;" +
+     "  if (!wrote) {" +
      "    process.stdout.once('drain', drainNext);" +
      "  } else {" +
-     "    i++; setImmediate(drainNext);" +
+     "    setImmediate(drainNext);" +
      "  }" +
      "}" +
      "drainNext();",
@@ -760,4 +789,86 @@ test("BOOTOBS14: stream error before terminal end → typed DrainCompletion (no 
   const s = d.stats();
   assert.ok(s.bytesSeen >= 7,
     "BOOTOBS14: stats must reflect what the drain consumed (>= 7 bytes), got " + s.bytesSeen);
+});
+
+/**
+ * BOOTOBS15 (CORRECTION11) — Premature close negative
+ * oracle. A Readable that is destroyed WITHOUT an error
+ * emits `'close'` without first emitting `'end'`. Per
+ * Node's documented contract, this is a "Premature
+ * close" condition; some bytes the producer intended to
+ * send are lost. `drainBounded` MUST surface this as
+ * `kind: "premature_close"`, NOT `kind: "ended"`.
+ *
+ * CORRECTION10's implementation settled the FIRST of
+ * `'end'` / `'close'` / `'error'` and treated `'close'`
+ * as a synonym for clean completion; it would have
+ * silently minted `kind: "ended"` here, authorizing a
+ * false exact-equality byte total. This test FAILS
+ * CORRECTION10 and PASSES CORRECTION11.
+ */
+test("BOOTOBS15: Readable destroyed without error → kind:premature_close (never kind:ended)", async () => {
+  const r = new Readable({ read() { /* pull-mode */ } });
+  const d = drainBounded(r, 1024);
+  r.push(Buffer.from("partial"));
+  // destroy() WITHOUT error → emits 'close' but not 'end'.
+  (r as unknown as { destroy: () => void }).destroy();
+  const c = await d.whenEnded();
+  assert.notEqual(c.kind, "ended",
+    "BOOTOBS15: a Readable that closed BEFORE 'end' MUST NOT mint kind:ended (that would authorize a false exact-equality byte total)");
+  assert.equal(c.kind, "premature_close",
+    "BOOTOBS15: premature close MUST be typed as kind:premature_close (got " + c.kind + ")");
+  if (c.kind === "premature_close") {
+    assert.ok(/Premature close|ERR_STREAM_PREMATURE_CLOSE/.test(
+      c.error.message + " " + (c.error as NodeJS.ErrnoException).code,
+    ),
+      "BOOTOBS15: typed error must be Node's premature-close condition, got: " + c.error.message);
+  }
+});
+
+/**
+ * BOOTOBS15b (CORRECTION11) — wrapChild composed
+ * barrier rejects on premature_close. Even if a single
+ * stream (stdout OR stderr) closes prematurely, the
+ * composed `whenBootstrapOutputClosed()` MUST surface it as
+ * a rejection. The caller cannot silently receive a
+ * `kind: "ended"` mint from a stream that never reached
+ * terminal.
+ */
+test("BOOTOBS15b: wrapChild().whenBootstrapOutputClosed() rejects on stream premature_close", async () => {
+  // Build a fake ChildProcess where stdout is a Readable
+  // we can destroy prematurely. stderr is given a
+  // normal push(null) completion. The composed barrier
+  // MUST reject because stdout closed prematurely.
+  const stdoutR = new Readable({ read() { /* pull-mode */ } });
+  stdoutR.push(Buffer.from("partial"));
+  (stdoutR as unknown as { destroy: () => void }).destroy();
+
+  const stderrR = new Readable({ read() { /* pull-mode */ } });
+  stderrR.push(Buffer.from("done"));
+  stderrR.push(null);
+
+  const fakeChild = {
+    pid: 99999,
+    on() { return this; },
+    once() { return this; },
+    emit() { return true; },
+    removeListener() { return this; },
+    kill() { return true; },
+    stdout: stdoutR,
+    stderr: stderrR,
+  } as unknown as ChildProcess;
+  const handle = wrapChild(fakeChild);
+  let rejected = false;
+  let msg = "";
+  try {
+    await handle.whenBootstrapOutputClosed();
+  } catch (e: unknown) {
+    rejected = true;
+    msg = e instanceof Error ? e.message : String(e);
+  }
+  assert.equal(rejected, true,
+    "BOOTOBS15b: composed barrier MUST reject when ANY stream closed prematurely");
+  assert.ok(/premature|Premature close/.test(msg),
+    "BOOTOBS15b: rejection message must mention premature close, got: " + msg);
 });

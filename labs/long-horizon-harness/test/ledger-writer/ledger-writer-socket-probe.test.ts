@@ -479,22 +479,43 @@ test("SOCK06D: malformed-WHO helper survives two sequential probes (no wall-cloc
 });
 
 /**
- * SOCK06E — standalone helper-termination oracle. After
- * the lifecycle primitive confirms the close boundary,
- * the UDS pathname MUST be absent (the helper was the
- * OS-level owner of the listening socket; once it dies,
- * the kernel unlinks the binding).
+ * SOCK06E — standalone helper-termination oracle.
  *
- * This is the endpoint of the SOCK06 adversarial-
- * endpoint-lifetime law: the test owns the helper and
- * is responsible for tearing it down BEFORE asserting
- * the production behavior that depends on the helper
- * having existed. A future regression that reverts the
- * close primitive to a swallowed-kill will fail this
- * test on the same primitive already in use across the
+ * CORRECTION11 demoted the previous "UDS pathname MUST be
+ * ENOENT after SIGKILL" assertion. Node's documented
+ * contract is that a Unix-domain socket created by a
+ * process that crashes (as opposed to one that exits via
+ * `server.close()`) MAY persist on the filesystem; this
+ * is platform- and runtime-dependent and is not a
+ * portable invariant. Turning it into an architectural
+ * law would make the test fail on healthy Linux/macOS
+ * hosts under specific cleanup paths.
+ *
+ * What we DO assert here:
+ *   - The fixture owner observes the helper's
+ *     ChildProcess close boundary (not synthesized).
+ *   - After the close boundary, the endpoint MUST no
+ *     longer answer a probe (the underlying kernel
+ *     listener is gone, regardless of whether the
+ *     filesystem pathname lingers).
+ *   - The fixture owner EXPLICITLY removes the pathname
+ *     as cleanup, so residue does not accumulate across
+ *     repeated runs.
+ *
+ * What we do NOT assert:
+ *   - The pathname is ENOENT after SIGKILL (portability
+ *     violation; demoted to P2 in CORRECTION11).
+ *
+ * This still matches the SOCK06 adversarial-endpoint-
+ * lifetime law: the test owns the helper and is
+ * responsible for tearing it down BEFORE asserting the
+ * production behavior that depends on the helper having
+ * existed. A future regression that reverts the close
+ * primitive to a swallowed-kill will fail this test on
+ * the same primitive already in use across the
  * ledger-writer qualification lane.
  */
-test("SOCK06E: helper termination observes close boundary → UDS pathname absent", async (t) => {
+test("SOCK06E: helper termination observes close boundary + endpoint no longer answers; fixture owner cleans up", async (t) => {
   if (!detectSpawnableBind()) {
     t.skip("BLOCKED_BY_ENVIRONMENT: harness path is too long for UDS on this host");
     return;
@@ -507,6 +528,7 @@ test("SOCK06E: helper termination observes close boundary → UDS pathname absen
     return;
   }
   const tmp = await mkTmp();
+  let pathnameObservedBeforeClose = false;
   try {
     const sp = path.join(tmp, "s");
     const script = [
@@ -535,18 +557,39 @@ test("SOCK06E: helper termination observes close boundary → UDS pathname absen
     const pre = await fs.lstat(sp);
     assert.equal(pre.isSocket(), true,
       `SOCK06E[pre]: ${sp} must be a UDS socket after READY barrier`);
+    pathnameObservedBeforeClose = true;
     // Strict lifecycle primitive.
     const closed = await terminateHelperAndAwaitClose(c);
     assert.equal(closed.kind, "closed",
       `SOCK06E: helper close boundary MUST be observed (got kind=${closed.kind})`);
-    // Production post-condition: pathname absent after
-    // helper death.
-    await assert.rejects(
-      async () => { await fs.lstat(sp); },
-      (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT",
-      `SOCK06E[post]: ${sp} MUST be absent after helper close boundary`,
-    );
+    // Production post-condition (CORRECTION11 demoted):
+    //   The endpoint MUST no longer answer a probe.
+    //   The pathname MAY persist on the filesystem
+    //   after a SIGKILL crash; that is platform-dependent
+    //   and is NOT a portable invariant. We do not assert
+    //   ENOENT here.
+    const post = await probeSocketPath(sp);
+    assert.equal(post.ok, true,
+      `SOCK06E[post]: probe must succeed in reporting the endpoint's death (got ${JSON.stringify(post)})`);
+    if (post.ok) {
+      assert.notEqual(post.value, "live_writer_present",
+        `SOCK06E[post]: endpoint MUST NOT classify as live_writer_present after helper close (got ${post.value})`);
+      // Acceptable classifications: `absent` (pathname gone
+      // too, kernel cleaned it up), `unknown_socket` (pathname
+      // persists but listener is gone — malformed-WHO probe
+      // returned garbage), or `path_collision` (pathname
+      // persists as a non-socket — also acceptable, the
+      // endpoint cannot answer). NOT live_writer_present.
+    }
   } finally {
+    // Fixture owner EXPLICITLY removes the UDS pathname as
+    // cleanup, so residue does not accumulate across
+    // repeated runs even on hosts where the kernel leaves
+    // the binding intact after SIGKILL.
+    if (pathnameObservedBeforeClose) {
+      const sp = path.join(tmp, "s");
+      try { await fs.unlink(sp); } catch { /* absent is fine */ }
+    }
     await rmTmp(tmp);
   }
 });

@@ -16,20 +16,43 @@
  *   lifecycle boundary. Per Node's documented contract, a
  *   ChildProcess `'exit'` fires after the process has
  *   ended but BEFORE its stdio streams have closed; the
- *   underlying Readable's `'end'` (or `'error'` / later
- *   `'close'`) is the only event that proves the producer
- *   has stopped and the kernel has delivered everything
- *   it will ever deliver. The owner MUST NOT take any
+ *   underlying Readable's `'end'` (push-mode completion)
+ *   is the only event that proves the producer has
+ *   stopped and the kernel has delivered everything it
+ *   will ever deliver. The owner MUST NOT take any
  *   exact-equality measurement of `bytesSeen` until that
  *   boundary has been observed by the drain that owns the
  *   stream. A wall-clock fence (e.g. `setTimeout(N)`)
  *   after `'exit'` is not a substitute.
+ *
+ * Doctrine (end-vs-close algebra — CORRECTION11):
+ *   CORRECTION10 settled the completion on the FIRST of
+ *   `'end'` / `'close'` / `'error'` and treated `'close'`
+ *   as a synonym for clean completion. Node's documented
+ *   contract is sharper: `'end'` means no more data will
+ *   arrive; `'close'` means the resource was released. A
+ *   Readable that emits `'close'` without first emitting
+ *   `'end'` has closed **prematurely** — bytes that the
+ *   producer intended to send are lost or undelivered.
+ *   `stream.finished()` makes this distinction explicit
+ *   by rejecting its returned promise with
+ *   `ERR_STREAM_PREMATURE_CLOSE` (a synthesized Node
+ *   error with code "ERR_STREAM_PREMATURE_CLOSE" and
+ *   message "Premature close") whenever `'close'` lands
+ *   before `'end'`. CORRECTION11 routes
+ *   `drainBounded`'s terminal observation through
+ *   `finished()` (with `{ cleanup: true }`) instead of
+ *   hand-rolling a close-equivalent; only `'end'` (clean
+ *   completion) can mint `kind: "ended"`. `'close'`
+ *   before `'end'` mints `kind: "premature_close"` with
+ *   the synthesized Node error attached.
  *
  * This is a tiny primitive. It deliberately does not
  * buffer to a string: it retains raw bytes up to the
  * cap and never grows past it. Callers can decode to
  * UTF-8 lazily if and when they need to.
  */
+import { finished } from "node:stream/promises";
 import type { Readable } from "node:stream";
 
 export type BoundedOutputStats = {
@@ -41,21 +64,33 @@ export type BoundedOutputStats = {
 /**
  * Terminal settlement of a `drainBounded` lifetime.
  *
- *   - `ended`        — the underlying Readable emitted
- *      `'end'` (push-mode) or `'close'` (pull-mode / late
- *      close). The producer has stopped, the kernel has
- *      delivered everything, and `stats` are final.
- *   - `stream_error` — the underlying Readable emitted
- *      `'error'` before terminal `end`/`close`. The
- *      drain consumed what arrived before the error; the
- *      stats are partial and the caller MUST treat them
- *      as such (it does not claim `bytesSeen` is the
- *      terminal count of all data the producer ever
- *      intended to send).
+ *   - `ended`           — the underlying Readable reached
+ *      `'end'` (push-mode clean completion). The producer
+ *      has stopped, the kernel has delivered everything,
+ *      and `stats` are final.
+ *   - `stream_error`    — the underlying Readable emitted
+ *      `'error'` before terminal `'end'`. The drain
+ *      consumed what arrived before the error; the stats
+ *      are partial and the caller MUST treat them as such
+ *      (it does not claim `bytesSeen` is the terminal
+ *      count of all data the producer ever intended to
+ *      send).
+ *   - `premature_close` — the underlying Readable emitted
+ *      `'close'` without first emitting `'end'`. This is
+ *      the documented Node "Premature close" condition
+ *      (`ERR_STREAM_PREMATURE_CLOSE`); some bytes the
+ *      producer intended to send were lost or never
+ *      delivered. The attached `error` is the synthesized
+ *      Node error. Stats are partial and the caller MUST
+ *      treat them as such. **A `premature_close` MUST
+ *      NEVER be coerced into `ended`** — that would
+ *      authorize an exact-equality byte total against a
+ *      stream that never reached terminal.
  */
 export type DrainCompletion =
   | { readonly kind: "ended"; readonly stats: BoundedOutputStats }
-  | { readonly kind: "stream_error"; readonly error: Error };
+  | { readonly kind: "stream_error"; readonly error: Error }
+  | { readonly kind: "premature_close"; readonly error: Error };
 
 export interface BoundedDrain {
   /**
@@ -75,9 +110,11 @@ export interface BoundedDrain {
    *
    * Resolves once with a `DrainCompletion` exactly when
    * the underlying Readable reaches its terminal
-   * lifecycle boundary (`'end'` or `'close'`, whichever
-   * implementation chooses) OR fails with `'error'`
-   * before reaching terminal.
+   * lifecycle boundary:
+   *
+   *   - `'end'` clean completion  → `kind: "ended"`
+   *   - `'error'` before `'end'`  → `kind: "stream_error"`
+   *   - `'close'` before `'end'`  → `kind: "premature_close"`
    *
    * Settles ONCE. Repeated calls return the same value
    * (the underlying Promise is cached). Never throws a
@@ -99,20 +136,27 @@ const DEFAULT_CAP_BYTES = 64 * 1024;
  *   `bytesSeen` and the `truncated` bit is set; we
  *   still consume them so the child cannot block.
  *
- * Listeners are attached eagerly, in this order:
+ * Listener ownership (CORRECTION11):
  *
- *   1. `'data'`     — byte accounting (drain keeps child
- *      from blocking on a full kernel pipe).
- *   2. `'end'`      — terminal settlement (push-mode).
- *   3. `'error'`    — terminal settlement.
- *   4. `'close'`    — terminal settlement (pull-mode /
- *      late close without prior `'end'`).
+ *   1. `'data'`                  — byte accounting (drain
+ *      keeps the producer from blocking on a full kernel
+ *      pipe). This is the only listener we author by
+ *      hand; the data path is a pure accounting concern
+ *      and `finished()` does not handle it.
+ *   2. `finished(stream, { cleanup: true })` — Node's
+ *      canonical terminal-state machine. It awaits
+ *      `'end'` (clean completion) and rejects on `'error'`
+ *      OR on `'close'`-before-`'end'` (the documented
+ *      "Premature close" condition, code
+ *      `ERR_STREAM_PREMATURE_CLOSE`). We translate each
+ *      outcome into a typed `DrainCompletion`. Only
+ *      `'end'` can mint `kind: "ended"`; close-before-end
+ *      is NEVER coerced into `ended`.
  *
- * Only the FIRST of `'end'` / `'close'` / `'error'`
- * settles the completion; subsequent events are ignored
- * because their statistics already include all bytes the
- * kernel ever delivered on this stream. The Promise is
- * cached; `whenEnded()` is idempotent.
+ * The Promise is cached; `whenEnded()` is idempotent.
+ * `finished()` with `cleanup: true` registers its own
+ * listeners and removes them once the terminal boundary
+ * is observed, so it does not leak.
  */
 export function drainBounded(
   stream: Readable,
@@ -124,7 +168,7 @@ export function drainBounded(
   let truncated = false;
   let total = 0;
 
-  // Terminal settlement state machine (CORRECTION10):
+  // Terminal settlement state machine (CORRECTION11):
   // settles once, idempotent for all subsequent events.
   let settled = false;
   let resolveCompletion:
@@ -148,7 +192,11 @@ export function drainBounded(
     if (fn !== null) fn(c);
   };
 
-  // 1. Data accounting.
+  // 1. Data accounting — the only hand-rolled listener.
+  //    `finished()` does not own this concern; we
+  //    continuously drain so the producer cannot block on
+  //    a full kernel pipe regardless of how the stream
+  //    eventually terminates.
   stream.on("data", (chunk: Buffer | string) => {
     const c = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
     bytesSeen += c.length;
@@ -169,20 +217,43 @@ export function drainBounded(
     }
   });
 
-  // 2. Terminal end (push-mode streams): settle.
-  stream.on("end", () => {
-    settle({ kind: "ended", stats: snapshot() });
-  });
-
-  // 3. Stream error: settle as terminal with error.
-  stream.on("error", (err: Error) => {
-    settle({ kind: "stream_error", error: err });
-  });
-
-  // 4. Late / no-end close: also terminal.
-  stream.on("close", () => {
-    settle({ kind: "ended", stats: snapshot() });
-  });
+  // 2. Terminal observation via Node's canonical
+  //    `finished()`. The algebra is:
+  //
+  //      `end`           → resolve (clean)
+  //      `error`         → reject (stream_error)
+  //      `close`-no-end  → reject (premature_close)
+  //
+  //    We translate each outcome into a typed
+  //    `DrainCompletion`. Only `end` can mint
+  //    `kind: "ended"`; close-before-end is NEVER coerced
+  //    into ended. `finished()` with `{ cleanup: true }`
+  //    removes its own listeners once the terminal
+  //    boundary is observed, so no leak.
+  void finished(stream, { cleanup: true }).then(
+    () => {
+      settle({ kind: "ended", stats: snapshot() });
+    },
+    (err: unknown) => {
+      const e = err instanceof Error
+        ? err
+        : new Error(
+            "drainBounded: finished() rejected with non-Error: " +
+              String(err),
+          );
+      // Node's ERR_STREAM_PREMATURE_CLOSE has code
+      // "ERR_STREAM_PREMATURE_CLOSE". Distinguish it from
+      // any other rejection cause (typically 'error' from
+      // the underlying source) so the caller can branch on
+      // the typed outcome without string-matching.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ERR_STREAM_PREMATURE_CLOSE") {
+        settle({ kind: "premature_close", error: e });
+      } else {
+        settle({ kind: "stream_error", error: e });
+      }
+    },
+  );
 
   return {
     stats: snapshot,
