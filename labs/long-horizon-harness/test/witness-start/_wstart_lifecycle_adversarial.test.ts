@@ -101,7 +101,7 @@ test("WLIFE02: (Node-exit-seen, kernel-EPERM) => child_terminated_proven (releas
   registerLiveFixture({
     kind: "helper_child",
     ref: fakeChild,
-    pid: fakeChild.pid,
+    pid: fakeChild.pid ?? undefined,
     note: marker,
   });
   try {
@@ -143,7 +143,7 @@ test("WLIFE03: signal-sent without exitInfo-evidence is residue (alive), not rel
   registerLiveFixture({
     kind: "helper_child",
     ref: fakeChild,
-    pid: fakeChild.pid,
+    pid: fakeChild.pid ?? undefined,
     note: marker,
   });
   try {
@@ -195,7 +195,7 @@ test("WLIFE05: identity-bound exit boundary dominates bare-PID observation", asy
   registerLiveFixture({
     kind: "helper_child",
     ref: fakeHandle,
-    pid: fakeHandle.pid,
+    pid: fakeHandle.pid ?? undefined,
     note: marker,
   });
   try {
@@ -238,7 +238,7 @@ test("WLIFE06: synthetic PID reuse — handle exit boundary releases entry even 
   registerLiveFixture({
     kind: "helper_child",
     ref: fakeHandle,
-    pid: fakeHandle.pid,
+    pid: fakeHandle.pid ?? undefined,
     note: marker,
   });
   try {

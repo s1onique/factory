@@ -856,18 +856,68 @@ export type OwnedChildPort = {
  * production handle). The oracle accepts either
  * shape and routes to the right reader.
  */
-export type IdentityBoundChildPort = OwnedChildPort & {
-  // Optional handle-authoritative exit record.
-  // Witnesses set this to `exitInfo` (a closure that
-  // returns the handle's captured exit state). Real
-  // ChildProcess has `exitCode`/`signalCode` directly
-  // and does NOT expose this — the oracle falls
-  // back to the structural probe for that shape.
+export type IdentityBoundChildPort = {
+  // Identity.
+  //
+  // Accept the union of pid shapes that real
+  // handles expose:
+  //   ChildProcess.pid        : number | undefined
+  //   WitnessSpawnHandle.pid  : number | null
+  //
+  // The oracle routes on a positive finite number;
+  // null and undefined are both treated as
+  // identity_unavailable. The registration
+  // boundary normalizes `child.pid ?? undefined`
+  // into the LiveFixtureEntry so the registry's
+  // stored identifier is uniform (number |
+  // undefined).
+  readonly pid?: number | null | undefined;
+
+  // Identity-bound termination evidence
+  // (CORRECTION10 / CORRECTION01).
+  //
+  // When present, the handle is the AUTHORITATIVE
+  // source for "the original child has terminated".
+  // The oracle reads `exitInfo().exited` as priority
+  // 1 — overriding bare PID observation. The
+  // remaining fields (`code`, `signal`) are read
+  // as diagnostic detail by the live lane's matrix
+  // emitter; they are optional so adversarial
+  // fixtures can stub only `exited`.
   readonly exitInfo?: () => { readonly exited: boolean };
-  // Optional terminal-output-accounting barrier.
-  // When present and resolved, this is the strongest
-  // "the original child has terminated" evidence
-  // the handle can offer.
+
+  // Fallback Node lifecycle evidence.
+  //
+  // A real `node:child_process` ChildProcess does
+  // NOT expose `exitInfo()` (its authoritative
+  // exit boundary is the structural pair
+  // `exitCode` / `signalCode`). Encoding both
+  // shapes in one structural port lets the oracle
+  // route by capability — priority 1 is the
+  // handle's own `exitInfo`, priority 2 is the
+  // Node-side pair — without ever casting the
+  // handle to a concrete class.
+  readonly exitCode?: number | null;
+  readonly signalCode?: NodeJS.Signals | null;
+
+  // Optional signal send. The residue oracle
+  // never invokes this; it exists for source
+  // compatibility with a real ChildProcess
+  // handle and for the test-site cleanup
+  // authority's bounded-deadline wait.
+  // Signature matches `node:child_process`'s
+  // `ChildProcess.kill` exactly (signals only,
+  // not raw signal numbers) so a real
+  // ChildProcess is assignable.
+  readonly kill?: (signal?: NodeJS.Signals) => boolean;
+
+  // Terminal-output-accounting barrier
+  // (CORRECTION10). Not consumed by the
+  // structural probe (the oracle reads `exitInfo`
+  // directly); the live test awaits it via
+  // structural typing. Declared as a pure
+  // Promise-returning method so the type
+  // signature is honest.
   readonly whenBootstrapOutputClosed?: () => Promise<unknown>;
 };
 
