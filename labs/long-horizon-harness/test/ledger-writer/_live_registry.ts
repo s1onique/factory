@@ -39,10 +39,42 @@
  *   - it NEVER calls `process.kill(pid, ...)`;
  *   - it ONLY calls `kill(pid, 0)` to observe kernel
  *     state (ESRCH / EPERM / alive);
- *   - it inspects Node's view of the child handle
- *     (exitCode / signalCode) to detect "child
- *     terminated" even when the positive PID is still
- *     alive (possible PID reuse).
+ *   - it inspects the OWNED HANDLE'S lifecycle
+ *     surface — either Node's exitCode/signalCode
+ *     (for a real ChildProcess) or the handle's
+ *     authoritative `exitInfo()` (for a
+ *     WitnessSpawnHandle) — to detect "child
+ *     terminated" without depending on a historical
+ *     PID.
+ *
+ * (FOUNDATION04 PHASE A — WITNESS-LIFECYCLE-AUTHORITY
+ *  CORRECTION01) Identity-bound lifecycle evidence
+ * dominates bare-PID observation. Once the owned
+ * handle has authoritatively observed the original
+ * child's exit boundary, the registry ownership is
+ * released regardless of what a subsequent
+ * `kill(pid, 0)` returns. This is the lifecycle-
+ * authority law:
+ *
+ *   specific-child terminated proof:
+ *     owned handle exit boundary observed
+ *       + (kernel says absent OR kernel denies us)
+ *         => released (child_terminated_proven)
+ *
+ *   bare historic PID + ESRCH
+ *     => released (pid_absent)
+ *
+ *   bare historic PID + positive
+ *     + Node did NOT see our child's exit
+ *       => residue (alive)
+ *
+ *   bare historic PID + positive
+ *     + Node saw our child's exit (PID reuse risk)
+ *       => residue (child_terminated)
+ *
+ *   bare historic PID + EPERM
+ *     + Node did NOT see our child's exit
+ *       => residue (permission_denied)
  *
  * Cleanup belongs at the spawn/lifecycle site where
  * ownership is unquestionably current. The residue
@@ -207,8 +239,27 @@ export async function proveUnlink(p: string): Promise<boolean> {
  *                              authoritative proof that
  *                              the PID we once owned no
  *                              longer exists in this
- *                              namespace. This is the
- *                              ONLY kind that releases
+ *                              namespace. Releases
+ *                              registry ownership.
+ *
+ *   - "child_terminated_proven"
+ *                            — (CORRECTION01) the
+ *                              handle's authoritative
+ *                              lifecycle channel
+ *                              (`exitInfo().exited`
+ *                              OR Node's
+ *                              exitCode/signalCode)
+ *                              has observed the
+ *                              original child's exit,
+ *                              AND the kernel probe
+ *                              is NOT positive (either
+ *                              ESRCH or EPERM). The
+ *                              original child is gone;
+ *                              the historical PID is
+ *                              either absent or
+ *                              inaccessible to us.
+ *                              Identity-bound proof —
+ *                              NOT PID-bound. Releases
  *                              registry ownership.
  *
  *   - "child_terminated"    — Node's ChildProcess has
@@ -225,6 +276,15 @@ export async function proveUnlink(p: string): Promise<boolean> {
  *                              between the original
  *                              child exiting and our
  *                              probe. Counts as residue.
+ *                              (CORRECTION01): this is
+ *                              the "PID possibly reused"
+ *                              guard — distinct from
+ *                              `child_terminated_proven`
+ *                              because we cannot rule
+ *                              out PID reuse when the
+ *                              kernel confirms a live
+ *                              process at the
+ *                              historical integer.
  *
  *   - "alive"               — kernel says it exists AND
  *                              we have not (yet) seen
@@ -235,11 +295,14 @@ export async function proveUnlink(p: string): Promise<boolean> {
  *                              attempt cleanup here).
  *
  *   - "permission_denied"   — kill(pid, 0) returned
- *                              EPERM. Existence from our
- *                              vantage is unknown but
- *                              permission to signal is
- *                              denied. Per POSIX/Linux
- *                              semantics this says
+ *                              EPERM AND the handle's
+ *                              lifecycle channel has NOT
+ *                              observed the original
+ *                              child's exit. Existence
+ *                              from our vantage is
+ *                              unknown but permission to
+ *                              signal is denied. Per
+ *                              POSIX semantics this says
  *                              nothing about whose
  *                              process that PID is. We
  *                              do NOT infer re-parenting
@@ -247,6 +310,14 @@ export async function proveUnlink(p: string): Promise<boolean> {
  *                              just record the honest
  *                              observation. Counts as
  *                              residue (NOT absent).
+ *                              (CORRECTION01): if the
+ *                              lifecycle channel HAD
+ *                              seen the exit, this
+ *                              outcome becomes
+ *                              `child_terminated_proven`
+ *                              instead — EPERM without
+ *                              Node-side exit retains
+ *                              the entry.
  *
  *   - "identity_unavailable"— the handle exposes no
  *                              usable PID; absence
@@ -312,13 +383,14 @@ export async function proveUnlink(p: string): Promise<boolean> {
  */
 export type ProveChildAbsentResult =
   | { readonly kind: "pid_absent" }
+  | { readonly kind: "child_terminated_proven" }
   | { readonly kind: "child_terminated" }
   | { readonly kind: "alive" }
   | { readonly kind: "permission_denied"; readonly errno: string }
   | { readonly kind: "identity_unavailable" };
 
 export async function proveChildAbsent(
-  child: OwnedChildPort,
+  child: IdentityBoundChildPort,
 ): Promise<ProveChildAbsentResult> {
   const pid = child.pid;
 
@@ -361,6 +433,43 @@ export async function proveChildAbsent(
     return { kind: "pid_absent" };
   }
   if (probe.kind === "permission_denied") {
+    // (FOUNDATION04 PHASE A — WITNESS-LIFECYCLE-
+    //  AUTHORITY CORRECTION01)
+    //
+    // EPERM from kill(pid, 0) means the kernel
+    // refuses to disclose to us whether a process
+    // exists at that PID. It DOES NOT mean the
+    // original child is alive — it means the kernel
+    // will not tell us.
+    //
+    // PRE-CORRECTION01 behaviour classified this as
+    // `permission_denied` regardless of Node-side
+    // evidence, which is too conservative: a host
+    // that EPERMs the parent's kill on a freshly-
+    // spawned child (macOS sandbox) would block
+    // residue release forever, even though Node's
+    // own lifecycle channel has authoritative proof
+    // that the original child exited.
+    //
+    // POST-CORRECTION01: if Node (or the handle's
+    // authoritative `exitInfo()`) has observed the
+    // exit, we reclassify as `child_terminated_proven`.
+    // This is identity-bound, not PID-bound: we trust
+    // the OWNED HANDLE'S OWN exit boundary over a
+    // bare historical PID. This protects against
+    // PID-reuse races that a positive-PID kernel
+    // probe cannot detect, and against kernel-side
+    // permission denial that has nothing to say
+    // about our original child's fate.
+    //
+    // If Node did NOT see the exit, the EPERM is the
+    // best evidence we have; we conservatively report
+    // `permission_denied` (residue — the original
+    // child may still be running and we cannot
+    // prove otherwise).
+    if (nodeSawExit) {
+      return { kind: "child_terminated_proven" };
+    }
     return {
       kind: "permission_denied",
       errno: probe.errno,
@@ -396,7 +505,38 @@ export async function proveChildAbsent(
  * cached) the exit boundary. Once true, the positive
  * PID is no longer an ownership token for us.
  */
-function childHasExited(child: OwnedChildPort): boolean {
+function childHasExited(child: IdentityBoundChildPort): boolean {
+  // (FOUNDATION04 PHASE A — WITNESS-LIFECYCLE-
+  //  AUTHORITY CORRECTION01)
+  //
+  // PRIORITY 1: identity-bound exitInfo().
+  //
+  // If the handle exposes the CORRECTION10
+  // authoritative exitInfo() surface (a
+  // WitnessSpawnHandle does; a real ChildProcess
+  // does NOT), read it. This is the handle's own
+  // proof that the original child has terminated.
+  // We must NEVER cast the handle back to a
+  // ChildProcess shape to fish for exitCode —
+  // that cast is unsound (the reviewer's whole
+  // argument) and on a real WitnessSpawnHandle
+  // those fields do not exist.
+  if (typeof child.exitInfo === "function") {
+    try {
+      const info = child.exitInfo();
+      if (info && typeof info === "object" && "exited" in info) {
+        return info.exited === true;
+      }
+    } catch {
+      // exitInfo must be a pure read; if it throws,
+      // fall through to the structural probe.
+    }
+  }
+  // PRIORITY 2: structural probe via exitCode /
+  // signalCode. This is what a real node:child_process
+  // ChildProcess exposes. We use structural typing
+  // (no cast) — the read is permissive: missing
+  // fields are treated as "not exited".
   const c = child as unknown as {
     exitCode?: number | null;
     signalCode?: NodeJS.Signals | null;
@@ -480,14 +620,25 @@ export async function sweepAndProve(): Promise<ReadonlyArray<LiveFixtureEntry>> 
     let proved = false;
     let observation: string | null = null;
     if (e.kind === "writer_child" || e.kind === "helper_child") {
-      const child = e.ref as OwnedChildPort;
+      const child = e.ref as IdentityBoundChildPort;
       const r = await proveChildAbsent(child);
       observation = r.kind;
-      // CORRECTION04: "pid_absent" is the ONLY kind
-      // that releases registry ownership. "absent"
-      // (the old overloaded label) is gone — see the
-      // ADT comment on ProveChildAbsentResult.
-      proved = r.kind === "pid_absent";
+      // CORRECTION04 + WITNESS-LIFECYCLE-AUTHORITY
+      // CORRECTION01: registry ownership is released
+      // when EITHER:
+      //   - the kernel reports ESRCH for the
+      //     historical pid (`pid_absent`), OR
+      //   - the handle's authoritative lifecycle
+      //     channel has observed the original
+      //     child's exit (`child_terminated_proven`).
+      // Both release forms are identity-bound
+      // evidence that the registered child is gone.
+      // `child_terminated` (positive-PID after
+      // Node exit — possible PID reuse) and
+      // `permission_denied` (EPERM without Node-side
+      // exit) retain the entry as residue.
+      proved = r.kind === "pid_absent" ||
+        r.kind === "child_terminated_proven";
     } else if (e.path !== undefined) {
       proved = await proveUnlink(e.path);
       // Path-only entries report the structural kind
@@ -667,6 +818,60 @@ export type OwnedChildPort = {
 };
 
 /**
+ * (FOUNDATION04 PHASE A — WITNESS-LIFECYCLE-AUTHORITY
+ *  CORRECTION01)
+ *
+ * Narrow identity-bound child port. A handle that
+ * exposes this surface has AUTHORITATIVE lifecycle
+ * evidence: it is the SAME object the spawn adapter
+ * returned, and it can prove "the original child I
+ * spawned has terminated" via its own exit-boundary
+ * surface — without depending on a historical
+ * numeric PID.
+ *
+ * `exitInfo` returns the handle's authoritative
+ * exit record. The presence of this method is the
+ * lifecycle-authority signal: the residue oracle
+ * MUST consult it before falling back to a bare
+ * `process.kill(pid, 0)`.
+ *
+ * `whenBootstrapOutputClosed` is the
+ * terminal-output-accounting barrier (CORRECTION10).
+ * It resolves when the bounded stdout/stderr drains
+ * have observed their terminal lifecycle boundary
+ * (clean `'end'`). Resolving this barrier is
+ * stronger evidence than exitCode/signalCode alone:
+ * it proves BOTH that the child exited AND that
+ * its stdio has been drained to the terminal
+ * boundary, which is what makes subsequent
+ * observation of "no process at the historical PID"
+ * meaningful (we are not racing with a still-emitting
+ * child).
+ *
+ * Both fields are OPTIONAL. A real `ChildProcess`
+ * exposes `exitCode`/`signalCode` directly (the
+ * previous oracle's structural probe). A
+ * `WitnessSpawnHandle` exposes `exitInfo()` and
+ * `whenBootstrapOutputClosed()` (the CORRECTION10
+ * production handle). The oracle accepts either
+ * shape and routes to the right reader.
+ */
+export type IdentityBoundChildPort = OwnedChildPort & {
+  // Optional handle-authoritative exit record.
+  // Witnesses set this to `exitInfo` (a closure that
+  // returns the handle's captured exit state). Real
+  // ChildProcess has `exitCode`/`signalCode` directly
+  // and does NOT expose this — the oracle falls
+  // back to the structural probe for that shape.
+  readonly exitInfo?: () => { readonly exited: boolean };
+  // Optional terminal-output-accounting barrier.
+  // When present and resolved, this is the strongest
+  // "the original child has terminated" evidence
+  // the handle can offer.
+  readonly whenBootstrapOutputClosed?: () => Promise<unknown>;
+};
+
+/**
  * (FOUNDATION04 CORRECTION04) Register a
  * witness child produced by Phase A's `startWitness`
  * gate. The entry MUST be unregistered ONLY after
@@ -681,7 +886,7 @@ export type OwnedChildPort = {
  * failed to clean up.
  */
 export function registerWitnessSpawn(args: {
-  readonly child: OwnedChildPort;
+  readonly child: IdentityBoundChildPort;
   readonly witnessInstanceId: string;
   readonly runDir: string;
 }): LiveFixtureEntry {

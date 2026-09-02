@@ -82,28 +82,87 @@ let residue = 0;
 async function terminateAndProveWitness(
   entry: LiveFixtureEntry,
 ): Promise<boolean> {
-  const child = entry.ref as unknown as import("node:child_process").ChildProcess;
+  // (FOUNDATION04 PHASE A — WITNESS-LIFECYCLE-AUTHORITY
+  //  CORRECTION01)
+  //
+  // The handle stored in `entry.ref` is a
+  // `WitnessSpawnHandle`, NOT a `node:child_process`
+  // `ChildProcess`. The previous version of this
+  // helper did `entry.ref as unknown as ChildProcess`
+  // — a FALSE cast that the residue oracle then used
+  // to fish for `exitCode`/`signalCode` (which the
+  // real WitnessSpawnHandle does NOT expose). That
+  // cast is gone: we operate on the narrow
+  // `IdentityBoundChildPort` shape directly.
+  const child = entry.ref as import(
+    "../../test/ledger-writer/_live_registry.js"
+  ).IdentityBoundChildPort;
+
   // TEST-SITE cleanup authority. The oracle is
   // observation-only; THIS call is owned by the test
-  // that produced the child.
-  try { child.kill("SIGTERM"); } catch { /* */ }
-  await new Promise((res) => setTimeout(res, 100));
+  // that produced the child. We use the typed
+  // `kill` from the handle — no cast.
+  try {
+    child.kill?.("SIGTERM");
+  } catch {
+    // best-effort; kernel may EPERM this on a sandbox
+    // host. We do not let cleanup authority fail
+    // the assertion; we ask the oracle next.
+  }
+
+  // (CORRECTION01) Identity-bound lifecycle barrier.
+  //
+  // If the handle exposes
+  // `whenBootstrapOutputClosed()` (a real
+  // WitnessSpawnHandle does; CORRECTION10), await it
+  // with a bounded deadline. This is the strongest
+  // identity-bound evidence the handle can offer:
+  // "the original child I spawned has terminated AND
+  // its bounded stdio drains have observed their
+  // terminal lifecycle boundary". Resolving this
+  // barrier makes the subsequent residue probe
+  // authoritative — we are no longer racing with a
+  // still-emitting child.
+  if (typeof child.whenBootstrapOutputClosed === "function") {
+    await Promise.race([
+      child.whenBootstrapOutputClosed().catch(() => undefined),
+      new Promise((res) => setTimeout(res, 1000)),
+    ]);
+  } else {
+    // Real ChildProcess has no equivalent barrier;
+    // fall back to a brief sleep so the underlying
+    // exitCode/signalCode has a chance to settle.
+    await new Promise((res) => setTimeout(res, 100));
+  }
+
   // ORACLE call. The oracle performs NO kill, NO
-  // signal; it only observes (kill(pid,0), exitCode,
-  // signalCode). The previous kill above is the
-  // legacy "best effort" signal that the test sends
-  // before asking the oracle to PROVE what happened.
+  // signal; it only observes (kill(pid, 0),
+  // exitInfo().exited, exitCode, signalCode). The
+  // previous kill above is the legacy "best effort"
+  // signal that the test sends before asking the
+  // oracle to PROVE what happened.
   const r = await proveChildAbsent(child);
-  // CORRECTION04: Only "pid_absent" clears the
-  // registry. All other observations — alive,
-  // child_terminated, permission_denied,
-  // identity_unavailable — retain the fixture so the
-  // strict lane reports residue. "absent" (the old
-  // overloaded label) is gone; kernel ESRCH is
-  // `pid_absent`, Node's exit boundary is
-  // `child_terminated`. `cleanup_failed` is also
-  // gone — the oracle never performs cleanup.
-  const absent = r.kind === "pid_absent";
+  // CORRECTION04 + CORRECTION01:
+  //
+  //   "pid_absent"               — kernel ESRCH
+  //                                (releases)
+  //   "child_terminated_proven"  — handle saw exit
+  //                                AND kernel is NOT
+  //                                positive (releases)
+  //
+  // All other observations — child_terminated
+  // (possible PID reuse), alive (kernel says we're
+  // still running, Node didn't see exit),
+  // permission_denied (kernel EPERM, Node didn't see
+  // exit), identity_unavailable — retain the fixture
+  // so the strict lane reports residue. "absent" (the
+  // old overloaded label) is gone; kernel ESRCH is
+  // `pid_absent`, handle exit boundary is
+  // `child_terminated_proven`. `cleanup_failed` is
+  // also gone — the oracle never performs cleanup.
+  const absent =
+    r.kind === "pid_absent" ||
+    r.kind === "child_terminated_proven";
   if (absent) {
     unregisterLiveFixture(entry);
   }

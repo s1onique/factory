@@ -996,11 +996,22 @@ test("RES02: child_terminated != pid_absent (algebra separation)", async () => {
     // The result MUST be one of the observation-only
     // kinds. NOT `absent` (the old overloaded label
     // that conflated ESRCH with Node exit observation).
+    //
+    // (CORRECTION01): the ADT now includes
+    // `child_terminated_proven` (Node-side exit AND
+    // kernel NOT positive). The fakeChild here has
+    // exitCode set, so on a host where kill(999_003, 0)
+    // returns EPERM (sandbox) we expect
+    // `child_terminated_proven` — Node saw the exit
+    // AND kernel denied us. On a host where kill returns
+    // ESRCH we expect `pid_absent`. BOTH are correct
+    // releases.
     assert.ok(
       r.kind === "pid_absent" ||
         r.kind === "child_terminated" ||
+        r.kind === "child_terminated_proven" ||
         r.kind === "permission_denied",
-      `RES02: expected pid_absent | child_terminated | permission_denied; got ${JSON.stringify(r)}`,
+      `RES02: expected pid_absent | child_terminated | child_terminated_proven | permission_denied; got ${JSON.stringify(r)}`,
     );
     assert.notEqual(r.kind, "absent",
       "RES02: the old overloaded 'absent' kind MUST be gone from the ADT");
