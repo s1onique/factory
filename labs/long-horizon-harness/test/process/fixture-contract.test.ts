@@ -468,8 +468,17 @@ test("FX07 ignore-term ignores SIGTERM; cleanup via SIGKILL proves it", async (t
   const entry = spawnFixture("FX07-ignore-term", ["ignore-term"]);
   let skipped = false;
   try {
-    await new Promise((res) => setTimeout(res, 200));
-    assert.equal(alive(entry.pid), true, "ignore-term must be alive at 200ms");
+    // FX07 readiness-marker law:
+    // NO 100ms inference. Wait for the fixture's explicit
+    // "ignore-term-ready" marker, which is emitted ONLY
+    // after both SIGTERM and SIGINT handlers are installed.
+    // ChildProcess 'spawn' only proves OS process creation
+    // succeeded; it does not prove the application is
+    // ready. A readiness marker is the only deterministic
+    // contract.
+    await waitForMarker(entry.child, "ignore-term-ready", 5000);
+    assert.equal(alive(entry.pid), true,
+      "ignore-term must be alive after readiness marker");
     if (!canDeliverSignal(entry.pid)) {
       t.skip("signal delivery denied by host (sandbox/cross-UID); cannot verify SIGTERM-ignore property");
       skipped = true;
@@ -490,6 +499,40 @@ test("FX07 ignore-term ignores SIGTERM; cleanup via SIGKILL proves it", async (t
     } else {
       assert.equal(verdict.ok, true,
         `FX07 cleanup failed: ${verdict.reason}`);
+    }
+  }
+});
+
+test("FX07a ignore-term emits readiness marker WITHOUT sending SIGTERM (no signal delivery required)", async () => {
+  // FX07a is the marker-only contract for ignore-term:
+  // the fixture MUST emit 'ignore-term-ready' on its stdout
+  // AFTER both SIGTERM and SIGINT handlers are installed.
+  // This does NOT require signal delivery; it is purely a
+  // behavioural assertion on the fixture's own output. The
+  // cooperative SIGTERM-ignore assertion is in FX07.
+  //
+  // The marker contract closes the startup-race bug that
+  // FX07 used to exhibit on slow hosts: the parent used to
+  // infer readiness from a 100ms sleep, which is a guess
+  // about how fast Node initializes the signal-handler
+  // table. With the marker, readiness is an observable
+  // property of the child, not an estimate.
+  const entry = spawnFixture("FX07a-ignore-term", ["ignore-term"]);
+  try {
+    await waitForMarker(entry.child, "ignore-term-ready", 5000);
+    // Liveness after the marker is the property the
+    // doctrine cares about: SIGTERM handler is installed
+    // AND the process is still running (the marker does
+    // not exit the process; only SIGKILL will).
+    assert.equal(alive(entry.pid), true,
+      "ignore-term must be alive after emitting ignore-term-ready");
+  } finally {
+    const verdict = await cleanupFixture(entry);
+    if (!verdict.ok && verdict.reason === "signal-denied") {
+      untrack(entry);
+    } else {
+      assert.equal(verdict.ok, true,
+        `FX07a cleanup failed: ${verdict.reason}`);
     }
   }
 });

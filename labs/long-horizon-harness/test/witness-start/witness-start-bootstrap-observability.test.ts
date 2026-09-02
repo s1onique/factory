@@ -165,11 +165,54 @@ test("BOOTOBS06: child emitting >> cap cannot deadlock the parent; exact byte ac
   // whenBootstrapOutputClosed() barrier), the
   // accounting MUST be exact — no `>=`, no probabilistic
   // fence, no sleep.
+  //
+  // BOOTOBS06 producer-truth law:
+  //   "The child must drain-await every write, end stdout
+  //    naturally, and report producer truth on stderr.
+  //    process.exit(0) immediately after writing
+  //    abandons buffered stdout, and we must not infer
+  //    producer truth from the parent-side byte count
+  //    alone."
+  //
+  // The producer is now an async function that:
+  //   1. counts every write that returned truthy (drained)
+  //      or returned false (backpressured) and awaited drain
+  //   2. emits "BOOTOBS_WRITES=256\n" + "BOOTOBS_BYTES=262144\n"
+  //      on stderr AFTER stdout.end() resolves
+  //   3. exits naturally (no process.exit) so the stream
+  //      lifecycle is governed by the readable contract
+  //
+  // On FAIL, the parent's stderr is included in the
+  // assertion message so the operator can distinguish
+  //   producer says 65536       -> producer bug
+  //   producer says 262144      -> pipe/drain bug
+  // without having to re-run the test with extra logging.
+  const childScript = `
+    let writesDone = 0;
+    let bytesWritten = 0;
+    for (let i = 0; i < 256; i++) {
+      const buf = Buffer.alloc(1024, 0x41); // 1024 'A's
+      const ok = process.stdout.write(buf);
+      writesDone++;
+      bytesWritten += buf.length;
+      if (!ok) {
+        // Node stream contract: write() returned false means
+        // the chunk WAS accepted but the producer MUST wait
+        // for 'drain' before continuing. We await it.
+        await new Promise((res) => process.stdout.once('drain', res));
+      }
+    }
+    // Producer-truth law: emit counters AFTER stdout.end()
+    // resolves. process.exit() would abandon buffered
+    // stdout; end() flushes naturally.
+    await new Promise((res) => process.stdout.end(res));
+    process.stderr.write('BOOTOBS_WRITES=' + writesDone + '\\n');
+    process.stderr.write('BOOTOBS_BYTES=' + bytesWritten + '\\n');
+    // Natural exit via event-loop emptiness. No process.exit().
+  `;
   const child: ChildProcess = spawn(
     process.execPath,
-    ["-e",
-     "for (let i = 0; i < 256; i++) { process.stdout.write('A'.repeat(1024)); } process.exit(0);",
-    ],
+    ["-e", childScript],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   const handle = wrapChild(child);
@@ -182,11 +225,35 @@ test("BOOTOBS06: child emitting >> cap cannot deadlock the parent; exact byte ac
   const dt = Date.now() - start;
   assert.ok(dt < 5000,
     "BOOTOBS06: child must exit promptly even with >cap stdout (took " + dt + "ms)");
+  // Producer-truth law. If the producer says it wrote
+  // less than 262144 bytes, that's a producer bug, not
+  // a pipe bug. If the producer says it wrote 262144 but
+  // the parent sees less, that's a pipe/drain bug.
+  //
+  // The terminal barrier returns BoundedOutputStats for
+  // stdout/stderr (no raw bytes). For the producer-truth
+  // diagnostic, we use `bootstrapOutput()` AFTER the
+  // barrier resolves — at that point its Uint8Arrays are
+  // FINAL too (per the handle's terminal-output-accounting
+  // law).
+  const out0 = handle.bootstrapOutput();
+  const stderrText = new TextDecoder("utf-8").decode(out0.stderr);
+  const mWrites = /BOOTOBS_WRITES=(\d+)/.exec(stderrText);
+  const mBytes = /BOOTOBS_BYTES=(\d+)/.exec(stderrText);
+  const producerWrites = mWrites ? Number(mWrites[1]) : -1;
+  const producerBytes = mBytes ? Number(mBytes[1]) : -1;
+  const ctx =
+    ` (producer_writes=${producerWrites}, producer_bytes=${producerBytes}, ` +
+    `stderr=${JSON.stringify(stderrText)})`;
   // Exact-equality accounting — only valid AFTER the
   // terminal barrier resolves. A `>=` assertion would
   // hide a partial-count regression.
+  assert.equal(producerWrites, 256,
+    "BOOTOBS06: producer must have issued exactly 256 writes" + ctx);
+  assert.equal(producerBytes, 256 * 1024,
+    "BOOTOBS06: producer must have written exactly 256*1024 bytes" + ctx);
   assert.equal(term.stdout.bytesSeen, 256 * 1024,
-    "BOOTOBS06: stdoutBytesSeen must EXACTLY equal 256*1024 after terminal barrier");
+    "BOOTOBS06: stdoutBytesSeen must EXACTLY equal 256*1024 after terminal barrier" + ctx);
   assert.equal(term.stdout.truncated, true,
     "BOOTOBS06: stdout must be marked truncated past the cap");
   assert.ok(term.stdout.bytesRetained <= 64 * 1024,

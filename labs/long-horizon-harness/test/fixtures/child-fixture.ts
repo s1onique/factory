@@ -26,7 +26,10 @@
  * matrix does not race fixture startup:
  *
  *   sleep --ms N              emits nothing; just stays alive
- *   ignore-term               emits nothing; SIGTERM ignored
+ *   ignore-term               emits "ignore-term-ready\n"
+ *                             AFTER SIGTERM+SIGINT handlers
+ *                             are installed, then SIGTERM
+ *                             ignored
  *   term-handler              emits "term-handler-ready\n"
  *                             then installs SIGTERM handler
  *                             then emits "term-handler-armed\n"
@@ -241,8 +244,33 @@ async function main(): Promise<void> {
       return;
     }
     case "ignore-term": {
+      // FX07 readiness-marker law:
+      // emit an explicit readiness marker AFTER both signal
+      // handlers are installed. Node's ChildProcess 'spawn'
+      // event only proves the OS process was created — it
+      // does NOT prove the application has installed its
+      // SIGTERM handler. A parent that races a SIGTERM
+      // immediately after spawn can therefore kill the
+      // child before the handler exists, and Node's default
+      // SIGTERM-exits-process behavior would then make
+      // `ignore-term` look broken.
+      //
+      // The new protocol is:
+      //   1. Node process starts
+      //   2. SIGTERM handler installed  (overrides Node's
+      //                                  default exit)
+      //   3. SIGINT  handler installed  (parity with SIGTERM)
+      //   4. "ignore-term-ready\n" emitted on stdout
+      //   5. ref'ed interval installed (liveness)
+      //
+      // Parents MUST await the "ignore-term-ready" marker
+      // before sending SIGTERM; sending before the marker
+      // is undefined behavior. This converts a
+      // startup-race timing bug into a deterministic
+      // protocol contract.
       process.on("SIGTERM", () => {});
       process.on("SIGINT", () => {});
+      process.stdout.write("ignore-term-ready\n");
       setInterval(() => {}, 1000);
       return;
     }
