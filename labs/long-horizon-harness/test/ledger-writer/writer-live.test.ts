@@ -154,7 +154,15 @@ function makeAttemptEvent(seq: number, attemptId: string): WriterEvent {
 
 let tmpDir: string | undefined;
 let handle: WriterHandle | undefined;
-let cleanupFns: Array<() => Promise<void>> = [];
+// (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+//  OUTCOME01) cleanupFns is a heterogeneous list:
+// writer-handle teardowns resolve with the typed
+// `TerminateOutcome`; filesystem-cleanup closures
+// resolve with `void`. We type the list as
+// `Promise<unknown>` so the union is structural;
+// the post-test loop discards the value (best-
+// effort teardown — see `after(...)` below).
+let cleanupFns: Array<() => Promise<unknown>> = [];
 
 before(async () => {
   if (!spawnable) {

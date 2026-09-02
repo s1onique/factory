@@ -939,6 +939,226 @@ export type ChildCloseResult = {
 };
 
 /**
+ * (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+ *  OUTCOME01)
+ *
+ * Typed outcome for writer-helper teardown. Four
+ * mutually-exclusive variants, each with a precise
+ * lifecycle proof semantics:
+ *
+ *   closed
+ *     Node's `'close'` event was actually observed
+ *     (process ended AND stdio streams closed).
+ *     This is the ONLY variant that licenses
+ *     releasing the writer_child registry entry.
+ *
+ *   signal_permission_denied
+ *     The kernel refused to deliver SIGKILL with
+ *     errno EPERM (synchronous throw from
+ *     `process.kill()` or asynchronous `'error'`
+ *     event with code "EPERM"). The child is
+ *     still alive in the kernel; the writer_child
+ *     entry MUST be retained. Per Node's documented
+ *     ChildProcess contract, `'close'` will NOT fire
+ *     unless and until the process actually ends —
+ *     a refused signal cannot manufacture termination,
+ *     so we do NOT wait for close on this path. The
+ *     residue record carries this errno verbatim.
+ *
+ *   signal_failed
+ *     `kill()` returned false OR threw an errno
+ *     other than EPERM (e.g. ESRCH — the child has
+ *     already exited so there's nothing to signal).
+ *     The writer_child entry MUST be retained.
+ *
+ *   close_timeout
+ *     The kill was accepted by the OS but `'close'`
+ *     was not observed within the bounded deadline.
+ *     Per Node semantics this means the child has
+ *     NOT terminated (or has not yet had its stdio
+ *     streams closed). The writer_child entry MUST
+ *     be retained.
+ *
+ * CRITICAL — orthogonal to the residue state:
+ *   The above four outcomes describe HOW the
+ *   termination request went. The ORACLE then
+ *   separately observes WHETHER the original child
+ *   has terminated (via `proveChildAbsent`). On a
+ *   sandboxed host `signal_permission_denied` and
+ *   `close_timeout` will both coexist with the
+ *   oracle's `alive` residue state — the teardown
+ *   outcome and the residue observation are
+ *   separate dimensions, NOT mutually-exclusive
+ *   classifications. See WSTOP08.
+ */
+export type TerminateOutcome =
+  | {
+      readonly kind: "closed";
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }
+  | {
+      readonly kind: "signal_permission_denied";
+      readonly errno: "EPERM";
+    }
+  | {
+      readonly kind: "signal_failed";
+      readonly errno?: string;
+    }
+  | {
+      readonly kind: "close_timeout";
+    };
+
+/**
+ * (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+ *  OUTCOME01)
+ *
+ * Typed teardown primitive for an owned writer
+ * child. Resolves (never rejects) with a
+ * `TerminateOutcome` so the caller can record
+ * machine-readable diagnostics without resorting
+ * to a swallow-all try/catch around `stop()`.
+ *
+ * The atomicity discipline is identical to
+ * `terminateHelperAndAwaitClose` (listeners-FIRST,
+ * kill-SECOND, single idempotent settle flag) but
+ * the outcome is a discriminated union, not a
+ * prose rejection.
+ *
+ * Key distinction from the reject-prose variant:
+ *   `signal_permission_denied` is its OWN resolved
+ *   outcome. We do NOT wait for `'close'` after a
+ *   definitive permission failure: per Node's
+ *   documented contract, `'close'` cannot fire if
+ *   the process is still running, and on a
+ *   permission-denied host the process IS still
+ *   running. Waiting for `'close'` here would
+ *   burn the full timeout for a boundary that
+ *   Node itself cannot emit.
+ *
+ * Listeners-FIRST (CORRECTION09) is preserved:
+ *   `'close'` and `'error'` observers are attached
+ *   BEFORE `kill()` so a synchronous emit during
+ *   the kill cannot be lost.
+ */
+export async function terminateHelperAndAwaitTyped(
+  child: import("node:child_process").ChildProcess,
+  timeoutMs = 2000,
+): Promise<TerminateOutcome> {
+  return new Promise<TerminateOutcome>((resolve) => {
+    let settled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let killResult:
+      | { readonly kind: "threw"; readonly err: NodeJS.ErrnoException }
+      | { readonly kind: "returned_false" }
+      | { readonly kind: "accepted" }
+      | undefined;
+
+    function settle(outcome: TerminateOutcome): void {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = undefined;
+      }
+      child.off("close", onClose);
+      child.off("error", onError);
+      resolve(outcome);
+    }
+
+    const onClose = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
+      // If kill already synchronously failed we are
+      // already settled; ignore a later `'close'`
+      // (the listener would not normally fire in
+      // that case anyway, since `'close'` only fires
+      // after a real process exit).
+      if (settled) return;
+      settle({ kind: "closed", code, signal });
+    };
+
+    const onError = (err: Error): void => {
+      if (settled) return;
+      const errno = (err as NodeJS.ErrnoException).code;
+      if (errno === "EPERM") {
+        settle({
+          kind: "signal_permission_denied",
+          errno: "EPERM",
+        });
+        return;
+      }
+      if (errno !== undefined) {
+        settle({
+          kind: "signal_failed",
+          errno,
+        });
+      } else {
+        settle({
+          kind: "signal_failed",
+        });
+      }
+    };
+
+    // (1) Arm listeners BEFORE kill so a synchronous
+    // close/error during kill cannot be lost.
+    child.once("close", onClose);
+    child.once("error", onError);
+
+    // (2) Bounded deadline. If kill was accepted
+    // but `'close'` does not arrive in time, we
+    // settle as `close_timeout`. We do NOT wait
+    // forever: a missing `'close'` is real
+    // information about the child's lifecycle
+    // state, not a transient race.
+    timeoutHandle = setTimeout(() => {
+      settle({ kind: "close_timeout" });
+    }, timeoutMs);
+
+    // (3) Issue the kill. The listeners will
+    // settle the promise via the appropriate
+    // branch; we only settle here if kill
+    // synchronously fails (returned false or
+    // threw an EPERM/non-EPERM errno). A
+    // synchronous EPERM throw is the canonical
+    // sandbox-on-macOS path observed in the
+    // STOP-BOUNDARY probe.
+    try {
+      const r = child.kill("SIGKILL");
+      if (r === false) {
+        killResult = { kind: "returned_false" };
+        settle({ kind: "signal_failed" });
+      } else {
+        killResult = { kind: "accepted" };
+        // listeners will eventually settle via
+        // onClose / onError / deadline.
+      }
+    } catch (e: unknown) {
+      const err = e as NodeJS.ErrnoException;
+      killResult = { kind: "threw", err };
+      if (err && err.code === "EPERM") {
+        settle({
+          kind: "signal_permission_denied",
+          errno: "EPERM",
+        });
+      } else if (err && err.code !== undefined) {
+        settle({
+          kind: "signal_failed",
+          errno: err.code,
+        });
+      } else {
+        settle({
+          kind: "signal_failed",
+        });
+      }
+    }
+
+    void killResult; // captured for diagnostics
+  });
+}
+
+/**
  * Observe the ChildProcess `'close'` boundary.
  *
  *   - Resolves with `{kind:"closed", code, signal}`

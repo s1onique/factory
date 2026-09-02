@@ -25,6 +25,7 @@ import {
 import {
   type WriterHandle,
 } from "../ledger-writer/_writer_helper.js";
+import { terminateHelperAndAwaitTyped } from "../ledger-writer/_live_cases.js";
 import { whoAreYouLedgerWriter } from "../../src/ledger-writer/ledger-writer-client-identity.js";
 import { registerWriterSpawn } from "../ledger-writer/_live_registry.js";
 import type { WitnessStartSpec } from "../../src/witness-start/witness-start-types.js";
@@ -147,18 +148,18 @@ export async function startLiveWriter(
     socketPath: r.socketPath,
     child: r.child,
     instanceId: r.binding.instanceId,
-    async stop(): Promise<void> {
-      if (r.child.exitCode === null && r.child.signalCode === null) {
-        try { r.child.kill("SIGKILL"); } catch { /* */ }
-      }
-      const deadline = Date.now() + 2000;
-      while (
-        Date.now() < deadline &&
-        r.child.exitCode === null &&
-        r.child.signalCode === null
-      ) {
-        await new Promise((res) => setTimeout(res, 25));
-      }
+    async stop(): Promise<
+      import("../ledger-writer/_live_cases.js").TerminateOutcome
+    > {
+      // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+      //  OUTCOME01) Delegate to the typed outcome
+      // primitive. This eliminates the duplicate raw
+      // polling-loop pattern that this witness-side
+      // helper historically carried; now both the
+      // canonical writer_helper and this witness-side
+      // adapter share the SAME kill + close-boundary
+      // observation. See _live_cases.ts and WSTOP01..08.
+      const outcome = await terminateHelperAndAwaitTyped(r.child, 2000);
       try {
         await fs.rm(ledgerWriterSocketPath(args.runDir), { force: true });
       } catch { /* */ }
@@ -168,6 +169,7 @@ export async function startLiveWriter(
           force: true,
         });
       } catch { /* */ }
+      return outcome;
     },
     ping: async () => {
       // CORRECTION07: delegate to the production client.

@@ -42,6 +42,7 @@ import { makeLedgerWriterInstanceId } from "../../src/ledger-writer/ledger-write
 import type {
   WriterEvent,
 } from "../../src/ledger-writer/ledger-writer-protocol.js";
+import { terminateHelperAndAwaitTyped } from "./_live_cases.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
@@ -53,7 +54,21 @@ export type WriterHandle = {
   readonly socketPath: string;
   readonly child: ChildProcess;
   readonly instanceId: ReturnType<typeof makeLedgerWriterInstanceId>;
-  stop(): Promise<void>;
+  // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+  //  OUTCOME01) stop() resolves with a typed
+  // `TerminateOutcome` (never rejects). The caller
+  // MUST inspect the outcome:
+  //   - kind:"closed" → child lifecycle completed;
+  //     writer_child registry entry may be released.
+  //   - kind:"signal_permission_denied" / "signal_failed"
+  //     / "close_timeout" → child lifecycle NOT
+  //     proven; writer_child entry MUST be retained.
+  // See `_live_cases.ts:TerminateOutcome` for the
+  // full contract and WSTOP01..08 oracles for the
+  // proof matrix.
+  stop(): Promise<
+    import("./_live_cases.js").TerminateOutcome
+  >;
   ping(): ReturnType<typeof pingLedgerWriter>;
   whoAreYou(): ReturnType<typeof whoAreYouLedgerWriter>;
   append(args: {
@@ -97,34 +112,42 @@ export async function startWriterInTmpDir(
     socketPath: result.socketPath,
     child: result.child,
     instanceId: result.binding.instanceId,
-    async stop(): Promise<void> {
-      // (B0-QUALIFICATION04) Kill the writer child. We
-      // send SIGKILL and wait synchronously for exit
-      // (do not unref). The test harness owns the child
-      // lifecycle; a leak here exhausts UDS / fd
-      // resources across sequential test files.
+    async stop(): Promise<
+      import("./_live_cases.js").TerminateOutcome
+    > {
+      // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+      //  OUTCOME01)
       //
-      // Important: a child terminated by signal has
-      // exitCode === null AND signalCode === "<sig>".
-      // Polling only exitCode will burn the full 2s
-      // timeout even when the process is already dead,
-      // which is why the qualification lane was running
-      // at ~2.2s per writer case. Observe BOTH.
-      if (result.child.exitCode === null && result.child.signalCode === null) {
-        try {
-          result.child.kill("SIGKILL");
-        } catch {
-          // best-effort
-        }
-      }
-      const deadline = Date.now() + 2000;
-      while (
-        Date.now() < deadline &&
-        result.child.exitCode === null &&
-        result.child.signalCode === null
-      ) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      // Delegate the kill + close-boundary observation
+      // to `terminateHelperAndAwaitTyped`, the typed
+      // outcome primitive. This replaces the previous
+      // (pre-OUTCOME01) raw polling loop, which:
+      //   - relied on cached exitCode/signalCode
+      //     instead of the authoritative `'close'`
+      //     boundary;
+      //   - swallowed EPERM-from-kill with a bare
+      //     `try { kill() } catch {}`;
+      //   - could not distinguish "kill accepted,
+      //     close pending" from "kill EPERM-rejected,
+      //     child still alive";
+      //   - returned void, forcing callers to
+      //     `try { stop() } catch {}` to avoid
+      //     test failures — exactly the false-green
+      //     path WSTOP06 closes.
+      //
+      // The typed outcome is returned to the caller
+      // verbatim. The caller MUST inspect the
+      // discriminant and act accordingly:
+      //   - "closed": writer_child registry entry
+      //     may be released.
+      //   - any other variant: writer_child entry
+      //     MUST be retained; the residue record
+      //     carries the typed failure cause.
+      const outcome = await terminateHelperAndAwaitTyped(
+        result.child,
+        2000,
+      );
+
       // Belt-and-suspenders: explicitly unlink the socket
       // path if it still exists. macOS sometimes holds the
       // inode for a moment after the writer exits.
@@ -144,6 +167,7 @@ export async function startWriterInTmpDir(
       } catch {
         // best-effort
       }
+      return outcome;
     },
     ping() {
       return pingLedgerWriter({ socketPath: result.socketPath, timeoutMs: 5000 });
