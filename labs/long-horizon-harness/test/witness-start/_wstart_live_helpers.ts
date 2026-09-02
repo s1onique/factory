@@ -25,7 +25,15 @@ import {
 import {
   type WriterHandle,
 } from "../ledger-writer/_writer_helper.js";
-import { terminateHelperAndAwaitTyped } from "../ledger-writer/_live_cases.js";
+// (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+//  OUTCOME01-CORRECTION01) Import from the neutral
+// teardown module, not from the case catalogue.
+// See WSTOP09.
+import {
+  type TerminateOutcome,
+  terminateHelperAndAwaitTyped,
+} from "../ledger-writer/_writer_teardown.js";
+import { recordWriterTeardown } from "../ledger-writer/_writer_teardown_registry.js";
 import { whoAreYouLedgerWriter } from "../../src/ledger-writer/ledger-writer-client-identity.js";
 import { registerWriterSpawn } from "../ledger-writer/_live_registry.js";
 import type { WitnessStartSpec } from "../../src/witness-start/witness-start-types.js";
@@ -148,18 +156,17 @@ export async function startLiveWriter(
     socketPath: r.socketPath,
     child: r.child,
     instanceId: r.binding.instanceId,
-    async stop(): Promise<
-      import("../ledger-writer/_live_cases.js").TerminateOutcome
-    > {
+    async stop(): Promise<TerminateOutcome> {
       // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
-      //  OUTCOME01) Delegate to the typed outcome
-      // primitive. This eliminates the duplicate raw
-      // polling-loop pattern that this witness-side
-      // helper historically carried; now both the
-      // canonical writer_helper and this witness-side
-      // adapter share the SAME kill + close-boundary
-      // observation. See _live_cases.ts and WSTOP01..08.
+      //  OUTCOME01-CORRECTION01) Delegate to the typed
+      // outcome primitive and RECORD the outcome into
+      // the cross-cutting teardown registry. The
+      // witness-side adapter is now evidence-honest:
+      // every teardown surfaces its typed cause to the
+      // residue sweep via the registry, NOT via a
+      // try/catch swallow.
       const outcome = await terminateHelperAndAwaitTyped(r.child, 2000);
+      recordWriterTeardown(args.runDir, outcome);
       try {
         await fs.rm(ledgerWriterSocketPath(args.runDir), { force: true });
       } catch { /* */ }
@@ -241,9 +248,24 @@ export async function startLiveWriter(
  * the run/control directories. Safe to call from a
  * `finally` block; tolerates missing pieces (each rm is
  * best-effort).
+ *
+ * (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+ *  OUTCOME01-CORRECTION01) The pre-OUTCOME01 swallow-
+ *  all try/catch around `run.writer.stop()` is
+ *  REMOVED. The teardown outcome is now recorded by
+ *  WriterHandle.stop() into the cross-cutting registry;
+ *  the case body only awaits. The stop() call will
+ *  re-throw on a harness programming fault, which is
+ *  the correct behaviour for a teardown helper — we
+ *  want such faults visible.
+ *
+ *  This function still returns `Promise<void>` for
+ *  source compatibility with callers that do not
+ *  inspect the teardown outcome; the recorded
+ *  `TerminateOutcome` lives in the registry.
  */
 export async function teardownLiveRun(run: LiveRunHandle): Promise<void> {
-  try { await run.writer.stop(); } catch { /* */ }
+  await run.writer.stop();
   try { await fs.rm(run.runDir, { recursive: true, force: true }); } catch { /* */ }
   try { await fs.rm(run.controlDir, { recursive: true, force: true }); } catch { /* */ }
 }

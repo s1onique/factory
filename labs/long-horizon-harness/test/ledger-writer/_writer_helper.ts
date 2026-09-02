@@ -42,7 +42,16 @@ import { makeLedgerWriterInstanceId } from "../../src/ledger-writer/ledger-write
 import type {
   WriterEvent,
 } from "../../src/ledger-writer/ledger-writer-protocol.js";
-import { terminateHelperAndAwaitTyped } from "./_live_cases.js";
+// (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+//  OUTCOME01-CORRECTION01) Import the primitive
+// from the neutral module, NOT from _live_cases.ts.
+// This breaks the orchestration→primitive inversion
+// identified in the CORRECTION01 review.
+import {
+  type TerminateOutcome,
+  terminateHelperAndAwaitTyped,
+} from "./_writer_teardown.js";
+import { recordWriterTeardown } from "./_writer_teardown_registry.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
@@ -55,20 +64,20 @@ export type WriterHandle = {
   readonly child: ChildProcess;
   readonly instanceId: ReturnType<typeof makeLedgerWriterInstanceId>;
   // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
-  //  OUTCOME01) stop() resolves with a typed
-  // `TerminateOutcome` (never rejects). The caller
-  // MUST inspect the outcome:
+  //  OUTCOME01-CORRECTION01) stop() resolves with a
+  //  typed `TerminateOutcome` (never rejects on
+  //  process-control outcomes; only on harness
+  //  programming faults). The caller MUST inspect
+  //  the outcome:
   //   - kind:"closed" → child lifecycle completed;
   //     writer_child registry entry may be released.
   //   - kind:"signal_permission_denied" / "signal_failed"
   //     / "close_timeout" → child lifecycle NOT
   //     proven; writer_child entry MUST be retained.
-  // See `_live_cases.ts:TerminateOutcome` for the
-  // full contract and WSTOP01..08 oracles for the
-  // proof matrix.
-  stop(): Promise<
-    import("./_live_cases.js").TerminateOutcome
-  >;
+  //  See `_writer_teardown.ts:TerminateOutcome` for
+  //  the full contract and WSTOP01..09 oracles for
+  //  the proof matrix.
+  stop(): Promise<TerminateOutcome>;
   ping(): ReturnType<typeof pingLedgerWriter>;
   whoAreYou(): ReturnType<typeof whoAreYouLedgerWriter>;
   append(args: {
@@ -112,11 +121,9 @@ export async function startWriterInTmpDir(
     socketPath: result.socketPath,
     child: result.child,
     instanceId: result.binding.instanceId,
-    async stop(): Promise<
-      import("./_live_cases.js").TerminateOutcome
-    > {
+    async stop(): Promise<TerminateOutcome> {
       // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
-      //  OUTCOME01)
+      //  OUTCOME01-CORRECTION01)
       //
       // Delegate the kill + close-boundary observation
       // to `terminateHelperAndAwaitTyped`, the typed
@@ -135,18 +142,20 @@ export async function startWriterInTmpDir(
       //     test failures — exactly the false-green
       //     path WSTOP06 closes.
       //
-      // The typed outcome is returned to the caller
-      // verbatim. The caller MUST inspect the
-      // discriminant and act accordingly:
-      //   - "closed": writer_child registry entry
-      //     may be released.
-      //   - any other variant: writer_child entry
-      //     MUST be retained; the residue record
-      //     carries the typed failure cause.
+      // CORRECTION01 evidence-propagation step:
+      //   The typed outcome is recorded into the
+      //   cross-cutting teardown registry BEFORE
+      //   being returned. The registry key is the
+      //   handle's `runDir` (unique per LWQ case).
+      //   This ensures the sweep can join cause
+      //   (typed outcome) with effect (residue
+      //   observation) without depending on the
+      //   caller to forward the result.
       const outcome = await terminateHelperAndAwaitTyped(
         result.child,
         2000,
       );
+      recordWriterTeardown(runDir, outcome);
 
       // Belt-and-suspenders: explicitly unlink the socket
       // path if it still exists. macOS sometimes holds the
