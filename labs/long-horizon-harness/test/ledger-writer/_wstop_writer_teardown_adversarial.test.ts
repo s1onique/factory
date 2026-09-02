@@ -339,7 +339,7 @@ test("WSTOP07: only {kind:'closed'} can release writer_child", () => {
 
 test("WSTOP08: integration — kill-EPERM → stop() → registry; cause + effect both preserved", async () => {
   // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
-  //  OUTCOME01-CORRECTION01)
+  //  OUTCOME01-CORRECTION01-MICROFIX01)
   //
   // Strengthened per the CORRECTION01 review:
   //   "Drive:
@@ -361,11 +361,20 @@ test("WSTOP08: integration — kill-EPERM → stop() → registry; cause + effec
   // is observable on any long-lived child. We
   // synthesize it deterministically by stubbing
   // `child.kill` to throw an EPERM ErrnoException.
+  //
+  // CORRECTION01-MICROFIX01 identity key:
+  //   We mint a `WriterLifetimeId` here — the
+  //   registry is keyed by lifetime identity, NOT
+  //   runDir. See WSTOP10 for the multi-writer-
+  //   same-runDir provenance test that fails
+  //   mechanically under a `Map<runDir, …>`.
   await withTmpDir(async (tmp) => {
     const registry = await import(
       "./_writer_teardown_registry.js"
     );
     registry.clearWriterTeardowns();
+    registry.resetLifetimeCounter();
+    const lifetimeId = registry.makeWriterLifetimeId();
     const c = spawnLongLived();
     c.on("error", () => { /* trap */ });
     (c as { kill: (s?: string) => boolean }).kill = () => {
@@ -375,52 +384,41 @@ test("WSTOP08: integration — kill-EPERM → stop() → registry; cause + effec
       err.code = "EPERM";
       throw err;
     };
-    // Drive the typed primitive directly (it owns
-    // the kill + close-boundary semantics).
     const outcome = await teardown.terminateHelperAndAwaitTyped(c, 500);
-    // Record into the registry the way the
-    // production WriterHandle.stop() does.
-    registry.recordWriterTeardown(tmp, outcome);
-    // Observe residue state on the child. On the
-    // sandbox the child survives the refused
-    // signal — exitCode/signalCode remain null
-    // and 'killed' is false.
+    registry.recordWriterTeardown(lifetimeId, outcome);
     const effect =
       c.exitCode === null && c.signalCode === null
         ? { kind: "alive" as const }
         : { kind: "terminated" as const };
-    // Build the joined evidence object the way
-    // the sweep would.
-    const record = registry.getWriterTeardown(tmp);
+    const record = registry.getWriterTeardown(lifetimeId);
     assert.ok(record,
       "WSTOP08: teardown must have been recorded in the registry");
     const evidence = {
-      writer_child: {
+      writer_lifetime: {
+        lifetime_id: lifetimeId,
+        run_dir: tmp,
         teardown: record.outcome,
         final_observation: effect,
       },
     };
-    // Both cause and effect MUST be present.
     assert.ok(
-      evidence.writer_child.teardown.kind ===
+      evidence.writer_lifetime.teardown.kind ===
         "signal_permission_denied" ||
-        evidence.writer_child.teardown.kind === "close_timeout",
-      `WSTOP08: teardown cause MUST be typed; got ${JSON.stringify(evidence.writer_child.teardown)}`,
+        evidence.writer_lifetime.teardown.kind === "close_timeout",
+      `WSTOP08: teardown cause MUST be typed; got ${JSON.stringify(evidence.writer_lifetime.teardown)}`,
     );
-    if (evidence.writer_child.teardown.kind === "signal_permission_denied") {
-      assert.equal(evidence.writer_child.teardown.errno, "EPERM",
+    if (evidence.writer_lifetime.teardown.kind === "signal_permission_denied") {
+      assert.equal(evidence.writer_lifetime.teardown.errno, "EPERM",
         "WSTOP08: typed cause must preserve errno verbatim");
     }
     assert.ok(
-      evidence.writer_child.final_observation.kind === "alive" ||
-        evidence.writer_child.final_observation.kind === "terminated",
+      evidence.writer_lifetime.final_observation.kind === "alive" ||
+        evidence.writer_lifetime.final_observation.kind === "terminated",
       "WSTOP08: final observation must be a valid residue state",
     );
-    // JSON shape preservation (for cross-process
-    // evidence propagation through stderr).
     const asText = JSON.stringify(evidence);
     assert.match(asText, /"kind":"(signal_permission_denied|close_timeout)"/);
-    if (evidence.writer_child.teardown.kind === "signal_permission_denied") {
+    if (evidence.writer_lifetime.teardown.kind === "signal_permission_denied") {
       assert.match(asText, /"errno":"EPERM"/);
     }
     assert.match(asText, /"kind":"(alive|terminated)"/);
@@ -469,4 +467,162 @@ test("WSTOP09: dependency direction — fixture primitives MUST NOT import _live
   assert.match(wstartHelpers,
     /from\s*["']\.\.\/ledger-writer\/_writer_teardown\.js["']/,
     "WSTOP09: _wstart_live_helpers.ts MUST import from _writer_teardown.js");
+});
+
+test("WSTOP10: multi-writer same-runDir — provenance preserved per lifetime identity", async () => {
+  // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+  //  OUTCOME01-CORRECTION01-MICROFIX01)
+  //
+  // Per the MICROFIX01 review: the previous
+  // OUTCOME01 keyed the registry by `runDir`,
+  // which is contextual identity, not lifecycle
+  // identity. LWQ07 (restart preserves dedup)
+  // exercises writer A → stop → writer B against
+  // the SAME runDir. Under `Map<runDir, ...>` the
+  // second writer's teardown would overwrite the
+  // first writer's evidence.
+  //
+  // This oracle fails mechanically under a
+  // runDir-keyed implementation.
+  await withTmpDir(async (tmp) => {
+    const registry = await import(
+      "./_writer_teardown_registry.js"
+    );
+    registry.clearWriterTeardowns();
+    registry.resetLifetimeCounter();
+
+    // ----- Writer A — successful lifecycle -----
+    const lifetimeIdA = registry.makeWriterLifetimeId();
+    const cA = spawnLongLived();
+    cA.on("error", () => { /* trap */ });
+    (cA as { kill: (s?: string) => boolean }).kill = () => {
+      cA.emit("close", null, "SIGKILL");
+      return true;
+    };
+    const outcomeA = await teardown.terminateHelperAndAwaitTyped(cA, 500);
+    registry.recordWriterTeardown(lifetimeIdA, outcomeA);
+    const effectA =
+      cA.exitCode === null && cA.signalCode === null
+        ? { kind: "alive" as const }
+        : { kind: "pid_absent" as const };
+
+    // ----- Writer B — refused signal lifecycle -----
+    const lifetimeIdB = registry.makeWriterLifetimeId();
+    const cB = spawnLongLived();
+    cB.on("error", () => { /* trap */ });
+    (cB as { kill: (s?: string) => boolean }).kill = () => {
+      const err: NodeJS.ErrnoException = new Error(
+        "kill EPERM",
+      );
+      err.code = "EPERM";
+      throw err;
+    };
+    const outcomeB = await teardown.terminateHelperAndAwaitTyped(cB, 500);
+    registry.recordWriterTeardown(lifetimeIdB, outcomeB);
+    const effectB =
+      cB.exitCode === null && cB.signalCode === null
+        ? { kind: "alive" as const }
+        : { kind: "pid_absent" as const };
+
+    // (1) Both teardowns are present.
+    assert.equal(
+      registry.writerTeardownCount(),
+      2,
+      "WSTOP10: registry must hold BOTH lifetime teardowns",
+    );
+
+    // (2) Per-lifetime lookup returns the correct
+    //     typed outcome for each writer.
+    const recA = registry.getWriterTeardown(lifetimeIdA);
+    const recB = registry.getWriterTeardown(lifetimeIdB);
+    assert.ok(recA, "WSTOP10: writer A teardown must be present");
+    assert.ok(recB, "WSTOP10: writer B teardown must be present");
+    assert.equal(recA.outcome.kind, "closed",
+      "WSTOP10: writer A outcome MUST be 'closed' (not overwritten by B)");
+    assert.equal(recB.outcome.kind, "signal_permission_denied",
+      "WSTOP10: writer B outcome MUST be 'signal_permission_denied'");
+    if (recB.outcome.kind === "signal_permission_denied") {
+      assert.equal(recB.outcome.errno, "EPERM",
+        "WSTOP10: writer B errno must be EPERM");
+    }
+
+    // (3) Per-lifetime join: cause + effect, with
+    //     NO cross-attribution.
+    const joinA = {
+      lifetime_id: lifetimeIdA,
+      run_dir: tmp,
+      teardown: recA.outcome,
+      final_observation: effectA,
+    };
+    const joinB = {
+      lifetime_id: lifetimeIdB,
+      run_dir: tmp,
+      teardown: recB.outcome,
+      final_observation: effectB,
+    };
+    assert.equal(joinA.teardown.kind, "closed",
+      "WSTOP10: join A cause is closed");
+    assert.equal(joinB.teardown.kind, "signal_permission_denied",
+      "WSTOP10: join B cause is signal_permission_denied");
+    assert.equal(joinA.lifetime_id, lifetimeIdA,
+      "WSTOP10: join A lifetime_id MUST equal the minted A");
+    assert.equal(joinB.lifetime_id, lifetimeIdB,
+      "WSTOP10: join B lifetime_id MUST equal the minted B");
+    assert.notEqual(lifetimeIdA, lifetimeIdB,
+      "WSTOP10: distinct lifetimes MUST be distinct identities");
+
+    // (4) JSON shape preservation.
+    const asText = JSON.stringify([joinA, joinB]);
+    assert.match(asText, /"kind":"closed"/);
+    assert.match(asText, /"kind":"signal_permission_denied"/);
+    assert.match(asText, /"errno":"EPERM"/);
+  });
+});
+
+test("WSTOP11: registry reset discipline — clear empties, record → clear → lookup undefined", async () => {
+  // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+  //  OUTCOME01-CORRECTION01-MICROFIX01)
+  //
+  // Per the MICROFIX01 review: without explicit
+  // reset discipline, repeated test execution in
+  // a single Node process can turn historical
+  // teardown evidence into current evidence.
+  // This oracle pins both directions of the
+  // discipline.
+  const registry = await import(
+    "./_writer_teardown_registry.js"
+  );
+  registry.clearWriterTeardowns();
+  registry.resetLifetimeCounter();
+  assert.equal(
+    registry.writerTeardownCount(),
+    0,
+    "WSTOP11: registry must start empty after reset",
+  );
+  const lifetimeId = registry.makeWriterLifetimeId();
+  registry.recordWriterTeardown(lifetimeId, {
+    kind: "closed",
+    code: 0,
+    signal: null,
+  });
+  assert.equal(
+    registry.writerTeardownCount(),
+    1,
+    "WSTOP11: registry must record the outcome",
+  );
+  assert.ok(
+    registry.getWriterTeardown(lifetimeId),
+    "WSTOP11: lookup returns the recorded outcome",
+  );
+  registry.clearWriterTeardowns();
+  assert.equal(
+    registry.writerTeardownCount(),
+    0,
+    "WSTOP11: registry must be empty after clear",
+  );
+  assert.equal(
+    registry.getWriterTeardown(lifetimeId),
+    undefined,
+    "WSTOP11: lookup after clear MUST be undefined",
+  );
 });

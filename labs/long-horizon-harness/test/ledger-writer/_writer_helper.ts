@@ -52,6 +52,8 @@ import {
   terminateHelperAndAwaitTyped,
 } from "./_writer_teardown.js";
 import { recordWriterTeardown } from "./_writer_teardown_registry.js";
+import type { WriterLifetimeId } from "./_writer_teardown_registry.js";
+import { makeWriterLifetimeId } from "./_writer_teardown_registry.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
@@ -63,6 +65,22 @@ export type WriterHandle = {
   readonly socketPath: string;
   readonly child: ChildProcess;
   readonly instanceId: ReturnType<typeof makeLedgerWriterInstanceId>;
+  // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+  //  OUTCOME01-CORRECTION01-MICROFIX01)
+  //
+  // Opaque process-lifetime identity, minted
+  // once per writer incarnation inside the
+  // helper. Distinct from the kernel PID (Node
+  // explicitly warns PIDs can be reused). The
+  // teardown-outcome registry is keyed by this
+  // token so that two writers spawned against
+  // the SAME runDir (the LWQ07 / LW-LIVE09/10
+  // restart pattern) do not overwrite each
+  // other's evidence.
+  //
+  // The (runDir, lifetimeId) pair together binds
+  // logical run context + specific incarnation.
+  readonly lifetimeId: WriterLifetimeId;
   // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
   //  OUTCOME01-CORRECTION01) stop() resolves with a
   //  typed `TerminateOutcome` (never rejects on
@@ -121,6 +139,12 @@ export async function startWriterInTmpDir(
     socketPath: result.socketPath,
     child: result.child,
     instanceId: result.binding.instanceId,
+    // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+    //  OUTCOME01-CORRECTION01-MICROFIX01) Mint the
+    //  per-incarnation lifetime token. Keyed in the
+    //  teardown registry so restarts against the same
+    //  runDir preserve each incarnation's evidence.
+    lifetimeId: makeWriterLifetimeId(),
     async stop(): Promise<TerminateOutcome> {
       // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
       //  OUTCOME01-CORRECTION01)
@@ -145,17 +169,22 @@ export async function startWriterInTmpDir(
       // CORRECTION01 evidence-propagation step:
       //   The typed outcome is recorded into the
       //   cross-cutting teardown registry BEFORE
-      //   being returned. The registry key is the
-      //   handle's `runDir` (unique per LWQ case).
-      //   This ensures the sweep can join cause
-      //   (typed outcome) with effect (residue
-      //   observation) without depending on the
-      //   caller to forward the result.
+      //   being returned.
+      //
+      // CORRECTION01-MICROFIX01 identity key:
+      //   Registry key is the handle's `lifetimeId`,
+      //   NOT the runDir. Two writers spawned
+      //   against the SAME runDir (the LWQ07
+      //   restart pattern) each have distinct
+      //   lifetimeIds, so their teardown evidence
+      //   is preserved independently. The
+      //   (runDir, lifetimeId) pair together binds
+      //   logical context + specific incarnation.
       const outcome = await terminateHelperAndAwaitTyped(
         result.child,
         2000,
       );
-      recordWriterTeardown(runDir, outcome);
+      recordWriterTeardown(handle.lifetimeId, outcome);
 
       // Belt-and-suspenders: explicitly unlink the socket
       // path if it still exists. macOS sometimes holds the

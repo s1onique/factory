@@ -34,6 +34,8 @@ import {
   terminateHelperAndAwaitTyped,
 } from "../ledger-writer/_writer_teardown.js";
 import { recordWriterTeardown } from "../ledger-writer/_writer_teardown_registry.js";
+import type { WriterLifetimeId } from "../ledger-writer/_writer_teardown_registry.js";
+import { makeWriterLifetimeId } from "../ledger-writer/_writer_teardown_registry.js";
 import { whoAreYouLedgerWriter } from "../../src/ledger-writer/ledger-writer-client-identity.js";
 import { registerWriterSpawn } from "../ledger-writer/_live_registry.js";
 import type { WitnessStartSpec } from "../../src/witness-start/witness-start-types.js";
@@ -151,11 +153,19 @@ export async function startLiveWriter(
         JSON.stringify(args.missionId),
     );
   }
+  const lifetimeId: WriterLifetimeId = makeWriterLifetimeId();
   const handle: WriterHandle = {
     runDir: args.runDir,
     socketPath: r.socketPath,
     child: r.child,
     instanceId: r.binding.instanceId,
+    // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
+    //  OUTCOME01-CORRECTION01-MICROFIX01) Mint the
+    //  per-incarnation lifetime token, shared with
+    //  the teardown-outcome registry so restarts
+    //  against the same runDir preserve each
+    //  incarnation's evidence.
+    lifetimeId,
     async stop(): Promise<TerminateOutcome> {
       // (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
       //  OUTCOME01-CORRECTION01) Delegate to the typed
@@ -165,8 +175,11 @@ export async function startLiveWriter(
       // every teardown surfaces its typed cause to the
       // residue sweep via the registry, NOT via a
       // try/catch swallow.
+      //
+      // CORRECTION01-MICROFIX01: key by lifetimeId,
+      // not runDir — see _writer_helper.ts.
       const outcome = await terminateHelperAndAwaitTyped(r.child, 2000);
-      recordWriterTeardown(args.runDir, outcome);
+      recordWriterTeardown(lifetimeId, outcome);
       try {
         await fs.rm(ledgerWriterSocketPath(args.runDir), { force: true });
       } catch { /* */ }
