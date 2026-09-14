@@ -1,10 +1,10 @@
-// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX09)
+// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX10)
 //
 // Ambient type declarations for the qualifier's
 // exported `runDeadlineCleanup` helper. LIV16,
-// LIV17, and LIV18 import this helper for
-// behavioral adversarial testing against an
-// injected fake ChildProcess.
+// LIV17, LIV18, and LIV19 import this helper
+// for behavioral adversarial testing against
+// an injected fake ChildProcess.
 //
 // MICROFIX07: removed `pendingCleanupReclassification`
 // from `state` (the helper no longer reads it —
@@ -24,6 +24,16 @@
 // `cleanupOutcome` is now DERIVED from the
 // product, not authoritative. LIV18 pins the
 // product algebra.
+//
+// MICROFIX10: per-dimension settlement flags
+// (`signalSettled`, `terminationSettled`) replace
+// the single global `settled` flag, so the two
+// dimensions are observed TRULY independently.
+// The 'close' event PROMOTES 'exit' along a
+// monotonic lattice. LIV19 pins the orthogonal
+// observation machine with cells that assert
+// BOTH dimensions survive regardless of event
+// ordering.
 
 export type CleanupOutcome =
   | "SIGNAL_ACCEPTED"

@@ -176,6 +176,39 @@ async function readRunnerSource(): Promise<string> {
   return await readFile(`${HERE}/../scripts/run-tests.mjs`, "utf8");
 }
 
+// Extract just the body of `runDeadlineCleanup`
+// from the qualifier source. Used by source-level
+// invariants (LIV18, LIV19) that need to scope
+// checks to the helper function and avoid false
+// positives from LIVE main-flow code (which has
+// its own `settled` flag for boundary settlement
+// — a different concept from MF10's per-dimension
+// cleanup settlement).
+async function readHelperBody(): Promise<string> {
+  const src = await readFile(
+    `${HERE}/../scripts/qualify-test-runner-liveness.mjs`,
+    "utf8",
+  );
+  // Match `export const runDeadlineCleanup = async (args) => { ... }`.
+  // We use a balanced-brace scan to extract the
+  // function body.
+  const m = src.match(
+    /export\s+const\s+runDeadlineCleanup\s*=\s*async\s*\(\s*args\s*\)\s*=>\s*\{/,
+  );
+  if (!m || m.index === undefined) return "";
+  const openIdx = m.index + m[0].length - 1;
+  let depth = 0;
+  let end = openIdx;
+  for (let i = openIdx; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  return src.slice(openIdx, end + 1);
+}
+
 test("LIV01a: previously-stalling _wstop_writer_teardown_adversarial boundary completes boundedly", async () => {
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
   //  LIVENESS01)
@@ -1633,7 +1666,8 @@ test("LIV15: qualifier classifies cleanup errors from err.code (no evidence-prov
     const body = block.body;
     if (
       /classifyCleanupError\s*\(/.test(body) ||
-      /finalize\s*\(\s*["']error["']/.test(body)
+      /finalize\s*\(\s*["']error["']/.test(body) ||
+      /finalizeSignal\s*\(/.test(body)
     ) {
       catchUsesClassifierOrFinalize = true;
     }
@@ -2317,13 +2351,25 @@ test("LIV17: helper arms observers BEFORE kill (sync err/exit/throw-during-kill)
   // across orthogonal dimensions:
   //   'exit' wants termination=EXIT_OBSERVED
   //   throw EPERM wants signal=PERMISSION_DENIED
-  // MF09: BOTH facts survive independently.
-  //   signalAttempt=FAILED (kill threw,
-  //                        not signal-delivered)
-  //   terminationObservation=EXIT_OBSERVED
-  // PRE-MF09 either overwrote to PERMISSION_DENIED
-  // (MF07) or claimed SIGNAL_ACCEPTED (older).
-  // MF09 is the first to capture both.
+  //
+  // MF10 ORTHOGONAL OBSERVATION (the heart of
+  // the fix): BOTH facts survive independently.
+  // The throw reaches the signal dimension via
+  // its OWN settlement flag (signalSettled is
+  // false when the throw arrives because the
+  // 'exit' listener only finalizes the
+  // TERMINATION dimension).
+  //
+  //   signalAttempt        = PERMISSION_DENIED
+  //                           (throw EPERM
+  //                            classified via
+  //                            classifyCleanupError)
+  //   terminationObservation = EXIT_OBSERVED
+  //                           (sync 'exit' fired)
+  //
+  // PRE-MF10 (MF08/MF09): the single `settled`
+  // flag discarded the throw's evidence if
+  // 'exit' had settled first. MF10 fixes this.
   {
     const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
     const child = makeFakeChild({
@@ -2339,16 +2385,16 @@ test("LIV17: helper arms observers BEFORE kill (sync err/exit/throw-during-kill)
       child, observationWindowMs: 50, classifyCleanupError, state,
     });
     assert.equal(
-      (r as any).signalAttempt, "FAILED",
-      `LIV17 CASE M: signalAttempt MUST be FAILED (kill threw), got ${(r as any).signalAttempt}`,
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV17 CASE M: signalAttempt MUST be PERMISSION_DENIED (throw EPERM classified), got ${(r as any).signalAttempt}`,
     );
     assert.equal(
       (r as any).terminationObservation, "EXIT_OBSERVED",
       `LIV17 CASE M: terminationObservation MUST be EXIT_OBSERVED, got ${(r as any).terminationObservation}`,
     );
     assert.equal(
-      r.cleanupOutcome, "FAILED",
-      `LIV17 CASE M: legacy cleanupOutcome = FAILED, got ${r.cleanupOutcome}`,
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV17 CASE M: legacy cleanupOutcome = PERMISSION_DENIED, got ${r.cleanupOutcome}`,
     );
     assert.equal(
       r.observed.exit, true,
@@ -2360,7 +2406,7 @@ test("LIV17: helper arms observers BEFORE kill (sync err/exit/throw-during-kill)
     );
     assert.equal(
       r.observed.timedOut, false,
-      "LIV17 CASE M: must NOT time out (settled via sync 'exit')",
+      "LIV17 CASE M: must NOT time out (both dims settled)",
     );
   }
 
@@ -2613,27 +2659,239 @@ test("LIV18: product algebra — signalAttempt × terminationObservation (MF09 o
   //
   // Source-level guard so a future refactor
   // cannot quietly restore the category error.
-  const qualifierSrc = await readFile(
-    `${HERE}/../scripts/qualify-test-runner-liveness.mjs`,
-    "utf8",
-  );
+  // Scope checks to the helper body so LIVE
+  // main-flow `cleanupOutcome` (a different
+  // concept) does not false-positive.
+  const helperBodyLIV18 = await readHelperBody();
   assert.ok(
     !/reason\s*===\s*["']exit["'][\s\S]{0,400}signalAttempt\s*=\s*["']ACCEPTED["']/.test(
-      qualifierSrc,
+      helperBodyLIV18,
     ),
-    "LIV18 INVARIANT: source MUST NOT promote signalAttempt=ACCEPTED from an 'exit' listener.",
+    "LIV18 INVARIANT: helper MUST NOT promote signalAttempt=ACCEPTED from an 'exit' listener.",
   );
   assert.ok(
     !/reason\s*===\s*["']close["'][\s\S]{0,400}signalAttempt\s*=\s*["']ACCEPTED["']/.test(
-      qualifierSrc,
+      helperBodyLIV18,
     ),
-    "LIV18 INVARIANT: source MUST NOT promote signalAttempt=ACCEPTED from a 'close' listener.",
+    "LIV18 INVARIANT: helper MUST NOT promote signalAttempt=ACCEPTED from a 'close' listener.",
   );
   assert.ok(
     !/if\s*\(\s*observed\.exit\s*\|\|\s*observed\.close\s*\)\s*\{?\s*[^}]*cleanupOutcome\s*=\s*["']SIGNAL_ACCEPTED["']/.test(
-      qualifierSrc,
+      helperBodyLIV18,
     ),
-    "LIV18 INVARIANT: source MUST NOT contain `if (observed.exit || observed.close) { ... cleanupOutcome = 'SIGNAL_ACCEPTED' }`.",
+    "LIV18 INVARIANT: helper MUST NOT contain `if (observed.exit || observed.close) { ... cleanupOutcome = 'SIGNAL_ACCEPTED' }`.",
+  );
+});
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01-MICROFIX10)
+//
+// MICROFIX10 — LIV19 CROSS-DIMENSION ORDERING.
+//
+// LIV18 verified the static product algebra.
+// LIV19 verifies the DYNAMIC ORTHOGONAL
+// OBSERVATION MACHINE: when both dimensions
+// deliver evidence, NEITHER dimension's
+// evidence is discarded.
+//
+// The single global `settled` flag of MF09
+// was a sum-type observer disguised as a
+// product type. MF10 introduces per-dimension
+// settlement flags. LIV19 falsifies MF09 by
+// asserting BOTH dimensions are observed
+// regardless of event ordering:
+//
+//   O: sync 'exit' + throw EPERM
+//      PRE-MF10 discarded throw's errno because
+//        'exit' had already settled.
+//      MF10 expects:  (PERMISSION_DENIED, EXIT_OBSERVED)
+//   P: sync 'close' + throw ESRCH
+//      MF10 expects:  (FAILED, CLOSE_OBSERVED)
+//   Q: kill=true + async EPERM 'error' + async exit
+//      MF10 expects:  (PERMISSION_DENIED, EXIT_OBSERVED)
+//   R: kill=true + async exit + async EPERM 'error'
+//      MF10 expects:  (PERMISSION_DENIED, EXIT_OBSERVED)
+//   S: sync exit + sync close (monotonic lattice)
+//      MF10 expects:  (ACCEPTED, CLOSE_OBSERVED)
+test("LIV19: cross-dimension ordering — orthogonal observation machine (MF10)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as { runDeadlineCleanup: (args: any) => Promise<any> };
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  type FakeChildOverrides = {
+    killResult?: boolean | undefined;
+    killThrow?: Error | null | undefined;
+    killBehavior?: ((child: any) => void) | null | undefined;
+  };
+  const makeFakeChild = (overrides: FakeChildOverrides = {}) => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [],
+      exit: [],
+      close: [],
+    };
+    const child: any = {
+      _killResult: overrides.killResult ?? true,
+      _killThrow: overrides.killThrow ?? null,
+      _killBehavior: overrides.killBehavior ?? null,
+      kill(_sig: string) {
+        if (this._killBehavior) this._killBehavior(this);
+        if (this._killThrow) throw this._killThrow;
+        return this._killResult;
+      },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const i = handlers[ev].indexOf(fn);
+          if (i >= 0) handlers[ev].splice(i, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of (handlers[ev] ?? []).slice()) fn(...args);
+      },
+    };
+    return child;
+  };
+
+  type Cell = {
+    label: string;
+    killResult?: boolean;
+    killThrow?: Error | null;
+    killBehavior?: ((c: any) => void) | null;
+    expectedSignal: string;
+    expectedTermination: string;
+    expectedLegacy: string;
+  };
+
+  const cells: Cell[] = [
+    {
+      label: "O: sync exit + throw EPERM",
+      killResult: true,
+      killThrow: Object.assign(new Error("EPERM"), { code: "EPERM" }),
+      killBehavior: (c: any) => c._emit("exit", null, "SIGKILL"),
+      expectedSignal: "PERMISSION_DENIED",
+      expectedTermination: "EXIT_OBSERVED",
+      expectedLegacy: "PERMISSION_DENIED",
+    },
+    {
+      label: "P: sync close + throw ESRCH",
+      killResult: true,
+      killThrow: Object.assign(new Error("ESRCH"), { code: "ESRCH" }),
+      killBehavior: (c: any) => c._emit("close", null, "SIGKILL"),
+      expectedSignal: "FAILED",
+      expectedTermination: "CLOSE_OBSERVED",
+      expectedLegacy: "FAILED",
+    },
+    {
+      label: "Q: kill=true, async EPERM error, async exit",
+      killResult: true,
+      killBehavior: (c: any) => {
+        const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+        setTimeout(() => c._emit("error", eperm), 5);
+        setTimeout(() => c._emit("exit", null, "SIGKILL"), 10);
+      },
+      expectedSignal: "PERMISSION_DENIED",
+      expectedTermination: "EXIT_OBSERVED",
+      expectedLegacy: "PERMISSION_DENIED",
+    },
+    {
+      label: "R: kill=true, async exit, async EPERM error",
+      killResult: true,
+      killBehavior: (c: any) => {
+        const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+        setTimeout(() => c._emit("exit", null, "SIGKILL"), 5);
+        setTimeout(() => c._emit("error", eperm), 10);
+      },
+      expectedSignal: "PERMISSION_DENIED",
+      expectedTermination: "EXIT_OBSERVED",
+      expectedLegacy: "PERMISSION_DENIED",
+    },
+    {
+      label: "S: sync exit + sync close (monotonic lattice)",
+      killResult: true,
+      killBehavior: (c: any) => {
+        c._emit("exit", null, "SIGKILL");
+        c._emit("close", null, "SIGKILL");
+      },
+      expectedSignal: "ACCEPTED",
+      expectedTermination: "CLOSE_OBSERVED",
+      expectedLegacy: "SIGNAL_ACCEPTED",
+    },
+  ];
+
+  // (loop + source invariants injected by next edit)
+
+  for (const cell of cells) {
+    const child = makeFakeChild({
+      killResult: cell.killResult as any,
+      killThrow: cell.killThrow,
+      killBehavior: cell.killBehavior,
+    });
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 50,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt,
+      cell.expectedSignal,
+      `LIV19 [${cell.label}]: signalAttempt expected ${cell.expectedSignal}, got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      (r as any).terminationObservation,
+      cell.expectedTermination,
+      `LIV19 [${cell.label}]: terminationObservation expected ${cell.expectedTermination}, got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      r.cleanupOutcome,
+      cell.expectedLegacy,
+      `LIV19 [${cell.label}]: legacy cleanupOutcome expected ${cell.expectedLegacy}, got ${r.cleanupOutcome}`,
+    );
+  }
+
+  // ---- MF10 SOURCE-LEVEL INVARIANTS. ----
+  //
+  // The HELPER (the runDeadlineCleanup body)
+  // MUST use per-dimension settlement flags
+  // and MUST NOT use a single global `settled`
+  // flag. We extract just the helper function
+  // body for these checks to avoid false
+  // positives from the LIVE main-flow
+  // `settled` flag, which is a different scope
+  // and concept (boundary settlement, not
+  // cleanup-dimension settlement).
+  const helperBody = await readHelperBody();
+  assert.ok(
+    /let\s+signalSettled\s*=\s*false/.test(helperBody),
+    "LIV19 INVARIANT: helper MUST declare `let signalSettled = false` (MF10 per-dimension flag).",
+  );
+  assert.ok(
+    /let\s+terminationSettled\s*=\s*false/.test(helperBody),
+    "LIV19 INVARIANT: helper MUST declare `let terminationSettled = false` (MF10 per-dimension flag).",
+  );
+  assert.ok(
+    !/let\s+settled\s*=\s*false/.test(helperBody),
+    "LIV19 INVARIANT: helper MUST NOT declare a single global `let settled = false` (the MF09 sum-type observer).",
+  );
+  assert.ok(
+    !/const\s+finalize\s*=\s*\(\s*reason\s*,\s*syncErr\s*\)\s*=>\s*\{/.test(
+      helperBody,
+    ),
+    "LIV19 INVARIANT: helper MUST NOT define a single `finalize(reason, syncErr)` that handles both dimensions (the MF09 sum-type finalize).",
+  );
+  assert.ok(
+    /catch\s*\(\s*\w+\s*\)\s*\{[^}]*finalizeSignal\s*\(\s*["']throw["']/.test(
+      helperBody,
+    ),
+    "LIV19 INVARIANT: catch path MUST feed the thrown err to finalizeSignal — even if 'exit'/'close' has already settled the termination dimension.",
   );
 });
 

@@ -322,137 +322,248 @@ export const runDeadlineCleanup = async (args) => {
   const observed = { error: false, exit: false, close: false, timedOut: false };
   let killResult = false;
   let threw = false;
-  // signalAttempt is mutated ONLY via finalize();
-  // the same `settled` guard governs both the
-  // Promise resolution AND each dimension's
-  // mutation. This is the MF08 invariant applied
-  // to TWO outputs instead of one.
+  // MICROFIX10 — TWO INDEPENDENT DIMENSIONAL
+  // SETTLEMENT FLAGS.
+  //
+  // MF09 declared the two dimensions orthogonal,
+  // but the MF09 implementation still used a
+  // SINGLE global `settled` flag. That made the
+  // observer a sum type again: whichever event
+  // fired first removed ALL listeners, blocking
+  // the other dimension from ever being observed.
+  //
+  // MF10 replaces the global flag with two
+  // independent flags — one per dimension —
+  // and a third "operationDone" flag that closes
+  // out the helper when BOTH dimensions have
+  // finalized (or the observation window for
+  // the still-unsettled one expires).
+  //
+  // The two dimensions are now TRULY observed
+  // independently:
+  //   * `'error'`           → finalizes SIGNAL
+  //                            dimension only;
+  //                            removal of the
+  //                            'error' listener
+  //                            does NOT touch
+  //                            'exit'/'close'.
+  //   * `'exit'/'close'`    → finalizes TERMINATION
+  //                            dimension only;
+  //                            removal of the
+  //                            'exit'/'close'
+  //                            listeners does
+  //                            NOT touch 'error'.
+  //   * timer expires       → if SIGNAL not yet
+  //                            settled, fill it
+  //                            from killResult;
+  //                            TERMINATION stays
+  //                            NOT_OBSERVED.
+  //                            Then close out.
+  //
+  // The `close` event PROMOTES `exit` along a
+  // monotonic lattice:
+  //   NOT_OBSERVED → EXIT_OBSERVED → CLOSE_OBSERVED
+  // because Node docs document `'close'` as
+  // occurring AFTER process termination and stdio
+  // closure — strictly later than `'exit'`.
   let signalAttempt = "NOT_ATTEMPTED";
   let terminationObservation = "NOT_OBSERVED";
 
   await new Promise((resolve) => {
-    let settled = false;
-    const finalize = (reason, syncErr) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
+    // MF10 — per-dimension settlement flags.
+    let signalSettled = false;
+    let terminationSettled = false;
+    let operationDone = false;
+    // closedByTimeout tracks whether the helper
+    // resolved because the observation window
+    // expired (true) versus because both dim-
+    // specific listeners fired naturally (false).
+    let closedByTimeout = false;
+    // anyListenerFired tracks whether ANY dim-
+    // specific listener fired during this run.
+    // If no listener fired at all and the timer
+    // expires, observed.timedOut is true. If at
+    // least one listener fired (even on the
+    // OTHER dim), observed.timedOut stays false
+    // because the helper's eventual close was
+    // not a "no-evidence" timeout.
+    let anyListenerFired = false;
+
+    // Close out the helper when BOTH dimensions
+    // have finalized. Used by per-dim finalizers.
+    const tryResolve = () => {
+      if (operationDone) return;
+      if (signalSettled && terminationSettled) {
+        operationDone = true;
+        resolve();
+      }
+    };
+
+    // Per-dimension finalizers. Each is guarded
+    // by ITS OWN flag. Listener removal is
+    // scoped to the dimension it serves.
+    const finalizeSignal = (reason, syncErr) => {
+      if (signalSettled) return;
+      signalSettled = true;
+      anyListenerFired = true;
       child.removeListener("error", onError);
-      child.removeListener("exit", onExit);
-      child.removeListener("close", onClose);
-      observed[reason] = true;
-      // MICROFIX09 — orthogonal finalize.
-      // Each branch sets EXACTLY ONE dimension
-      // (or none, for 'timedOut'). The two
-      // dimensions are independent — no
-      // "first-observation-wins" coupling
-      // between them.
+      observed.error = (reason === "error");
       if (reason === "error") {
         signalAttempt = syncErr
           ? classifyCleanupError(syncErr)
           : "FAILED";
-      } else if (reason === "exit") {
-        terminationObservation = "EXIT_OBSERVED";
-      } else if (reason === "close") {
-        terminationObservation = "CLOSE_OBSERVED";
+      } else if (reason === "killResult") {
+        signalAttempt = syncErr ? "ACCEPTED" : "FAILED";
+      } else if (reason === "throw") {
+        signalAttempt = classifyCleanupError(syncErr);
       }
-      // reason === "timedOut": no change to either
-      // dimension. The pre-timer values stand.
+      tryResolve();
+    };
+    const finalizeTermination = (reason) => {
+      // MF10 MONOTONIC LATTICE — 'close' can
+      // ALWAYS upgrade an already-settled
+      // 'exit' observation. We check for
+      // close FIRST before the early-return
+      // guard so the promotion lands even if
+      // terminationSettled is already true
+      // from a prior 'exit'.
+      if (reason === "close") {
+        // close is the upper bound of the
+        // lattice; promote unconditionally.
+        observed.close = true;
+        terminationObservation = "CLOSE_OBSERVED";
+        anyListenerFired = true;
+        if (!terminationSettled) {
+          terminationSettled = true;
+          child.removeListener("exit", onExit);
+          child.removeListener("close", onClose);
+        }
+        tryResolve();
+        return;
+      }
+      if (terminationSettled) return;
+      terminationSettled = true;
+      anyListenerFired = true;
+      // MF10 MONOTONIC LATTICE — we remove ONLY
+      // the 'exit' listener here. The 'close'
+      // listener stays armed so a later 'close'
+      // can promote EXIT_OBSERVED → CLOSE_OBSERVED.
+      // ('close' is the upper bound of the
+      // lattice.)
+      child.removeListener("exit", onExit);
+      if (reason === "exit") {
+        observed.exit = true;
+        // Monotonic: NOT_OBSERVED → EXIT_OBSERVED.
+        if (terminationObservation === "NOT_OBSERVED") {
+          terminationObservation = "EXIT_OBSERVED";
+        }
+      }
+      tryResolve();
+    };
+    // Timeout: fill any unsettled dimension and
+    // resolve. This is the ONLY place that closes
+    // out the helper via time, and it does so
+    // for BOTH dimensions.
+    //
+    // `observed.timedOut` is true ONLY if the
+    // timer was the SOLE source of settlement
+    // (no dim-specific listener ever fired).
+    // If at least one listener fired (sync or
+    // async) on either dimension, observed.timedOut
+    // stays false — the helper was closed
+    // partially by listener evidence, partially
+    // by the timer filling the unfilled dim.
+    const finalizeTimeout = () => {
+      closedByTimeout = true;
+      if (!signalSettled) {
+        signalSettled = true;
+        child.removeListener("error", onError);
+        signalAttempt = killResult ? "ACCEPTED" : "FAILED";
+      }
+      if (!terminationSettled) {
+        terminationSettled = true;
+        child.removeListener("exit", onExit);
+        child.removeListener("close", onClose);
+      }
+      if (!anyListenerFired) {
+        observed.timedOut = true;
+      }
+      operationDone = true;
       resolve();
     };
-    // ---- SYNCHRONOUS handlers (EventEmitter guarantee). ----
-    const onError = (err) => finalize("error", err);
-    const onExit = () => finalize("exit");
-    const onClose = () => finalize("close");
+
+    // ---- SYNCHRONOUS handlers. ----
+    // Each handler finalizes ITS dimension only.
+    const onError = (err) => finalizeSignal("error", err);
+    const onExit = () => finalizeTermination("exit");
+    const onClose = () => finalizeTermination("close");
 
     // ---- ARM observers BEFORE kill. ----
     child.on("error", onError);
     child.on("exit", onExit);
     child.on("close", onClose);
-    const timer = setTimeout(() => finalize("timedOut"), observationWindowMs);
+    const timer = setTimeout(finalizeTimeout, observationWindowMs);
 
     // ---- Request the lifecycle transition. ----
     // Sync `'error'` / `'exit'` / `'close'` here
     // are observable via the listeners armed above,
-    // and EventEmitter invokes them SYNCHRONOUSLY
-    // (so by the time kill() returns, `settled`
-    // already reflects any sync observation).
+    // and EventEmitter invokes them SYNCHRONOUSLY.
+    // MF10: each handler finalizes ONLY its
+    // dimension, so other-dimension listeners
+    // remain armed even after one fires.
+    //
+    // CRITICAL (MF10): we DO NOT call
+    // finalizeSignal("killResult", ...) here.
+    // That would prematurely settle the signal
+    // dimension with ACCEPTED/FAILED and block
+    // an async `'error'` event from later
+    // overwriting with PERMISSION_DENIED (LIV16
+    // CASE A: kill=true + async EPERM must
+    // classify as PERMISSION_DENIED, not
+    // ACCEPTED). The signal dimension is
+    // settled ONLY by:
+    //   * a typed `'error'` event (sync/async),
+    //   * a throw from kill(), or
+    //   * the observation window timeout
+    //     (fallback to killResult).
     try {
       killResult = child.kill("SIGKILL");
     } catch (err) {
       threw = true;
       killResult = false;
-      // MICROFIX08: defer to finalize(); the
-      // settled-guard governs signalAttempt
-      // mutation. terminationObservation is
-      // UNCHANGED — a thrown kill does not
-      // imply termination. (MF09 orthogonal.)
-      finalize("error", err);
-      // MF09: if the settle guard rejected
-      // finalize() because a sync `'exit'` /
-      // `'close'` listener already fired
-      // (LIV17 case M: emit 'exit' then throw
-      // EPERM), signalAttempt may still be
-      // NOT_ATTEMPTED. fill it from killResult
-      // (= false here, since we threw).
-      if (signalAttempt === "NOT_ATTEMPTED") {
-        signalAttempt = killResult ? "ACCEPTED" : "FAILED";
-      }
+      // MF10: feed the thrown err to the SIGNAL
+      // dimension via the throw reason. The
+      // catch path is THE source of typed
+      // signal-attempt evidence — under MF09
+      // the catch's signalAttempt was THROWN
+      // AWAY if a sync 'exit'/'close' listener
+      // had already settled (LIV19 case O).
+      finalizeSignal("throw", err);
       return;
     }
-    // kill() returned without throwing. By this
-    // point, any sync lifecycle event has already
-    // been observed (EventEmitter synchrony).
-    if (settled) {
-      // A sync listener already settled during
-      // kill (sync error / exit / close).
-      //   * If it was an `'error'` listener,
-      //     finalize() already set signalAttempt
-      //     via classifyCleanupError; do not
-      //     overwrite it here.
-      //   * If it was `'exit'` or `'close'`,
-      //     finalize() set terminationObservation
-      //     but did NOT touch signalAttempt.
-      //     Fill signalAttempt from killResult
-      //     so the pair is consistent:
-      //     kill returned true  → ACCEPTED
-      //     kill returned false → FAILED
-      // (MF09: kill returning false + 'exit'
-      // observed is now correctly reported as
-      // (FAILED, EXIT_OBSERVED). PRE-MF09 it
-      // was SIGNAL_ACCEPTED — a category
-      // error.)
-      if (signalAttempt === "NOT_ATTEMPTED") {
-        signalAttempt = killResult ? "ACCEPTED" : "FAILED";
-      }
-      return;
-    }
+    // kill() returned without throwing.
+    //   * If kill returned FALSE → the helper
+    //     knows immediately that the signal
+    //     attempt failed. Settle signal dim
+    //     now with FAILED. No async observation
+    //     can rescue signal from FAILED (kill
+    //     returned false). LIV16 CASE C asserts
+    //     observed.timedOut=false because the
+    //     observation window should NOT have to
+    //     run.
+    //   * If kill returned TRUE → signal dim
+    //     stays OPEN. The async 'error' listener
+    //     still has a chance to fire and
+    //     reclassify via classifyCleanupError
+    //     (LIV16 CASE A: kill=true + async EPERM
+    //     MUST classify as PERMISSION_DENIED,
+    //     not be prematurely locked to ACCEPTED).
+    //     The observation window timeout
+    //     fills signal from killResult if
+    //     nothing else arrives.
     if (killResult === false) {
-      // kill refused synchronously without
-      // throwing AND no lifecycle event fired.
-      // finalize("error", null) sets
-      // signalAttempt=FAILED via the err=null
-      // fallback path. terminationObservation
-      // stays NOT_OBSERVED — kill returning
-      // false does not prove termination.
-      // (MF09: this used to settle as
-      // SIGNAL_ACCEPTED in the cleanupOutcome
-      // path, which falsely claimed the signal
-      // was delivered. The orthogonal algebra
-      // preserves the truth: signal failed,
-      // termination unobserved.)
-      finalize("error", null);
-      return;
+      finalizeSignal("killResult", killResult);
     }
-    // kill returned true AND no sync observation
-    // arrived. Optimistic signalAttempt=ACCEPTED.
-    // terminationObservation stays NOT_OBSERVED;
-    // the async listener may still flip it to
-    // EXIT_OBSERVED / CLOSE_OBSERVED before the
-    // bounded observation window expires.
-    // (MF09: not stored in state.cleanupOutcome
-    // directly — the legacy string is DERIVED
-    // below from the pair.)
-    signalAttempt = "ACCEPTED";
   });
 
   // After the helper settles, derive the legacy
