@@ -36,7 +36,14 @@ import { startWitness } from "../../src/witness-start/witness-start-gate.js";
 import { nodeSpawnWitnessPort } from "../../src/witness-start/witness-start-spawn.js";
 import { ledgerWriterSocketPath } from "../../src/ledger-writer/ledger-writer-process.js";
 import { awaitWitnessReady } from "./witness-start-readiness.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01) Track every owned writer
+// child created during this test FILE's lifetime so
+// the after-hook can detach them ownership-scoped
+// (NOT via a global type-based handle sweep).
+const OWNED_WRITER_CHILDREN: import("node:child_process").ChildProcess[] = [];
 
 async function setupLive(prefix: string): Promise<
   LiveRunHandle | { skip: true; reason: string }
@@ -62,6 +69,12 @@ async function setupLive(prefix: string): Promise<
     await fs.rm(controlDir, { recursive: true, force: true });
     throw new Error("CORRECTION04 socket invariant violated");
   }
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01) Register this writer's
+  // child as owned by THIS test FILE. The after-hook
+  // detaches OWNED children only — never any other
+  // process handle.
+  OWNED_WRITER_CHILDREN.push(writer.child);
   return {
     runDir,
     controlDir,
@@ -174,9 +187,10 @@ test("READY09: spawn ENOENT (bad nodePath) produces no witness_ready", async (t)
 });
 
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01) Detach residual Socket/Pipe handles
-// so the test FILE can exit cleanly. See
-// `_liveness_helpers.ts` for the law.
+//  LIVENESS01-CORRECTION01) Detach the OWNED writer
+// children's parent-side handles so the test FILE can
+// exit cleanly. See `_liveness_helpers.ts` for the
+// ownership-scoped law (no global type-based sweep).
 after(() => {
-  detachResidualHandles();
+  detachOwnedChildren(OWNED_WRITER_CHILDREN);
 });

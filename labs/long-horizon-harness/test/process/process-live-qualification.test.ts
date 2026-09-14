@@ -29,7 +29,7 @@ import {
   realProbeNegPgid,
   REAL_GROUP_CONTROL,
 } from "./helpers.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_PROCESS_LIVE === "1";
 const spawner = nodeSpawnPort();
@@ -203,10 +203,15 @@ after(async () => {
     );
   }
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe handles
-  // so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) This file tracks its
+  //  owned children via PGID (process group IDs),
+  //  not via ChildProcess references. The PGID
+  //  registry was swept above via
+  //  `emergencyKillAllRegisteredPgidsWithControl`.
+  //  We pass an empty array to `detachOwnedChildren`
+  //  as a no-op safety net — no ChildProcess
+  //  references are owned by this file's after-hook.
+  detachOwnedChildren([]);
 });
 
 // --------------------------------------------------------------------

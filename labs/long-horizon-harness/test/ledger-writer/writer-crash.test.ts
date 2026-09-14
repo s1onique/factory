@@ -31,7 +31,7 @@ import {
 import { LEDGER_WRITER_STATE_FILENAME } from "../../src/ledger-writer/ledger-writer-process.js";
 import type { WriterEvent } from "../../src/ledger-writer/ledger-writer-protocol.js";
 import type { CommitId } from "../../src/ledger-writer/ledger-writer-types.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 /**
  * Same sandbox probe as the live tests.
@@ -118,10 +118,11 @@ after(async () => {
     try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch { /* */ }
   }
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe handles
-  // so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) Detach the OWNED writer
+  // child's parent-side handles so the test FILE can
+  // exit cleanly. See `_liveness_helpers.ts` for the
+  // ownership-scoped law (no global type-based sweep).
+  detachOwnedChildren(handle !== undefined ? [handle.child] : []);
 });
 
 function live(name: string, body: () => Promise<void>): void {

@@ -36,7 +36,7 @@ import {
   pingLedgerWriter,
 } from "../../src/ledger-writer/ledger-writer-client.js";
 import type { WriterEvent } from "../../src/ledger-writer/ledger-writer-protocol.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 /**
  * Detect whether this host can spawn a Node child that
@@ -165,6 +165,14 @@ let handle: WriterHandle | undefined;
 // effort teardown — see `after(...)` below).
 let cleanupFns: Array<() => Promise<unknown>> = [];
 
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01) Track every writer child
+// spawned by this FILE (the original `handle` and any
+// `fresh` re-spawns like LW-LIVE09) so the after-hook
+// can detach them ownership-scoped. We do NOT use the
+// global type-based handle sweep.
+const OWNED_WRITER_CHILDREN: import("node:child_process").ChildProcess[] = [];
+
 before(async () => {
   if (!spawnable) {
     // Do not even attempt to spawn the writer. The live
@@ -173,6 +181,9 @@ before(async () => {
   }
   tmpDir = await mkTmp("factory-ledger-writer-");
   handle = await startWriterInTmpDir(tmpDir);
+  if (handle !== undefined) {
+    OWNED_WRITER_CHILDREN.push(handle.child);
+  }
 });
 
 after(async () => {
@@ -195,10 +206,13 @@ after(async () => {
     }
   }
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe/ChildProcess
-  // handles so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) Detach every OWNED writer
+  //  child's parent-side handles so the test FILE can
+  //  exit cleanly. We track ALL writer children (the
+  //  initial `handle` plus any re-spawns in LW-LIVE09)
+  //  in OWNED_WRITER_CHILDREN; detachment is
+  //  ownership-scoped, not a global type-based sweep.
+  detachOwnedChildren(OWNED_WRITER_CHILDREN);
 });
 
 /**
@@ -346,6 +360,7 @@ live("LW-LIVE09 restart preserves dedup state via ledger-rebuild (B0-C01-04)", a
 
   const fresh = await startWriterInTmpDir(tmpDir!);
   cleanupFns.push(() => fresh.stop());
+  OWNED_WRITER_CHILDREN.push(fresh.child);
 
   const r2 = await fresh.append({
     commitId,

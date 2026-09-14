@@ -45,7 +45,7 @@ import {
   unregisterLiveFixture,
   type LiveFixtureEntry,
 } from "../ledger-writer/_live_registry.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_WITNESS_START_LIVE === "1";
 const REQUIRED = 3;
@@ -655,10 +655,24 @@ after(async () => {
   }
 
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe handles
-  // so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) Detach the OWNED writer
+  //  children's parent-side handles so the test FILE
+  //  can exit cleanly. We OWN each residue entry's
+  //  child reference (this file registered them via
+  //  `registerWriterSpawn`). Detaching them is
+  //  ownership-scoped — no global type-based sweep.
+  const ownedChildren: import("node:child_process").ChildProcess[] = [];
+  for (const e of failed) {
+    if (e.kind === "writer_child" || e.kind === "helper_child") {
+      const child = e.ref as
+        | import("node:child_process").ChildProcess
+        | undefined;
+      if (child !== undefined && typeof child.unref === "function") {
+        ownedChildren.push(child);
+      }
+    }
+  }
+  detachOwnedChildren(ownedChildren);
 });
 
 void assert;

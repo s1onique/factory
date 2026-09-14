@@ -63,7 +63,23 @@ import {
   sweepAndProve,
   destroyRunDir,
 } from "./_live_registry.js";
-import { detachResidualHandles } from "./_writer_teardown.js";
+import { detachOwnedChildren } from "./_writer_teardown.js";
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01-MICROFIX02)
+//
+// The strict qualification matrix's final disposition
+// IS the canonical `classifyQualification` output.
+// Every counter-based check below (`classifyCounters`,
+// `QLW01..QLW06`) remains as a pure-function unit
+// test of the counter algebra; the matrix-level
+// disposition is derived from a (teardown,
+// parent_detach, residue) triple and run through the
+// SINGLE canonical classifier in
+// `test/_liveness_qualify.ts`. LIV12 statically
+// proves this dependency.
+import {
+  classifyQualification,
+} from "../_liveness_qualify.js";
 
 const STRICT = process.env.FACTORY_STRICT_LEDGER_WRITER_LIVE === "1";
 const EXPECTED_SHA = process.env.FACTORY_QUALIFICATION_SUBJECT_COMMIT ?? "";
@@ -960,7 +976,7 @@ after(async () => {
   }
 
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
-  //  SUITE-LIVENESS01)
+  //  SUITE-LIVENESS01-CORRECTION01)
   //
   // Detach every residue entry's child reference
   // so the test FILE can exit cleanly. On a
@@ -974,27 +990,125 @@ after(async () => {
   // residue, but the parent's event loop is no
   // longer pinned by it. Without this detach,
   // `npm test` would hang forever after this file.
+  //
+  // We OWN each residue entry's child reference
+  // (this file registered them via
+  // `registerWriterSpawn`). Detaching them is
+  // ownership-scoped: only entries that this file
+  // registered may be touched. CORRECTION01
+  // explicitly forbids sweeping the global
+  // process._getActiveHandles() set.
+  const ownedChildren: import("node:child_process").ChildProcess[] = [];
   for (const e of failed) {
     if (e.kind === "writer_child" || e.kind === "helper_child") {
-      const child = e.ref as { unref?: () => void } | undefined;
-      try {
-        child?.unref?.();
-      } catch {
-        // ignore — the child may already be gone
+      const child = e.ref as
+        | import("node:child_process").ChildProcess
+        | undefined;
+      if (child !== undefined && typeof child.unref === "function") {
+        ownedChildren.push(child);
       }
     }
   }
+  const detachOutcomes = detachOwnedChildren(ownedChildren);
 
-  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
-  //  SUITE-LIVENESS01)
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX02)
   //
-  // Detach residual Socket/Pipe handles. The
-  // shared helper from `_writer_teardown.ts` does
-  // this in one place so every test FILE that
-  // reaches the same situation can adopt it
-  // without re-implementing the unref loop. See
-  // `detachResidualHandles()` for the law.
-  detachResidualHandles();
+  // P1-1 — REAL QUALIFICATION BINDING.
+  //
+  // The matrix's final disposition IS the canonical
+  // classifier's verdict. We synthesise a (teardown,
+  // parent_detach, residue) triple from the post-suite
+  // state and run it through the SINGLE canonical
+  // `classifyQualification` from
+  // `test/_liveness_qualify.ts` — the function LIV08
+  // and LIV12 cross-check. The classifier's
+  // disposition IS the matrix's disposition.
+  let matrixTeardown:
+    | { kind: "closed"; code: number | null; signal: NodeJS.Signals | null }
+    | { kind: "signal_permission_denied"; errno: "EPERM" }
+    | { kind: "signal_failed"; errno: string };
+  let matrixLifecycle: "running_or_unknown" | "already_exited" =
+    "running_or_unknown";
+  let matrixDetached = {
+    ipc: "unavailable" as "unrefed" | "unavailable" | "failed",
+    stdout: "absent" as
+      | "unrefed" | "destroyed_unrefed" | "destroyed_only"
+      | "unrefed_only" | "absent" | "failed",
+    stderr: "absent" as
+      | "unrefed" | "destroyed_unrefed" | "destroyed_only"
+      | "unrefed_only" | "absent" | "failed",
+    stdin: "absent" as
+      | "unrefed" | "destroyed_unrefed" | "destroyed_only"
+      | "unrefed_only" | "absent" | "failed",
+  };
+  for (const o of detachOutcomes) {
+    if (o.childLifecycleAtDetach === "already_exited") {
+      matrixLifecycle = "already_exited";
+    }
+    if (o.detached.ipc === "unrefed") matrixDetached.ipc = "unrefed";
+    if (o.detached.stdout !== "absent" && o.detached.stdout !== "failed") {
+      matrixDetached.stdout = o.detached.stdout;
+    }
+    if (o.detached.stderr !== "absent" && o.detached.stderr !== "failed") {
+      matrixDetached.stderr = o.detached.stderr;
+    }
+    if (o.detached.stdin !== "absent" && o.detached.stdin !== "failed") {
+      matrixDetached.stdin = o.detached.stdin;
+    }
+  }
+  const residue: "alive" | "gone" =
+    counters.residue > 0 ? "alive" : "gone";
+  if (residue === "gone" && counters.failed === 0) {
+    matrixTeardown = { kind: "closed", code: 0, signal: null };
+  } else if (Object.keys(breakdown).includes("permission_denied")) {
+    matrixTeardown = { kind: "signal_permission_denied", errno: "EPERM" };
+  } else {
+    matrixTeardown = { kind: "signal_failed", errno: "ESRCH" };
+  }
+  const matrixParentDetach = {
+    childLifecycleAtDetach: matrixLifecycle,
+    skipped: false,
+    detached: matrixDetached,
+  };
+  const matrixDisposition = classifyQualification({
+    teardown: matrixTeardown,
+    parent_detach: matrixParentDetach,
+    residue,
+  });
+  // eslint-disable-next-line no-console
+  console.log(
+    `LEDGER_WRITER_QUALIFICATION_CANONICAL=${JSON.stringify({
+      teardown: matrixTeardown,
+      parent_detach: matrixParentDetach,
+      residue,
+      disposition: matrixDisposition.disposition,
+      reason: matrixDisposition.reason,
+    })}`,
+  );
+
+  // The matrix's PASS/FAIL disposition IS the
+  // canonical classifier's disposition. The
+  // counter-based check (`qualifies()`) remains
+  // available as a structural consistency check,
+  // but the matrix-level disposition is
+  // authoritative. A regression in the classifier
+  // that flipped the canonical-clean triple to
+  // PASS-on-alive (or vice versa) would break
+  // LIV08; LIV12 statically proves this file
+  // imports the classifier.
+  if (matrixDisposition.disposition === "FAIL") {
+    const msg =
+      `LEDGER_WRITER_QUALIFICATION_DISPOSITION=FAIL: ` +
+      `canonical_reason=${matrixDisposition.reason} ` +
+      `counters=${JSON.stringify(counters)}`;
+    // eslint-disable-next-line no-console
+    console.log(msg);
+    if (STRICT) throw new Error(msg);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`LEDGER_WRITER_QUALIFICATION_DISPOSITION=OK`);
+  }
 });
 
 // --------------------------------------------------------------------

@@ -34,7 +34,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as process from "node:process";
 import { fileURLToPath } from "node:url";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Use the .ts source file when run via tsx (default for this
@@ -594,8 +594,11 @@ after(async () => {
     );
   }
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe handles
-  // so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) Detach the OWNED fixture
+  //  children's parent-side handles so the test FILE
+  //  can exit cleanly. We OWN every entry in REGISTRY
+  //  (each was tracked via `track(label, child)`).
+  //  Detaching is ownership-scoped — no global
+  //  type-based sweep.
+  detachOwnedChildren(REGISTRY.map((e) => e.child));
 });

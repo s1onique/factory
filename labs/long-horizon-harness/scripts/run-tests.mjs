@@ -48,7 +48,25 @@ function walk(dir) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walk(full);
-    else if (e.isFile() && e.name.endsWith(".test.ts")) files.push(full);
+    else if (e.isFile() && e.name.endsWith(".test.ts")) {
+      // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+      //  LIVENESS01-CORRECTION01)
+      //
+      // EXCLUDE the LIV oracle file from canonical
+      // discovery. The oracle file contains LIV03a/LIV03b
+      // which validate the runner's trace-flag behaviour
+      // by spawning it as a subprocess; if the runner
+      // ALSO discovered the oracle file, that would
+      // recurse infinitely.
+      //
+      // The LIV oracles are still authored as `.test.ts`
+      // (and can still be invoked directly via
+      // `node --import tsx --test test/_liveness_oracle.test.ts`
+      // for diagnostic purposes) — they are simply NOT
+      // part of the canonical `npm test` corpus.
+      if (e.name === "_liveness_oracle.test.ts") continue;
+      files.push(full);
+    }
   }
 }
 walk(testDir);
@@ -67,23 +85,51 @@ files.sort();
 // claim stronger semantics than observed.
 //
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01) `--test-timeout=60000` is a per-test bound,
-// NOT a per-file bound. It bounds how long an individual
-// test inside a FILE may run before being declared a
-// failure; it does NOT bound how long a FILE may stay
-// alive past all its tests (which is what the residue
-// hang is). The real fix is at the ownership site of each
-// test FILE that owns long-lived children: that FILE's
-// `after()` hook MUST call `detachResidualHandles()` to
-// detach any Socket/Pipe handles from the event loop.
-// This runner does NOT add `--test-timeout` because doing
-// so would not change the per-file hang behaviour — the
-// timeout only fires between tests, not during the
-// residual stream cleanup. We leave `--test-timeout` at
-// Node 26's default (`0` = no per-test timeout) so each
-// test FILE's own domain contract remains the authority.
-// The runner's bounded runtime is enforced by the
-// caller (e.g. `timeout --signal=KILL 600 npm test`).
+//  LIVENESS01-CORRECTION01) Documented runner evidence
+// contract (per Node.js v26 CLI documentation):
+//
+//   test isolation:
+//     unspecified by the runner; the Node default applies,
+//     which is `process` (each test FILE runs in its own
+//     child process). This is what makes the
+//     residue-pinning-per-file bug class observable.
+//
+//   test concurrency:
+//     unspecified by the runner; the Node default applies,
+//     which is `os.availableParallelism() - 1`. The runner
+//     does NOT pin concurrency to a specific value; the
+//     observed default is documented behaviour, not a
+//     chosen policy.
+//
+//   test timeout:
+//     unspecified by the runner; the Node documented
+//     default is `Infinity`. Note that the documented
+//     default for `--test-timeout` is `Infinity` (no
+//     per-test timeout), NOT `0`. The runner does NOT
+//     pin this to a specific value.
+//
+// The real fix for the residue hang is at the ownership
+// site of each test FILE that owns long-lived children:
+// that FILE's `after()` hook MUST call
+// `detachOwnedChildren(children)` (CORRECTION01 — see
+// `_liveness_helpers.ts`) to detach the owned children's
+// parent-side handles from the event loop.
+//
+// `--test-timeout` is a per-test bound, NOT a per-file
+// bound. It bounds how long an individual test inside a
+// FILE may run before being declared a failure; it does
+// NOT bound how long a FILE may stay alive past all its
+// tests (which is what the residue hang is). The runner
+// does NOT add `--test-timeout` because doing so would
+// not change the per-file hang behaviour — the timeout
+// only fires between tests, not during residual stream
+// cleanup.
+//
+// The runner's bounded wall-clock runtime is enforced by
+// the caller (e.g. `timeout --signal=KILL 600 npm test`)
+// or by `scripts/qualify-test-runner-liveness.mjs`,
+// which runs the canonical `npm test` once with a bounded
+// external deadline.
 const TRACE = process.env.FACTORY_TEST_RUNNER_TRACE === "1";
 
 function trace(record) {

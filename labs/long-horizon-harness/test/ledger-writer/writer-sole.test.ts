@@ -24,7 +24,7 @@ import {
   type WriterHandle,
 } from "./_writer_helper.js";
 import { ledgerWriterSocketPath } from "../../src/ledger-writer/ledger-writer-process.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 async function detectSpawnableBind(): Promise<boolean> {
   const probe = path.join(process.cwd(), ".lw-probe-sole");
@@ -99,10 +99,11 @@ after(async () => {
     try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch { /* */ }
   }
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe handles
-  // so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) Detach the OWNED writer
+  // child's parent-side handles so the test FILE can
+  // exit cleanly. See `_liveness_helpers.ts` for the
+  // ownership-scoped law (no global type-based sweep).
+  detachOwnedChildren(handle !== undefined ? [handle.child] : []);
 });
 
 function live(name: string, body: () => Promise<void>): void {

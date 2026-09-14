@@ -9,7 +9,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
-import { detachResidualHandles } from "../_liveness_helpers.js";
+import { detachOwnedChildren } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_RECOVERY_LIVE === "1";
 // CORRECTION06 §35: record the qualification subject commit.
@@ -202,10 +202,15 @@ after(async () => {
   const { residue } = await registry.cleanup();
   if (residue > 0 && matrix.residue === 0) matrix.residue = residue;
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01) Detach residual Socket/Pipe handles
-  // so the test FILE can exit cleanly. See
-  // `_liveness_helpers.ts` for the law.
-  detachResidualHandles();
+  //  LIVENESS01-CORRECTION01) This file's owned
+  //  children are short-lived crash-supervisor
+  //  processes (registered by PGID, not by
+  //  ChildProcess reference). Each child exits on
+  //  its own short timeline via `runCrashSupervisor`.
+  //  There are no long-lived Socket/Pipe handles
+  //  pinned in this file's event loop, so we pass
+  //  an empty array as a no-op safety net.
+  detachOwnedChildren([]);
 });
 
 let noteCallCount = 0;

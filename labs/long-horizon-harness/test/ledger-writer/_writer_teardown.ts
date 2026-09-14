@@ -96,6 +96,143 @@ export type TerminateOutcome =
     };
 
 /**
+ * (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+ *  LIVENESS01-CORRECTION01-MICROFIX02)
+ *
+ * Typed outcome for parent-side detachment of a
+ * ChildProcess. Distinct from `TerminateOutcome`:
+ *
+ *   - `TerminateOutcome` describes the KERNEL's
+ *     response to a signal attempt (the child's
+ *     lifecycle boundary).
+ *
+ *   - `ParentDetachOutcome` describes what the
+ *     PARENT did to its OWN view of the child's
+ *     handles (the parent's event-loop boundary).
+ *
+ * These two outcomes are orthogonal dimensions.
+ * A `signal_permission_denied` teardown outcome
+ * can coexist with a `completed` parent-detach
+ * outcome — the parent has detached its view, the
+ * kernel has not terminated the child.
+ *
+ * ─────────────────────────────────────────────────────
+ * MICROFIX02 P1-2 — ORTHOGONAL EXIT VS DETACH
+ *
+ * The earlier MICROFIX01 type encoded lifecycle
+ * (`already_exited`) and detach state
+ * (`completed`) as MUTUALLY-EXCLUSIVE union
+ * branches. That was structurally wrong on two
+ * counts:
+ *
+ *   (a) FACT: Node explicitly distinguishes the
+ *       `'exit'` event (process ended, stdio MAY
+ *       still be open) from `'close'` (process
+ *       ended AND stdio streams closed). When
+ *       Node observed `exit` but stdio was still
+ *       open, the previous code returned
+ *       `already_exited` and DID NOT detach stdio.
+ *       The parent's event loop was STILL PINNED
+ *       by the child's open stdio FDs, even
+ *       though the type said detachment was done.
+ *
+ *   (b) FACT: orthogonal facts should not be
+ *       encoded as mutually-exclusive union
+ *       branches. "Did Node observe exit?" and
+ *       "Did the parent detach each reachable
+ *       handle?" are independent observations and
+ *       must both be carried.
+ *
+ * MICROFIX02 collapses the three MICROFIX01
+ * variants into ONE shape with two orthogonal
+ * fields:
+ *
+ *   childLifecycleAtDetach
+ *     "running_or_unknown"  — `exitCode === null`
+ *                            AND `signalCode === null`
+ *                            at observation time.
+ *     "already_exited"      — Node has observed the
+ *                            `'exit'` event
+ *                            (exitCode !== null OR
+ *                            signalCode !== null).
+ *                            Stdio streams MAY still
+ *                            be open; the per-handle
+ *                            evidence below carries
+ *                            that fact independently.
+ *
+ *   detached
+ *     PRECISE OBSERVED STATE per handle, regardless
+ *     of lifecycle. We ALWAYS attempt destroy/unref
+ *     on every reachable handle. A handle is recorded
+ *     as `unrefed` ONLY if `unref()` returned without
+ *     throwing; a handle is recorded as `destroyed`
+ *     ONLY if `destroy()` was callable AND returned
+ *     without throwing. If neither was possible
+ *     (absent stream, e.g. `stdio: "ignore"`), the
+ *     handle is recorded as `absent`. The parent's
+ *     event loop is no longer pinned by handles that
+ *     ended up in `unrefed` / `destroyed` /
+ *     `destroyed_unrefed` / `unrefed_only` /
+ *     `destroyed_only` state.
+ *
+ *   skipped
+ *     true if the passed-in child reference was
+ *     null / undefined / not actually a
+ *     ChildProcess shape. When `skipped === true`
+ *     the `detached` fields are all `absent`
+ *     (nothing to detach). When `skipped === false`,
+ *     the `detached` fields carry the per-handle
+ *     observation made at detach time.
+ *
+ * Law:
+ *   `ParentDetachOutcome` is a parent-liveness
+ *   result. It NEVER licenses a `residue = gone`
+ *   classification. The two diagnostics layers
+ *   (this and `TerminateOutcome`) are reported
+ *   together so the qualification oracle can
+ *   correctly distinguish:
+ *
+ *     teardown = signal_permission_denied
+ *     parent_detach = {detached: {stdout: destroyed_unrefed, ...}, ...}
+ *     residue = alive
+ *       => qualification = FAIL
+ *
+ *   from:
+ *
+ *     teardown = closed
+ *     parent_detach = {childLifecycleAtDetach: "already_exited", detached: ...}
+ *     residue = gone
+ *       => qualification = PASS
+ *
+ *   The qualification classifier lives in
+ *   `test/_liveness_qualify.ts` and is the
+ *   SINGLE canonical join of
+ *   (teardown, parent_detach, residue) →
+ *   PASS/FAIL. LIV08 / LIV12 cross-check that
+ *   helper.
+ */
+export type ParentDetachOperation =
+  | "unrefed"
+  | "destroyed_unrefed"
+  | "destroyed_only"
+  | "unrefed_only"
+  | "absent"
+  | "failed";
+
+export type ParentDetachOutcome = {
+  readonly childLifecycleAtDetach:
+    | "running_or_unknown"
+    | "already_exited";
+  readonly skipped: boolean;
+  readonly detached: {
+    readonly ipc: "unrefed" | "unavailable" | "failed";
+    readonly stdout: ParentDetachOperation;
+    readonly stderr: ParentDetachOperation;
+    readonly stdin: ParentDetachOperation;
+  };
+};
+
+/**
  * (FOUNDATION04 PHASE A — WRITER-HELPER-TEARDOWN-
  *  OUTCOME01-CORRECTION01)
  *
@@ -251,7 +388,7 @@ export async function terminateHelperAndAwaitTyped(
 }
 
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01)
+//  LIVENESS01-CORRECTION01)
 //
 // When `terminateHelperAndAwaitTyped` settles with a
 // non-`closed` outcome, the kernel did not deliver
@@ -280,21 +417,50 @@ export async function terminateHelperAndAwaitTyped(
 //   3. The child's stderr pipe.
 //
 // `child.unref()` detaches the IPC channel (1).
-// To detach (2) and (3) we must `unref()` each of
-// the child's stdio streams. Without this, even
-// after `kill()` the parent's event loop stays alive
-// because Node treats the open pipe FDs as
-// "active handles" and the event loop only exits
-// when no active handles remain.
+// To detach (2) and (3) we must `destroy()` and
+// `unref()` each of the child's stdio streams.
+// Without this, even after `kill()` the parent's
+// event loop stays alive because Node treats the
+// open pipe FDs as "active handles" and the event
+// loop only exits when no active handles remain.
+//
+// This is a TEST-FIXTURE CONTAINMENT primitive. It is
+// NOT a documentation-level claim about how Node
+// recommends spawning long-lived background
+// processes.
+//
+// Narrow scope of the doctrine (CORRECTION01):
+//
+//   - Node publicly supports `ChildProcess.unref()`
+//     and stream `destroy()` / `unref()` — those are
+//     the documented Node APIs in use here.
+//
+//   - For LONG-LIVED INDEPENDENT PROCESSES, Node's
+//     documented pattern is
+//     `spawn({ detached: true, stdio: "ignore" })`
+//     combined with `child.unref()` so the child
+//     survives the parent cleanly.
+//
+//   - Our use here is NARROWER: it is test-fixture
+//     containment AFTER teardown failure. The child
+//     is a failed teardown, the parent has done its
+//     best to terminate it, and the parent now needs
+//     the permission to terminate itself while the
+//     child remains alive in the kernel.
+//
+//   - This does NOT imply successful termination. A
+//     `parent_detach = completed` outcome alongside
+//     `teardown = signal_permission_denied` is the
+//     exact shape that yields `residue = alive` and
+//     STILL fails qualification. We never repurpose
+//     this primitive as cleanup proof.
 //
 // Calling this on a non-closed outcome detaches all
-// three. The child process itself is NOT terminated —
-// it remains alive in `ps` (visible as test-host
-// residue) — but the parent test FILE no longer waits
-// for it, so the runner can move on to the next test
-// file. This is the canonical Node.js seam for
-// "this child exists but the parent does not own its
-// lifecycle on behalf of the child".
+// three FD views. The child process itself is NOT
+// terminated — it remains alive in `ps` (visible as
+// test-host residue) — but the parent test FILE no
+// longer waits for it, so the runner can move on to
+// the next test file.
 //
 // `detachUnreachableChild` is called ONLY for
 // non-closed outcomes. For `closed`, the child has
@@ -302,14 +468,54 @@ export async function terminateHelperAndAwaitTyped(
 // to unref. This preserves the WSTOP contract that
 // `closed` is the ONLY path that licenses releasing
 // the writer_child registry entry.
-export function detachUnreachableChild(child: ChildProcess): void {
-  // (1) IPC channel.
-  try {
-    child.unref();
-  } catch {
-    // child may already be exited / disconnected;
-    // unref() is idempotent and safe to ignore.
+export function detachUnreachableChild(
+  child: ChildProcess,
+): ParentDetachOutcome {
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX02)
+  //
+  // MICROLIFECYCLE FIDELITY:
+  //   `child.exitCode !== null || child.signalCode !== null`
+  //   signals that Node has observed the `'exit'`
+  //   event — i.e. the process has ENDED but stdio
+  //   streams may still be open. Node documents
+  //   `'close'` as the event fired AFTER stdio streams
+  //   close. We MUST NOT claim `closed` from
+  //   `exitCode` / `signalCode` alone.
+  //
+  // MICROFIX02 P1-2 — ORTHOGONAL EXIT VS DETACH:
+  //   We record the lifecycle observation
+  //   (`childLifecycleAtDetach`) and the per-handle
+  //   detach evidence INDEPENDENTLY. Both are
+  //   attempted regardless of whether Node has
+  //   observed `exit`. If stdio is still open, the
+  //   per-handle detach evidence will reflect that
+  //   we tried to close the FDs anyway (and the
+  //   parent loop is no longer pinned by what we
+  //   successfully closed).
+  const childLifecycleAtDetach: "running_or_unknown" | "already_exited" =
+    (child.exitCode !== null || child.signalCode !== null)
+      ? "already_exited"
+      : "running_or_unknown";
+
+  // (1) IPC channel — recorded as `unrefed` only if
+  // `child.unref()` returned without throwing. The
+  // previous CORRECTION01 code unconditionally added
+  // `"ipc"` to the detached set even on throw — that
+  // was evidence inflation (MICROFIX01 P1-2).
+  let ipcState: "unrefed" | "unavailable" | "failed";
+  const unrefFn = (child as { unref?: () => void }).unref;
+  if (typeof unrefFn !== "function") {
+    ipcState = "unavailable";
+  } else {
+    try {
+      unrefFn.call(child);
+      ipcState = "unrefed";
+    } catch {
+      ipcState = "failed";
+    }
   }
+
   // (2,3) stdio pipes — drain AND destroy. On a
   // sandboxed host where the kernel refuses to kill
   // the writer child, the child remains alive in `ps`
@@ -322,126 +528,262 @@ export function detachUnreachableChild(child: ChildProcess): void {
   // We BOTH `destroy()` (close the FD in the parent)
   // and `unref()` (decrement the libuv refcount in
   // case the FD handle survives `destroy()`).
-  tryDestroyAndUnref(child.stdout);
-  tryDestroyAndUnref(child.stderr);
-  tryDestroyAndUnref(child.stdin);
+  //
+  // MICROLIFECYCLE FIDELITY (MICROFIX01 P1-2 +
+  // MICROFIX02 P1-2): each stdio stream is reported
+  // with its PRECISE observed state. A stream that
+  // is null/undefined (e.g. the child was spawned
+  // with `stdio: "ignore"`) is `absent`. A stream
+  // whose `destroy()` was callable and succeeded
+  // but whose `unref()` is not callable (or threw)
+  // is `destroyed_only`. Symmetric for `unrefed_only`.
+  // Both succeeded → `destroyed_unrefed`. Both
+  // unavailable → `absent` (we collapse because
+  // the parent's loop is not pinned by it).
+  //
+  // CRITICAL: this detach attempt happens EVEN when
+  // `childLifecycleAtDetach === "already_exited"`.
+  // Node may have observed `exit` while stdio FDs
+  // remain open. We attempt to close them anyway so
+  // the parent's loop can stop waiting on them. The
+  // per-handle state will honestly reflect what
+  // happened (destroyed_unrefed, failed, etc.).
+  const stdout = tryDestroyAndUnref(child.stdout);
+  const stderr = tryDestroyAndUnref(child.stderr);
+  const stdin = tryDestroyAndUnref(child.stdin);
+
+  return {
+    childLifecycleAtDetach,
+    skipped: false,
+    detached: {
+      ipc: ipcState,
+      stdout,
+      stderr,
+      stdin,
+    },
+  };
 }
 
 function tryDestroyAndUnref(
   s: NodeJS.ReadableStream | NodeJS.WritableStream | null | undefined,
-): void {
-  try {
-    (s as { destroy?: () => void } | null)?.destroy?.();
-  } catch {
-    // ignore — stream may already be closed
+): ParentDetachOperation {
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX01)
+  //
+  // Returns the PRECISE observed state of the
+  // attempted parent-side detachment of one stream.
+  // Six mutually-exclusive values:
+  //
+  //   absent
+  //     The stream is null or undefined (e.g. a child
+  //     spawned with `stdio: "ignore"`).
+  //
+  //   unrefed
+  //     `unref()` was callable AND returned without
+  //     throwing AND `destroy()` was not callable.
+  //     We have decremented the libuv refcount; the
+  //     parent's loop is no longer pinned by it.
+  //
+  //   destroyed_only
+  //     `destroy()` was callable AND returned without
+  //     throwing AND `unref()` was not callable.
+  //     The FD is closed in the parent; the parent
+  //     cannot wait on it.
+  //
+  //   destroyed_unrefed
+  //     BOTH `destroy()` and `unref()` were callable
+  //     AND both returned without throwing. Belt and
+  //     suspenders; we report the strongest state.
+  //
+  //   unrefed_only
+  //     `unref()` succeeded; `destroy()` is callable
+  //     but threw. We have the refcount decrement
+  //     but did not successfully close the FD.
+  //
+  //   failed
+  //     BOTH operations failed (or only `destroy()`
+  //     was available and it threw). The stream is
+  //     likely still pinning the parent loop.
+  if (s === null || s === undefined) return "absent";
+  const destroyFn = (s as { destroy?: () => void }).destroy;
+  const unrefFn = (s as { unref?: () => void }).unref;
+  const hasDestroy = typeof destroyFn === "function";
+  const hasUnref = typeof unrefFn === "function";
+  let destroyOk = false;
+  let unrefOk = false;
+  let destroyThrew = false;
+  let unrefThrew = false;
+  if (hasDestroy) {
+    try {
+      destroyFn.call(s);
+      destroyOk = true;
+    } catch {
+      destroyThrew = true;
+    }
   }
-  try {
-    (s as { unref?: () => void } | null)?.unref?.();
-  } catch {
-    // ignore
+  if (hasUnref) {
+    try {
+      unrefFn.call(s);
+      unrefOk = true;
+    } catch {
+      unrefThrew = true;
+    }
   }
+  if (destroyOk && unrefOk) return "destroyed_unrefed";
+  if (destroyOk && !hasUnref) return "destroyed_only";
+  if (!hasDestroy && unrefOk) return "unrefed";
+  if (destroyThrew && unrefOk) return "unrefed_only";
+  // Neither succeeded — best case is "absent"
+  // semantically (parent loop may or may not be
+  // pinned, but we have no evidence of detachment).
+  void unrefThrew;
+  return "failed";
 }
 
 /**
  * (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
- *  LIVENESS01)
+ *  LIVENESS01-CORRECTION01)
  *
- * Test FILE post-suite teardown. Iterates the
- * active Node handles and `unref()`s any `Socket`
- * and `Pipe` handles that survived the test run.
+ * Test FILE post-suite teardown, OWNERSHIP-SCOPED.
+ * Walks ONLY the `ChildProcess` references passed in
+ * by the caller (the test FILE's local registry) and
+ * detaches each owned child's parent-side handles
+ * from the parent's event loop.
  *
- * Why this is needed:
+ * Why ownership-scoped:
  *
- *   On a sandboxed host, several test FILES spawn
- *   writer children (via `startLedgerWriter`) whose
- *   stdio is `"pipe"`. After `terminateHelperAndAwaitTyped`
- *   resolves with a non-`closed` outcome and
- *   `detachUnreachableChild` is called, the per-child
- *   `child.stdout` / `child.stderr` stream handles
- *   are detached from the parent's event loop, but
- *   the corresponding parent-side handles (the
- *   `Pipe` objects backing those streams in the
- *   parent process) sometimes remain as passive
- *   `Pipe` handles. Likewise, UDS-client `Socket`
- *   handles created during `appendToLedgerWriter` /
- *   `pingLedgerWriter` / `whoAreYouLedgerWriter`
- *   remain after the socket's `destroy()` resolves.
- *   Node's test runner keeps the test FILE alive
- *   while these handles are present, even after all
- *   tests + the `after()` hook have completed.
+ *   `process._getActiveHandles()` is a Node-private
+ *   API, undocumented for public use, and explicitly
+ *   flagged by the Node maintainers as potentially
+ *   removable in a future major release. It returns
+ *   every active handle in the process regardless of
+ *   who created it — including handles owned by
+ *   other fixtures, by Node internals, or by future
+ *   unrelated test code. Detaching handles by *type*
+ *   (Socket / Pipe / ChildProcess) violates the
+ *   ownership law:
  *
- *   Calling `unref()` on each residual Socket/Pipe
- *   handle detaches it from the parent's event loop
- *   without destroying the underlying resource.
- *   The handle remains in `process._getActiveHandles()`
- *   but does NOT keep the loop alive. This is the
- *   canonical Node.js seam for "I am finished with
- *   this resource; do not wait for me to clean it up".
+ *     "the component that acquires a live resource
+ *      owns its lifecycle boundary"
+ *
+ *   A test FILE MUST only detach resources it
+ *   created. We therefore enumerate the child
+ *   references that the calling fixture already
+ *   tracks in its own state, not the process-wide
+ *   handle set.
+ *
+ * What this function touches, per child:
+ *
+ *   - `child` itself              — IPC channel
+ *   - `child.stdout`              — parent-side read pipe
+ *   - `child.stderr`              — parent-side read pipe
+ *   - `child.stdin`               — parent-side write pipe
+ *
+ *   For each stream, we both `destroy()` the FD and
+ *   `unref()` the libuv handle (idempotent and safe
+ *   to ignore errors).
+ *
+ * What this function does NOT touch:
+ *
+ *   - UDS-client Socket handles created during
+ *     `appendToLedgerWriter` / `pingLedgerWriter` /
+ *     `whoAreYouLedgerWriter`. Those sockets are
+ *     owned by the RPC transport layer and are
+ *     `destroy()`ed on return; if they leave a
+ *     residual passive handle, that is the
+ *     transport layer's responsibility, not this
+ *     file's. (In the current implementation the
+ *     transport destroys them cleanly so no residual
+ *     is observable.)
+ *
+ *   - Timer / Microtask / Immediate / Promise /
+ *     framework-internal handles.
+ *
+ *   - Any ChildProcess NOT passed in by the caller.
+ *     A test FILE MUST only detach its own children.
+ *
+ * What this function is NOT:
+ *
+ *   This is a PARENT-LIVENESS OPERATION. It does not
+ *   prove cleanup. The child process itself is NOT
+ *   terminated by this function — children that the
+ *   kernel refused to kill (EPERM) remain alive in
+ *   `ps` as test-host residue. The residue oracle
+ *   (`sweepAndProve()` / `proveChildAbsent()`) is
+ *   the SOLE authority on which children are still
+ *   alive.
+ *
+ *   A `signal_permission_denied` outcome combined with
+ *   a successful `detachOwnedChildren` call STILL
+ *   yields `residue = alive` and STILL fails
+ *   qualification. Detachment lets the *test FILE*
+ *   terminate, NOT prove teardown.
  *
  * Law:
  *
- *   This MUST be called only when the test FILE is
- *   ready to exit. It does NOT destroy or close the
- *   handles — the OS reclaims them when the process
- *   exits. It only stops the Node event loop from
- *   waiting for them.
- *
- *   It touches only `Socket` and `Pipe` handles.
- *   Node's two handle kinds for network / FD
- *   resources. It never touches `Timer`,
- *   `Microtask`, or any other framework internals.
- *   The unref is idempotent and safe.
- *
- *   It MUST NOT be called for sockets/pipes that
- *   the test logic is still actively using. The
- *   correct call site is the END of the test FILE's
- *   `after()` hook — after all assertions have
- *   completed, after the residue oracle has run,
- *   and after all owned children have been torn
- *   down to the maximum extent possible on the
- *   host (which on a sandboxed kernel may be only
- *   `unref()`, never `kill()`).
+ *   Call this at the END of the test FILE's `after()`
+ *   hook, AFTER every assertion has completed, AFTER
+ *   the residue oracle has run, and AFTER every owned
+ *   child has been torn down to the maximum extent
+ *   possible on the host. Pass the local registry's
+ *   ChildProcess array as the sole argument.
  */
-export function detachResidualHandles(): void {
-  const handles = (process as unknown as {
-    _getActiveHandles?: () => ReadonlyArray<unknown>;
-  })._getActiveHandles?.();
-  if (!handles) return;
-  for (const h of handles) {
-    const ctor = (h as { constructor?: { name?: string } })?.constructor?.name;
-    // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
-    //  SUITE-LIVENESS01)
-    //
-    // The list of handle kinds we detach:
-    //
-    //   Socket     — UDS-client sockets created during
-    //                ledger-writer RPC calls (ping / append /
-    //                whoAreYou). After `socket.destroy()` the
-    //                underlying FD may keep a passive handle
-    //                on the test FILE's event loop.
-    //
-    //   Pipe       — stdio pipes of orphaned writer children
-    //                whose IPC channel was already detached
-    //                by `child.unref()` in
-    //                `detachUnreachableChild()`.
-    //
-    //   ChildProcess — writer children that the kernel
-    //                  refused to kill (EPERM). Their IPC
-    //                  channel has already been detached by
-    //                  `detachUnreachableChild()` — but the
-    //                  ChildProcess handle itself can remain
-    //                  as a passive handle. Unref'ing it
-    //                  detaches the LAST residual that keeps
-    //                  the test FILE alive.
-    //
-    // We deliberately do NOT detach Timer / Microtask /
-    // Immediate handles — those are framework internals.
-    if (ctor === "Socket" || ctor === "Pipe" || ctor === "ChildProcess") {
-      try {
-        (h as { unref?: () => void }).unref?.();
-      } catch {
-        // ignore — the handle may already be closed
-      }
+export function detachOwnedChildren(
+  children: ReadonlyArray<ChildProcess>,
+): ParentDetachOutcome[] {
+  const outcomes: ParentDetachOutcome[] = [];
+  for (const child of children) {
+    if (child === null || child === undefined) {
+      outcomes.push({
+        childLifecycleAtDetach: "running_or_unknown",
+        skipped: true,
+        detached: {
+          ipc: "unavailable",
+          stdout: "absent",
+          stderr: "absent",
+          stdin: "absent",
+        },
+      });
+      continue;
     }
+    outcomes.push(detachUnreachableChild(child));
   }
+  return outcomes;
 }
+
+/**
+ * (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+ *  LIVENESS01-CORRECTION01-MICROFIX01)
+ *
+ * The earlier CORRECTION01 retained a
+ * `_diagnostic_sweepAllHandles()` function as an
+ * "escape hatch" that walked `process._getActiveHandles()`
+ * and unref'd Socket / Pipe / ChildProcess handles
+ * globally. MICROFIX01 removes that escape hatch:
+ *
+ *   - No test FILE actually CALLS the helper.
+ *     It existed as a passive witness that nothing
+ *     in `_writer_teardown.ts` itself was doing
+ *     type-based global sweeping.
+ *
+ *   - Its presence created a LIV10 ambiguity: the
+ *     static guard had to allow `_writer_teardown.ts`
+ *     as a whole, but the helper was never pinned to
+ *     a specific function body, so a future
+ *     accidental addition in this file (e.g. another
+ *     `_getActiveHandles` reference outside the
+ *     helper) would pass LIV10 silently.
+ *
+ *   - LIV10 now statically forbids EVERY reference to
+ *     `_getActiveHandles` anywhere under `test/` or
+ *     `src/`. There is no escape hatch, no diagnostic
+ *     helper, no allowance.
+ *
+ *   - If a future need arises for a global handle
+ *     sweep, it MUST be added to this file with a
+ *     typed ADT of allowed-handle kinds AND its
+ *     `_getActiveHandles` reference MUST be scoped
+ *     to a named function body whose name the LIV10
+ *     static guard explicitly whitelists. Until
+ *     then: no global sweeping.
+ */
