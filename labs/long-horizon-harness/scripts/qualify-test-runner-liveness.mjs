@@ -209,6 +209,70 @@ let runnerExitCode = null;
 /** @type {NodeJS.Signals|null} */
 let runnerSignal = null;
 
+// --------------------------------------------------------------------
+// MICROFIX04 QFIX01+QFIX02 — TYPED CLEANUP-ERROR CLASSIFIER.
+//
+// Node's ChildProcess emits `'error'` for several
+// distinct failure modes (inability to spawn,
+// inability to kill, failed IPC, abort). It also
+// documents that `subprocess.kill()` may synchronously
+// throw on signal-delivery failure.
+//
+// The earlier MICROFIX03 implementation treated EVERY
+// post-kill `'error'` as `PERMISSION_DENIED`, which is
+// exactly the evidence-provenance inversion this
+// Factory doctrine forbids: a generic ESRCH (process
+// already gone) or an EACCES (file-mode refusal, not
+// a signal-rights refusal) would be reported as
+// PERMISSION_DENIED without examining `err.code`.
+//
+// The classifier is now strictly typed:
+//
+//     err.code === "EPERM"
+//       → PERMISSION_DENIED (the canonical
+//         kernel-meaningful errno for "the host
+//         refused signal delivery to this child").
+//     err.code === "ESRCH" | "EACCES" | anything else
+//       → FAILED (NOT PERMISSION_DENIED).
+//
+// This same classifier is applied to BOTH the
+// synchronous `kill()` catch AND the asynchronous
+// `'error'` event — the two paths previously used
+// different mappings, which is itself an evidence-
+// inversion (synchronous EPERM → FAILED, async EPERM
+// → PERMISSION_DENIED).
+// --------------------------------------------------------------------
+const classifyCleanupError = (err) => {
+  return err && err.code === "EPERM"
+    ? "PERMISSION_DENIED"
+    : "FAILED";
+};
+
+// --------------------------------------------------------------------
+// MICROFIX04 QFIX03 — ChildProcess `'spawn'` AS SPAWN AUTHORITY.
+//
+// The earlier MICROFIX03 implementation decided
+// whether an `'error'` was a spawn-error by
+// parsing the runner's own stderr for the
+// `test_runner_start` telemetry line. That is an
+// application-level documentary signal, not the
+// ChildProcess-level lifecycle event.
+//
+// Node's ChildProcess emits `'spawn'` exactly once,
+// AFTER the child has been successfully spawned. If
+// spawning fails, `'spawn'` is NEVER emitted.
+//
+//     spawned === false && error → SPAWN_ERROR
+//     spawned === true  && error → SIGNAL_ERROR
+//                                       (process-control
+//                                        / runtime error)
+//
+// The runner-trace `has_start` regex is RETAINED as
+// corroborating evidence (in `observed.trace.has_start`)
+// but is no longer used to classify the boundary.
+// --------------------------------------------------------------------
+let spawned = false;
+
 const settleOnce = (kind) => {
   if (settled) return;
   settled = true;
@@ -220,16 +284,34 @@ const settledPromise = new Promise((resolve) => {
   const timer = setTimeout(() => {
     settleOnce("DEADLINE");
     let killResult;
-    try { killResult = child.kill("SIGKILL"); } catch { killResult = false; }
-    if (killResult === false) {
-      cleanupOutcome = "FAILED";
-    } else {
+    try {
+      killResult = child.kill("SIGKILL");
+      // If kill() returned true synchronously we
+      // optimistically record SENT, but the async
+      // `'error'` handler (below) may re-classify to
+      // PERMISSION_DENIED or FAILED based on err.code
+      // if the kill actually failed.
       cleanupOutcome = "SENT";
       descendantCleanupProven = false;
+    } catch (err) {
+      // Synchronous kill failure (e.g. EPERM thrown).
+      cleanupOutcome = classifyCleanupError(err);
+      killResult = false;
+    }
+    if (killResult === false && cleanupOutcome !== "PERMISSION_DENIED") {
+      // kill() returned false WITHOUT an exception
+      // (e.g. the child was already dead — ESRCH).
+      // Without an err.code we treat that as FAILED.
+      cleanupOutcome = "FAILED";
     }
     clearTimeout(timer);
     onSettled();
   }, DEADLINE_MS);
+
+  // QFIX03: typed spawn authority.
+  child.once("spawn", () => {
+    spawned = true;
+  });
 
   child.on("exit", (code, signal) => {
     runnerExitCode = code;
@@ -241,17 +323,18 @@ const settledPromise = new Promise((resolve) => {
     onSettled();
   });
 
-  child.on("error", () => {
+  child.on("error", (err) => {
     if (settled) {
-      if (cleanupOutcome === "SENT") {
-        cleanupOutcome = "PERMISSION_DENIED";
-        descendantCleanupProven = false;
-      }
+      // Post-settlement: this is a cleanup error from
+      // the deadline's kill() attempt. Classify
+      // strictly on err.code.
+      cleanupOutcome = classifyCleanupError(err);
       return;
     }
-    const hasStart = /"kind":"test_runner_start"/.test(stderrBuf);
-    settleOnce(hasStart ? "SIGNAL_ERROR" : "SPAWN_ERROR");
-    cleanupOutcome = hasStart ? "FAILED" : "NOT_ATTEMPTED";
+    // Pre-settlement: classify by whether the child
+    // was ever actually spawned (QFIX03).
+    settleOnce(spawned ? "SIGNAL_ERROR" : "SPAWN_ERROR");
+    cleanupOutcome = spawned ? classifyCleanupError(err) : "NOT_ATTEMPTED";
     clearTimeout(timer);
     onSettled();
   });
@@ -304,8 +387,14 @@ const observed = {
   test_disposition: testDisposition,
   liveness_qualifier_disposition: livenessQualifierDisposition,
   trace: {
+    // QFIX03: these are CORROBORATING telemetry
+    // signals only. The authoritative spawn/lifecycle
+    // signal is the ChildProcess `'spawn'` event
+    // (tracked internally as `spawned`), NOT these
+    // regex matches on stderr.
     has_start: /"kind":"test_runner_start"/.test(stderrBuf),
     has_finish: /"kind":"test_runner_finish"/.test(stderrBuf),
+    spawned_via_typed_event: spawned,
     stderr_tail: stderrBuf.slice(-500),
   },
 };

@@ -1405,6 +1405,289 @@ test("LIV14: matrix does not fabricate synthetic errno values (actual-evidence b
   );
 });
 
+test("LIV15: qualifier classifies cleanup errors from err.code (no evidence-provenance inversion)", async () => {
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX04)
+  //
+  // QFIX01+QFIX02+QFIX04 — DETERMINISTIC CLEANUP-ERROR
+  // ORACLE.
+  //
+  // The MICROFIX03 qualifier treated EVERY post-kill
+  // `'error'` event as `PERMISSION_DENIED` without
+  // examining `err.code`. That is exactly the
+  // evidence-provenance inversion this Factory doctrine
+  // forbids: a generic ESRCH (process already gone)
+  // or an EACCES (file-mode refusal, NOT a signal
+  // rights refusal) would have been reported as
+  // PERMISSION_DENIED.
+  //
+  // LIV15 enforces:
+  //   (a) The qualifier defines a single typed
+  //       `classifyCleanupError(err)` helper.
+  //   (b) The helper returns `PERMISSION_DENIED`
+  //       iff `err.code === "EPERM"`.
+  //   (c) The helper returns `FAILED` for ESRCH,
+  //       EACCES, or any other err.code (including
+  //       `undefined` / unknown).
+  //   (d) BOTH the synchronous `kill()` catch AND the
+  //       asynchronous `'error'` event handler call
+  //       `classifyCleanupError(err)` — the two paths
+  //       cannot use different mappings (the prior
+  //       inversion had sync EPERM → FAILED, async
+  //       EPERM → PERMISSION_DENIED).
+  //   (e) QFIX03: spawn authority is the
+  //       ChildProcess `'spawn'` event, NOT a stderr
+  //       regex. The qualifier MUST register a
+  //       `child.once("spawn", ...)` listener (or
+  //       equivalent `child.on("spawn", ...)`).
+  //   (f) The qualifier MUST NOT classify spawn-error
+  //       vs signal-error by the presence of the
+  //       runner's own telemetry line in stderr.
+  //
+  // The deterministic table tested via static-source
+  // grep:
+  //
+  //   EPERM       → PERMISSION_DENIED
+  //   ESRCH       → FAILED
+  //   EACCES      → FAILED
+  //   undefined   → FAILED
+  //
+  const { readFile, stat } = await import("node:fs/promises");
+  const qualifierPath = path.join(
+    HERE,
+    "../scripts/qualify-test-runner-liveness.mjs",
+  );
+  await stat(qualifierPath);
+  const src = await readFile(qualifierPath, "utf8");
+
+  // (a) Single classifier helper exists. Accept either
+  //     function declaration (`function classifyCleanupError(err)`)
+  //     or arrow assignment (`const classifyCleanupError = (err) =>`).
+  assert.ok(
+    /function\s+classifyCleanupError\s*\(/.test(src) ||
+      /const\s+classifyCleanupError\s*=\s*\(/.test(src),
+    "LIV15: qualifier MUST define `classifyCleanupError(err)` as a single classifier authority (function decl or arrow assignment)",
+  );
+
+  // (b) The helper has the EPERM → PERMISSION_DENIED branch.
+  // We extract the helper body and parse its return
+  // statement — the prior slack regex matched
+  // *anywhere* within 400 chars and missed cases
+  // where the function returned a non-canonical
+  // literal.
+  const helperBodyMatch = src.match(
+    /(?:function\s+classifyCleanupError\s*\([^)]*\)\s*\{|const\s+classifyCleanupError\s*=\s*\([^)]*\)\s*=>\s*\{)([\s\S]*?)\n\}/,
+  );
+  assert.ok(
+    helperBodyMatch,
+    "LIV15: could not locate the body of classifyCleanupError to verify return mapping",
+  );
+  const helperBody = helperBodyMatch?.[1] ?? "";
+
+  // The helper body MUST contain a return that
+  // discriminates on err.code === "EPERM" and
+  // returns PERMISSION_DENIED in the EPERM branch.
+  assert.ok(
+    /err(?:\?\.|\.)code\s*===\s*["']EPERM["']/.test(helperBody) &&
+      /PERMISSION_DENIED/.test(helperBody),
+    "LIV15: classifyCleanupError(err) body MUST discriminate on err.code === 'EPERM' → PERMISSION_DENIED",
+  );
+
+  // (c) The helper body MUST return FAILED (or
+  // PERMISSION_DENIED) as the ONLY terminal literals,
+  // i.e. no BOGUS / unknown return literals allowed.
+  // We extract every string literal in the return
+  // expression and verify the set is exactly
+  // {PERMISSION_DENIED, FAILED}. The discriminator
+  // literal "EPERM" (in the comparison) is excluded
+  // because it is not a return literal.
+  const returnLiterals = Array.from(
+    helperBody.matchAll(/["']([A-Z_][A-Z0-9_]*)["']/g),
+  )
+    .map((m) => m[1] ?? "")
+    .filter((l) => l !== "EPERM");
+  const literalSet = new Set(returnLiterals);
+  const allowedLiterals = new Set(["PERMISSION_DENIED", "FAILED"]);
+  const offending = [...literalSet].filter((l) => !allowedLiterals.has(l));
+  assert.equal(
+    offending.length,
+    0,
+    `LIV15: classifyCleanupError(err) MUST NOT return non-canonical literals. Found offending literals: ${offending.join(",")}. Allowed: PERMISSION_DENIED, FAILED.`,
+  );
+  // Also confirm both expected literals are present.
+  assert.ok(
+    literalSet.has("PERMISSION_DENIED") && literalSet.has("FAILED"),
+    `LIV15: classifyCleanupError(err) MUST return both PERMISSION_DENIED and FAILED. Found: ${[...literalSet].join(",")}`,
+  );
+
+  // (d) BOTH sync catch AND async 'error' handler
+  // call the classifier. We use a brace-balancing
+  // pass instead of a regex (lazy regex with `\n}`
+  // is too greedy across nested blocks).
+  const extractBalancedBlock = (text: string, openIdx: number) => {
+    // openIdx points at `{`. Find matching `}` by
+    // counting brace depth, ignoring braces inside
+    // string literals.
+    let depth = 0;
+    let i = openIdx;
+    let inSingle = false;
+    let inDouble = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+    while (i < text.length) {
+      const c = text[i];
+      const next = text[i + 1];
+      if (inLineComment) {
+        if (c === "\n") inLineComment = false;
+        i++;
+        continue;
+      }
+      if (inBlockComment) {
+        if (c === "*" && next === "/") {
+          inBlockComment = false;
+          i += 2;
+          continue;
+        }
+        i++;
+        continue;
+      }
+      if (inSingle) {
+        if (c === "\\") {
+          i += 2;
+          continue;
+        }
+        if (c === "'") inSingle = false;
+        i++;
+        continue;
+      }
+      if (inDouble) {
+        if (c === "\\") {
+          i += 2;
+          continue;
+        }
+        if (c === '"') inDouble = false;
+        i++;
+        continue;
+      }
+      if (c === "/" && next === "/") {
+        inLineComment = true;
+        i += 2;
+        continue;
+      }
+      if (c === "/" && next === "*") {
+        inBlockComment = true;
+        i += 2;
+        continue;
+      }
+      if (c === "'") {
+        inSingle = true;
+        i++;
+        continue;
+      }
+      if (c === '"') {
+        inDouble = true;
+        i++;
+        continue;
+      }
+      if (c === "{") {
+        depth++;
+        i++;
+        continue;
+      }
+      if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          return { body: text.slice(openIdx + 1, i), end: i };
+        }
+        i++;
+        continue;
+      }
+      i++;
+    }
+    return null;
+  };
+
+  // Find every `catch (NAME) { ... }` block and check
+  // whether the body references classifyCleanupError.
+  const catchOpenings = [...src.matchAll(/\}\s*catch\s*\(\s*(\w+)\s*\)\s*\{/g)];
+  let catchUsesClassifier = false;
+  for (const m of catchOpenings) {
+    const openIdx = m.index + m[0].length - 1; // position of `{`
+    const block = extractBalancedBlock(src, openIdx);
+    if (block && /classifyCleanupError\s*\(/.test(block.body)) {
+      catchUsesClassifier = true;
+      break;
+    }
+  }
+  assert.ok(
+    catchUsesClassifier,
+    "LIV15: classifyCleanupError(err) MUST be invoked from a `catch (err) { ... }` block (the synchronous kill() failure path). Hardcoding cleanupOutcome in the catch is the prior evidence-provenance inversion.",
+  );
+
+  // Find the `child.on('error', (err) => { ... })`
+  // handler and verify it calls the classifier.
+  const errorHandlerMatch = src.match(
+    /child\.on\(\s*["']error["']\s*,\s*\(([^)]*)\)\s*=>\s*\{/,
+  );
+  let errorHandlerUsesClassifier = false;
+  if (errorHandlerMatch && errorHandlerMatch.index !== undefined) {
+    const openIdx = errorHandlerMatch.index + errorHandlerMatch[0].length - 1;
+    const block = extractBalancedBlock(src, openIdx);
+    if (block && /classifyCleanupError\s*\(/.test(block.body)) {
+      errorHandlerUsesClassifier = true;
+    }
+  }
+  assert.ok(
+    errorHandlerUsesClassifier,
+    "LIV15: classifyCleanupError(err) MUST be invoked from a `child.on('error', ...)` handler (the asynchronous error path).",
+  );
+
+  // (e) QFIX03: ChildProcess 'spawn' listener exists.
+  // We strip comments BEFORE grepping so a commented-
+  // out `child.once("spawn", ...)` does not satisfy
+  // the oracle. The earlier failure-mode (reviewer's
+  // concern) is exactly: relying on a stderr regex
+  // instead of the typed lifecycle event.
+  const codeOnlySrc = src
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.ok(
+    /child\.once\(\s*["']spawn["']/.test(codeOnlySrc) ||
+      /child\.on\(\s*["']spawn["']/.test(codeOnlySrc),
+    "LIV15: qualifier MUST register a `child.on('spawn', ...)` (or `.once`) listener — ChildProcess 'spawn' is the typed spawn authority",
+  );
+
+  // (f) The qualifier MUST NOT classify spawn-error
+  // vs signal-error using a stderr regex. The prior
+  // MICROFIX03 used
+  //   const hasStart = /"kind":"test_runner_start"/.test(stderrBuf);
+  //   settleOnce(hasStart ? "SIGNAL_ERROR" : "SPAWN_ERROR");
+  // We forbid the `(hasStart ? "SIGNAL_ERROR" : "SPAWN_ERROR")`
+  // shape, which is the documentary-signal boundary
+  // decision the reviewer flagged.
+  //
+  // We narrow: the literal `(hasStart ? "SIGNAL_ERROR" : "SPAWN_ERROR")`
+  // expression MUST NOT appear in executable code.
+  const codeOnly = src
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.equal(
+    /hasStart\s*\?\s*["']SIGNAL_ERROR["']\s*:\s*["']SPAWN_ERROR["']/.test(codeOnly),
+    false,
+    "LIV15: qualifier MUST NOT classify spawn-vs-signal using stderr regex (hasStart). Use the ChildProcess 'spawn' event instead.",
+  );
+
+  // Positive assertion: the qualifier's spawn-error
+  // classification is gated on the typed event, e.g.
+  //   spawned ? "SIGNAL_ERROR" : "SPAWN_ERROR"
+  //   !spawned → "SPAWN_ERROR"
+  assert.ok(
+    /spawned\s*\?\s*["']SIGNAL_ERROR["']\s*:\s*["']SPAWN_ERROR["']/.test(codeOnly) ||
+      /!\s*spawned[^A-Za-z][\s\S]{0,80}["']SPAWN_ERROR["']/.test(codeOnly),
+    "LIV15: qualifier MUST gate spawn-error classification on the typed 'spawned' flag from the ChildProcess 'spawn' event",
+  );
+});
+
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
 //  LIVENESS01-CORRECTION01) The LIV oracle itself
 // spawns orphan children for the LIV07/LIV08/LIV09
