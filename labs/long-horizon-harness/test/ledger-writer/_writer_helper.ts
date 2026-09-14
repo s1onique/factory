@@ -50,6 +50,7 @@ import type {
 import {
   type TerminateOutcome,
   terminateHelperAndAwaitTyped,
+  detachUnreachableChild,
 } from "./_writer_teardown.js";
 import { recordWriterTeardown } from "./_writer_teardown_registry.js";
 import type { WriterLifetimeId } from "./_writer_teardown_registry.js";
@@ -185,6 +186,29 @@ export async function startWriterInTmpDir(
         2000,
       );
       recordWriterTeardown(handle.lifetimeId, outcome);
+
+      // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+      //  SUITE-LIVENESS01)
+      //
+      // If the kernel refused to deliver `'close'` —
+      // the child remains alive in `ps`. Per the
+      // lifecycle ownership law, the test FILE that
+      // spawned this child is responsible for the
+      // child's lifetime; but the FILE's process
+      // lifecycle is separate from the child's. Once
+      // the FILE has finished running assertions, it
+      // MUST be able to exit cleanly. `unref()`
+      // detaches the IPC channel so the parent's
+      // event loop is no longer pinned by the child.
+      //
+      // Closed outcomes are skipped: `'close'` has
+      // already fired and the channel is gone.
+      // This preserves WSTOP07: only `{closed}` may
+      // release the registry entry — `unref` does
+      // not constitute release.
+      if (outcome.kind !== "closed") {
+        detachUnreachableChild(result.child);
+      }
 
       // Belt-and-suspenders: explicitly unlink the socket
       // path if it still exists. macOS sometimes holds the

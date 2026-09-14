@@ -17,7 +17,7 @@
  *   function directly with synthetic events.jsonl and
  *   a fake WitnessSpawnHandle.
  */
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
@@ -36,6 +36,7 @@ import { startWitness } from "../../src/witness-start/witness-start-gate.js";
 import { nodeSpawnWitnessPort } from "../../src/witness-start/witness-start-spawn.js";
 import { ledgerWriterSocketPath } from "../../src/ledger-writer/ledger-writer-process.js";
 import { awaitWitnessReady } from "./witness-start-readiness.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 async function setupLive(prefix: string): Promise<
   LiveRunHandle | { skip: true; reason: string }
@@ -170,4 +171,12 @@ test("READY09: spawn ENOENT (bad nodePath) produces no witness_ready", async (t)
   } finally {
     await teardownLiveRun(run);
   }
+});
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01) Detach residual Socket/Pipe handles
+// so the test FILE can exit cleanly. See
+// `_liveness_helpers.ts` for the law.
+after(() => {
+  detachResidualHandles();
 });

@@ -132,11 +132,31 @@ function spawnLongLived(): ChildProcess {
   // Long-lived child: writes nothing, never exits.
   // The kernel will refuse any kill attempt from
   // this sandbox; the child survives `kill()`.
-  return spawn(
+  //
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+  //  SUITE-LIVENESS01)
+  // The test deliberately leaves the child alive
+  // to exercise the EPERM-on-kill surface. The
+  // child MUST NOT pin the test FILE's event loop:
+  // doing so makes `npm test` hang forever after
+  // AP11 in the canonical full-suite ordering
+  // (this file is the next test file after
+  // `_seq05_admission_pacing_adversarial.test.ts`).
+  // `unref()` is the canonical Node.js seam for
+  // "this child exists but the parent does not
+  // own the parent's lifetime on its behalf".
+  // The child process itself is NOT terminated —
+  // it remains alive in `ps` — but the parent
+  // test FILE process is no longer waiting for
+  // it, so the runner can move on to the next
+  // test file.
+  const c = spawn(
     process.execPath,
     ["-e", "setInterval(()=>{}, 1000)"],
     { stdio: "ignore" },
   );
+  c.unref();
+  return c;
 }
 
 function spawnShortLived(delayMs: number): ChildProcess {

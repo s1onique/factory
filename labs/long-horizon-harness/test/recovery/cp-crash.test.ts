@@ -9,6 +9,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_RECOVERY_LIVE === "1";
 // CORRECTION06 §35: record the qualification subject commit.
@@ -200,6 +201,11 @@ const registry = newRegistry();
 after(async () => {
   const { residue } = await registry.cleanup();
   if (residue > 0 && matrix.residue === 0) matrix.residue = residue;
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 let noteCallCount = 0;

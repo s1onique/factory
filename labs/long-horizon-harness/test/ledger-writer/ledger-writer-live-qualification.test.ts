@@ -63,6 +63,7 @@ import {
   sweepAndProve,
   destroyRunDir,
 } from "./_live_registry.js";
+import { detachResidualHandles } from "./_writer_teardown.js";
 
 const STRICT = process.env.FACTORY_STRICT_LEDGER_WRITER_LIVE === "1";
 const EXPECTED_SHA = process.env.FACTORY_QUALIFICATION_SUBJECT_COMMIT ?? "";
@@ -957,6 +958,43 @@ after(async () => {
     // eslint-disable-next-line no-console
     console.log(`LEDGER_WRITER_QUALIFICATION_DISPOSITION=OK`);
   }
+
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+  //  SUITE-LIVENESS01)
+  //
+  // Detach every residue entry's child reference
+  // so the test FILE can exit cleanly. On a
+  // sandboxed host, the kernel refuses to deliver
+  // SIGKILL and the writer/ledger children remain
+  // alive in `ps`; the residue oracle observes
+  // this honestly (the per-entry observation
+  // records `permission_denied`). The child
+  // process itself is NOT terminated by this call
+  // — it remains alive in `ps` as test-host
+  // residue, but the parent's event loop is no
+  // longer pinned by it. Without this detach,
+  // `npm test` would hang forever after this file.
+  for (const e of failed) {
+    if (e.kind === "writer_child" || e.kind === "helper_child") {
+      const child = e.ref as { unref?: () => void } | undefined;
+      try {
+        child?.unref?.();
+      } catch {
+        // ignore — the child may already be gone
+      }
+    }
+  }
+
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+  //  SUITE-LIVENESS01)
+  //
+  // Detach residual Socket/Pipe handles. The
+  // shared helper from `_writer_teardown.ts` does
+  // this in one place so every test FILE that
+  // reaches the same situation can adopt it
+  // without re-implementing the unref loop. See
+  // `detachResidualHandles()` for the law.
+  detachResidualHandles();
 });
 
 // --------------------------------------------------------------------

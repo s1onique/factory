@@ -59,6 +59,7 @@ import {
   sweepAndProve,
   type LiveFixtureEntry,
 } from "../ledger-writer/_live_registry.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 // ---------------------------------------------------------------------------
 // Strict qualification env (mirrors witness-start-live.test.ts shape)
@@ -369,6 +370,12 @@ after(async () => {
         EXPECTED_SHA + " observed=" + OBSERVED_SHA,
     );
   }
+
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 void assert;

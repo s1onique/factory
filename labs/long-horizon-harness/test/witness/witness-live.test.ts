@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { JsonlLedger } from "../../src/evidence/jsonl-ledger.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_WITNESS_LIVE === "1";
 const WITNESS_LIVE_REQUIRED = 13;
@@ -550,6 +551,11 @@ after(async () => {
   if (witnessResidue > 0 && STRICT) {
     throw new Error(`witness residue=${witnessResidue}`);
   }
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 test("WITNESS_LIVE_REPORT strict lane matrix", () => {

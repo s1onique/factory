@@ -32,6 +32,7 @@ import {
   type AwaitWitnessReadyResult,
   type ExpectedBinding,
 } from "./witness-start-readiness.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 import type {
   WitnessBootstrapOutput,
   WitnessExitInfo,
@@ -476,6 +477,12 @@ after(async () => {
       EXPECTED_SHA + " observed=" + OBSERVED_SHA,
     );
   }
+
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 void assert;

@@ -57,11 +57,75 @@ files.sort();
 // Use --import tsx so .ts files load in-process; we DO NOT
 // use --test-force-exit. A test runner that refuses to exit
 // is itself evidence; we keep that signal.
+//
+// FACTORY_TEST_RUNNER_TRACE=1 enables bounded runner
+// observability. Default behavior is unchanged when unset.
+// The runner invokes a SINGLE global `node --test` against
+// all discovered files; per-file completion is NOT visible
+// from the parent via stdio:inherit. We therefore emit
+// truthful batch/process-level observations only — never
+// claim stronger semantics than observed.
+//
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01) `--test-timeout=60000` is a per-test bound,
+// NOT a per-file bound. It bounds how long an individual
+// test inside a FILE may run before being declared a
+// failure; it does NOT bound how long a FILE may stay
+// alive past all its tests (which is what the residue
+// hang is). The real fix is at the ownership site of each
+// test FILE that owns long-lived children: that FILE's
+// `after()` hook MUST call `detachResidualHandles()` to
+// detach any Socket/Pipe handles from the event loop.
+// This runner does NOT add `--test-timeout` because doing
+// so would not change the per-file hang behaviour — the
+// timeout only fires between tests, not during the
+// residual stream cleanup. We leave `--test-timeout` at
+// Node 26's default (`0` = no per-test timeout) so each
+// test FILE's own domain contract remains the authority.
+// The runner's bounded runtime is enforced by the
+// caller (e.g. `timeout --signal=KILL 600 npm test`).
+const TRACE = process.env.FACTORY_TEST_RUNNER_TRACE === "1";
+
+function trace(record) {
+  if (!TRACE) return;
+  try {
+    process.stderr.write(JSON.stringify(record) + "\n");
+  } catch {
+    // never let tracing crash the runner
+  }
+}
+
+const runStart = Date.now();
+trace({
+  kind: "test_runner_start",
+  pid: process.pid,
+  file_count: files.length,
+});
+
 const args = [
   "--import", "tsx",
   "--test",
   "--test-reporter=spec",
   ...files,
 ];
+trace({
+  kind: "test_batch_start",
+  id: "all-tests",
+  files: files.length,
+});
+
 const child = spawn(process.execPath, args, { stdio: "inherit" });
-child.on("exit", (code) => process.exit(code ?? 1));
+child.on("exit", (code) => {
+  trace({
+    kind: "test_batch_finish",
+    id: "all-tests",
+    rc: code ?? 1,
+    elapsed_ms: Date.now() - runStart,
+  });
+  trace({
+    kind: "test_runner_finish",
+    rc: code ?? 1,
+    elapsed_ms: Date.now() - runStart,
+  });
+  process.exit(code ?? 1);
+});

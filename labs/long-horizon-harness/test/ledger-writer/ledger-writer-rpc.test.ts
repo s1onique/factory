@@ -24,6 +24,7 @@ import {
 } from "../../src/ledger-writer/ledger-writer-client.js";
 import { canonicalContentHash } from "../../src/ledger-writer/ledger-writer-canonicalize.js";
 import type { WriterEvent } from "../../src/ledger-writer/ledger-writer-protocol.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 function mkTmp(): Promise<string> {
   // The UDS path budget is 100 bytes. The harness root is
@@ -129,6 +130,11 @@ after(async () => {
   if (tmpDir) {
     try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch { /* */ }
   }
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 function live(name: string, body: () => Promise<void>): void {

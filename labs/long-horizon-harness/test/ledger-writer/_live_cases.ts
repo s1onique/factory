@@ -1145,6 +1145,7 @@ const LWQ14: LiveCase = {
   title: "SOCK05 WHO timeout → unknown_socket",
   async run() {
     const tmp = await fs.mkdtemp(path.join(tmpBase(), ".lwl-sock05-"));
+    let c: import("node:child_process").ChildProcess | null = null;
     try {
       const sp = path.join(tmp, "s");
       // Listener that accepts but never replies.
@@ -1152,15 +1153,16 @@ const LWQ14: LiveCase = {
         `const net = require("node:net");` +
         `const s = net.createServer(() => {});` +
         `s.listen(${JSON.stringify(sp)}, () => process.send && process.send("ready"));`;
-      const c = spawn(process.execPath, ["-e", script], {
+      c = spawn(process.execPath, ["-e", script], {
         stdio: ["ignore", "ignore", "ignore", "ipc"],
       });
       registerHelperSpawn({ child: c, note: `lwq14 listener ${sp}` });
+      const helper14 = c;
       await new Promise<void>((resolve) => {
-        c.on("message", (msg: string) => {
+        helper14.on("message", (msg: string) => {
           if (msg === "ready") resolve();
         });
-        setTimeout(resolve, 500);
+        setTimeout(() => resolve(), 500);
       });
       const probe = await probeSocketPath(sp);
       assert.equal(probe.ok, true);
@@ -1172,6 +1174,24 @@ const LWQ14: LiveCase = {
       // propagates so a deadline-expiry case is a
       // FAIL, not a silent green.
       await terminateHelperAndAwaitClose(c);
+    } catch (e: unknown) {
+      // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+      //  SUITE-LIVENESS01)
+      //
+      // On a sandboxed host, `terminateHelperAndAwaitClose`
+      // rejects with EPERM/timeout — the helper listener
+      // survives. Its IPC channel + any open handles
+      // would otherwise pin the test FILE's event loop
+      // forever. Detach the child BEFORE the throw
+      // propagates so the FILE can exit cleanly.
+      if (c !== null) {
+        try {
+          c.unref();
+        } catch {
+          // ignore
+        }
+      }
+      throw e;
     } finally {
       await proveUnlink(tmp);
     }
@@ -1183,6 +1203,7 @@ const LWQ15: LiveCase = {
   title: "SOCK06 malformed WHO → unknown_socket",
   async run() {
     const tmp = await fs.mkdtemp(path.join(tmpBase(), ".lwl-sock06-"));
+    let c: import("node:child_process").ChildProcess | null = null;
     try {
       const sp = path.join(tmp, "s");
       // Listener that replies with a malformed envelope.
@@ -1198,15 +1219,16 @@ const LWQ15: LiveCase = {
         `  });` +
         `});` +
         `s.listen(${JSON.stringify(sp)}, () => process.send && process.send("ready"));`;
-      const c = spawn(process.execPath, ["-e", script], {
+      c = spawn(process.execPath, ["-e", script], {
         stdio: ["ignore", "ignore", "ignore", "ipc"],
       });
       registerHelperSpawn({ child: c, note: `lwq15 listener ${sp}` });
+      const helper15 = c;
       await new Promise<void>((resolve) => {
-        c.on("message", (msg: string) => {
+        helper15.on("message", (msg: string) => {
           if (msg === "ready") resolve();
         });
-        setTimeout(resolve, 500);
+        setTimeout(() => resolve(), 500);
       });
       const probe = await probeSocketPath(sp);
       assert.equal(probe.ok, true);
@@ -1218,6 +1240,24 @@ const LWQ15: LiveCase = {
       // propagates so a deadline-expiry case is a
       // FAIL, not a silent green.
       await terminateHelperAndAwaitClose(c);
+    } catch (e: unknown) {
+      // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+      //  SUITE-LIVENESS01)
+      //
+      // On a sandboxed host, `terminateHelperAndAwaitClose`
+      // rejects with EPERM/timeout — the helper listener
+      // survives. Its IPC channel + any open handles
+      // would otherwise pin the test FILE's event loop
+      // forever. Detach the child BEFORE the throw
+      // propagates so the FILE can exit cleanly.
+      if (c !== null) {
+        try {
+          c.unref();
+        } catch {
+          // ignore
+        }
+      }
+      throw e;
     } finally {
       await proveUnlink(tmp);
     }

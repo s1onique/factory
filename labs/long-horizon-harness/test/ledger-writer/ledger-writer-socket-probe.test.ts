@@ -25,7 +25,7 @@
  * AsyncHooks-on-uds bug does not fire).
  */
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
@@ -33,6 +33,7 @@ import { spawn } from "node:child_process";
 
 import { probeSocketPath } from "../../src/ledger-writer/ledger-writer-socket-probe.js";
 import { terminateHelperAndAwaitClose } from "./_live_cases.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 function mkTmp(): Promise<string> {
   // Use TMPDIR (sandbox) when present to fit the UDS
@@ -617,4 +618,12 @@ test("SOCK06E: helper termination observes close boundary + endpoint no longer a
     }
     await rmTmp(tmp);
   }
+});
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01) Detach residual Socket/Pipe handles
+// so the test FILE can exit cleanly. See
+// `_liveness_helpers.ts` for the law.
+after(() => {
+  detachResidualHandles();
 });

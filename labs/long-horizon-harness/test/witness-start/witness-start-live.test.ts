@@ -45,6 +45,7 @@ import {
   unregisterLiveFixture,
   type LiveFixtureEntry,
 } from "../ledger-writer/_live_registry.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_WITNESS_START_LIVE === "1";
 const REQUIRED = 3;
@@ -652,6 +653,12 @@ after(async () => {
         "; residue=" + residue,
     );
   }
+
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 void assert;

@@ -249,3 +249,194 @@ export async function terminateHelperAndAwaitTyped(
     void killResult; // captured for diagnostics
   });
 }
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01)
+//
+// When `terminateHelperAndAwaitTyped` settles with a
+// non-`closed` outcome, the kernel did not deliver
+// `'close'` — the child remains alive in the kernel.
+// On a sandboxed host (EPERM-on-kill), this is the
+// expected outcome for the writer-helper teardown
+// primitive.
+//
+// Per the lifecycle ownership law
+// ("the component that acquires a live resource owns
+// the obligation to observe and complete its lifecycle
+// boundary"), the parent test FILE that spawned the
+// writer is responsible for the child. But the test
+// FILE's process lifecycle is separate from the
+// child process's lifecycle — once the test FILE has
+// finished running assertions, it MUST be able to
+// exit cleanly.
+//
+// Three file descriptors may keep the parent's event
+// loop alive:
+//
+//   1. The child's IPC channel (if Node's child
+//      process was spawned with `stdio` mode that
+//      establishes one).
+//   2. The child's stdout pipe.
+//   3. The child's stderr pipe.
+//
+// `child.unref()` detaches the IPC channel (1).
+// To detach (2) and (3) we must `unref()` each of
+// the child's stdio streams. Without this, even
+// after `kill()` the parent's event loop stays alive
+// because Node treats the open pipe FDs as
+// "active handles" and the event loop only exits
+// when no active handles remain.
+//
+// Calling this on a non-closed outcome detaches all
+// three. The child process itself is NOT terminated —
+// it remains alive in `ps` (visible as test-host
+// residue) — but the parent test FILE no longer waits
+// for it, so the runner can move on to the next test
+// file. This is the canonical Node.js seam for
+// "this child exists but the parent does not own its
+// lifecycle on behalf of the child".
+//
+// `detachUnreachableChild` is called ONLY for
+// non-closed outcomes. For `closed`, the child has
+// already ended and the IPC channel is gone — no need
+// to unref. This preserves the WSTOP contract that
+// `closed` is the ONLY path that licenses releasing
+// the writer_child registry entry.
+export function detachUnreachableChild(child: ChildProcess): void {
+  // (1) IPC channel.
+  try {
+    child.unref();
+  } catch {
+    // child may already be exited / disconnected;
+    // unref() is idempotent and safe to ignore.
+  }
+  // (2,3) stdio pipes — drain and detach. We do NOT
+  // destroy the streams (some callers may still
+  // consume them) but we DO unref them so the
+  // parent's event loop is not pinned. If the
+  // caller had previously attached a `'data'`
+  // listener, this still preserves that subscription.
+  //
+  // The TypeScript signatures for `Readable`/`Writable`
+  // do NOT include `unref()`, but the underlying
+  // libuv handles DO have it at runtime. We cast
+  // through a narrow helper to keep the type-checker
+  // happy without lying about the surface.
+  tryUnrefStream(child.stdout);
+  tryUnrefStream(child.stderr);
+  tryUnrefStream(child.stdin);
+}
+
+function tryUnrefStream(
+  s: NodeJS.ReadableStream | NodeJS.WritableStream | null | undefined,
+): void {
+  try {
+    (s as { unref?: () => void } | null)?.unref?.();
+  } catch {
+    // ignore — stream may already be closed
+  }
+}
+
+/**
+ * (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+ *  LIVENESS01)
+ *
+ * Test FILE post-suite teardown. Iterates the
+ * active Node handles and `unref()`s any `Socket`
+ * and `Pipe` handles that survived the test run.
+ *
+ * Why this is needed:
+ *
+ *   On a sandboxed host, several test FILES spawn
+ *   writer children (via `startLedgerWriter`) whose
+ *   stdio is `"pipe"`. After `terminateHelperAndAwaitTyped`
+ *   resolves with a non-`closed` outcome and
+ *   `detachUnreachableChild` is called, the per-child
+ *   `child.stdout` / `child.stderr` stream handles
+ *   are detached from the parent's event loop, but
+ *   the corresponding parent-side handles (the
+ *   `Pipe` objects backing those streams in the
+ *   parent process) sometimes remain as passive
+ *   `Pipe` handles. Likewise, UDS-client `Socket`
+ *   handles created during `appendToLedgerWriter` /
+ *   `pingLedgerWriter` / `whoAreYouLedgerWriter`
+ *   remain after the socket's `destroy()` resolves.
+ *   Node's test runner keeps the test FILE alive
+ *   while these handles are present, even after all
+ *   tests + the `after()` hook have completed.
+ *
+ *   Calling `unref()` on each residual Socket/Pipe
+ *   handle detaches it from the parent's event loop
+ *   without destroying the underlying resource.
+ *   The handle remains in `process._getActiveHandles()`
+ *   but does NOT keep the loop alive. This is the
+ *   canonical Node.js seam for "I am finished with
+ *   this resource; do not wait for me to clean it up".
+ *
+ * Law:
+ *
+ *   This MUST be called only when the test FILE is
+ *   ready to exit. It does NOT destroy or close the
+ *   handles — the OS reclaims them when the process
+ *   exits. It only stops the Node event loop from
+ *   waiting for them.
+ *
+ *   It touches only `Socket` and `Pipe` handles.
+ *   Node's two handle kinds for network / FD
+ *   resources. It never touches `Timer`,
+ *   `Microtask`, or any other framework internals.
+ *   The unref is idempotent and safe.
+ *
+ *   It MUST NOT be called for sockets/pipes that
+ *   the test logic is still actively using. The
+ *   correct call site is the END of the test FILE's
+ *   `after()` hook — after all assertions have
+ *   completed, after the residue oracle has run,
+ *   and after all owned children have been torn
+ *   down to the maximum extent possible on the
+ *   host (which on a sandboxed kernel may be only
+ *   `unref()`, never `kill()`).
+ */
+export function detachResidualHandles(): void {
+  const handles = (process as unknown as {
+    _getActiveHandles?: () => ReadonlyArray<unknown>;
+  })._getActiveHandles?.();
+  if (!handles) return;
+  for (const h of handles) {
+    const ctor = (h as { constructor?: { name?: string } })?.constructor?.name;
+    // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
+    //  SUITE-LIVENESS01)
+    //
+    // The list of handle kinds we detach:
+    //
+    //   Socket     — UDS-client sockets created during
+    //                ledger-writer RPC calls (ping / append /
+    //                whoAreYou). After `socket.destroy()` the
+    //                underlying FD may keep a passive handle
+    //                on the test FILE's event loop.
+    //
+    //   Pipe       — stdio pipes of orphaned writer children
+    //                whose IPC channel was already detached
+    //                by `child.unref()` in
+    //                `detachUnreachableChild()`.
+    //
+    //   ChildProcess — writer children that the kernel
+    //                  refused to kill (EPERM). Their IPC
+    //                  channel has already been detached by
+    //                  `detachUnreachableChild()` — but the
+    //                  ChildProcess handle itself can remain
+    //                  as a passive handle. Unref'ing it
+    //                  detaches the LAST residual that keeps
+    //                  the test FILE alive.
+    //
+    // We deliberately do NOT detach Timer / Microtask /
+    // Immediate handles — those are framework internals.
+    if (ctor === "Socket" || ctor === "Pipe" || ctor === "ChildProcess") {
+      try {
+        (h as { unref?: () => void }).unref?.();
+      } catch {
+        // ignore — the handle may already be closed
+      }
+    }
+  }
+}

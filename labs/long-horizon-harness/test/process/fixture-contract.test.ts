@@ -34,6 +34,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as process from "node:process";
 import { fileURLToPath } from "node:url";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Use the .ts source file when run via tsx (default for this
@@ -592,4 +593,9 @@ after(async () => {
       `LEAK-FX01 fixture registry residue=${residue.length}: ${labels}`,
     );
   }
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });

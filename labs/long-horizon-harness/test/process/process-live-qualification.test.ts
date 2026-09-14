@@ -29,6 +29,7 @@ import {
   realProbeNegPgid,
   REAL_GROUP_CONTROL,
 } from "./helpers.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_PROCESS_LIVE === "1";
 const spawner = nodeSpawnPort();
@@ -201,6 +202,11 @@ after(async () => {
         `(SIGKILL sent does NOT prove absence; only ESRCH does)`,
     );
   }
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe handles
+  // so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 // --------------------------------------------------------------------

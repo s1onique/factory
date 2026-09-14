@@ -36,6 +36,7 @@ import {
   pingLedgerWriter,
 } from "../../src/ledger-writer/ledger-writer-client.js";
 import type { WriterEvent } from "../../src/ledger-writer/ledger-writer-protocol.js";
+import { detachResidualHandles } from "../_liveness_helpers.js";
 
 /**
  * Detect whether this host can spawn a Node child that
@@ -193,6 +194,11 @@ after(async () => {
       // best-effort
     }
   }
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01) Detach residual Socket/Pipe/ChildProcess
+  // handles so the test FILE can exit cleanly. See
+  // `_liveness_helpers.ts` for the law.
+  detachResidualHandles();
 });
 
 /**
