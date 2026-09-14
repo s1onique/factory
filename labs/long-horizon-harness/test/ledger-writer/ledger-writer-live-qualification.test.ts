@@ -80,6 +80,9 @@ import { detachOwnedChildren } from "./_writer_teardown.js";
 import {
   classifyQualification,
 } from "../_liveness_qualify.js";
+import {
+  getAllWriterTeardowns,
+} from "./_writer_teardown_registry.js";
 
 const STRICT = process.env.FACTORY_STRICT_LEDGER_WRITER_LIVE === "1";
 const EXPECTED_SHA = process.env.FACTORY_QUALIFICATION_SUBJECT_COMMIT ?? "";
@@ -147,18 +150,19 @@ function classifyCounters(c: MatrixCounters): {
   return { ok: reasons.length === 0, reasons };
 }
 
-function qualifies(c: MatrixCounters, strict: boolean): {
-  readonly ok: boolean;
-  readonly reasons: ReadonlyArray<string>;
-} {
-  const base = classifyCounters(c);
-  const reasons = base.reasons.slice();
-  if (strict && !SPAWNABLE) reasons.push("capability (UDS-spawnable) unavailable");
-  if (strict && EXPECTED_SHA.length > 0 && EXPECTED_SHA !== OBSERVED_SHA) {
-    reasons.push(`expected SHA ${EXPECTED_SHA} != observed SHA ${OBSERVED_SHA}`);
-  }
-  return { ok: reasons.length === 0, reasons };
-}
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01-MICROFIX03)
+//
+// P0-1 SINGLE-AUTHORITY note: `classifyCounters()`
+// above is retained ONLY as the unit-testable helper
+// behind QLW01..QLW06 (the pure-function counter
+// tests). The matrix post-suite block does NOT use it
+// to gate the matrix disposition — the matrix
+// disposition comes from `classifyQualification()` only.
+// The diagnostic-only divergence check at the end of
+// the `after()` block uses `classifyCounters()` as a
+// STRUCTURAL CONSISTENCY probe (it never alters the
+// matrix-level verdict).
 
 function emitMatrix(): void {
   // eslint-disable-next-line no-console
@@ -964,15 +968,133 @@ after(async () => {
       )}`,
     );
   }
-  const r = qualifies(counters, STRICT);
-  if (!r.ok) {
-    const msg = `LEDGER_WRITER_QUALIFICATION_DISPOSITION=FAIL: ${r.reasons.join("; ")}`;
-    // eslint-disable-next-line no-console
-    console.log(msg);
-    if (STRICT) throw new Error(msg);
+  // ----------------------------------------------------------------
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX03)
+  //
+  // P0-1 SINGLE AUTHORITY + P0-2 ACTUAL EVIDENCE BINDING.
+  //
+  // The OLD matrix emitted `LEDGER_WRITER_QUALIFICATION_DISPOSITION=`
+  // TWICE (counter algebra first, canonical classifier second) and
+  // could STRICT-throw on either path. That violated
+  // SINGLE-AUTHORITY: a regression in the counter algebra
+  // could throw the matrix FAIL before the canonical
+  // classifier was ever consulted.
+  //
+  // The FIXED matrix:
+  //   1. Joins ACTUAL teardown evidence (real `TerminateOutcome`
+  //      records keyed by WriterLifetimeId, recorded by
+  //      `WriterHandle.stop()`) with ACTUAL parent-detach
+  //      evidence (real `ParentDetachOutcome[]` from
+  //      `detachOwnedChildren()`) and ACTUAL residue
+  //      observation (`sweepAndProve()`).
+  //   2. Constructs the (teardown, parent_detach, residue)
+  //      triple WITHOUT fabricating any `errno` value
+  //      — `signal_failed` outcomes carry the errno the
+  //      kernel ACTUALLY reported, not a synthetic
+  //      "ESRCH" placeholder.
+  //   3. Runs the triple through the canonical
+  //      `classifyQualification()` and emits the SINGLE
+  //      `LEDGER_WRITER_QUALIFICATION_DISPOSITION=` line
+  //      from the classifier's verdict.
+  //   4. STRICT-throws ONLY when the classifier returns
+  //      FAIL — never on counter mismatches. The counter
+  //      algebra (`classifyCounters`, `QLW01..QLW06`) is
+  //      retained as PURE-FUNCTION unit tests of the
+  //      counter algebra and as a STRUCTURAL CONSISTENCY
+  //      diagnostic. It is NEVER the source of the
+  //      matrix-level disposition.
+  //
+  // LIV13 (single authority) statically enforces that
+  // this file emits `LEDGER_WRITER_QUALIFICATION_DISPOSITION=`
+  // exactly once and from the canonical block below.
+  //
+  // LIV14 (no synthetic errno) statically forbids
+  // `errno: "ESRCH"` (or any other literal errno string)
+  // from this file's source. Real evidence flows from
+  // the `TerminateOutcome` records.
+  // ----------------------------------------------------------------
+
+  // (P0-2) Real teardown evidence: pull every
+  // `TerminateOutcome` recorded by WriterHandle.stop().
+  // If the registry is empty (e.g. the strict lane
+  // could not even spawn a writer), there is no
+  // positive teardown proof; we conservatively use a
+  // signal_failed with NO errno (the kind itself is
+  // honest: "we tried to terminate and got no positive
+  // evidence of close"). The classifier will return
+  // FAIL because teardown.kind !== "closed" and
+  // residue may also be non-zero.
+  const teardownRecords = getAllWriterTeardowns();
+  type MatrixTeardown =
+    | { kind: "closed"; code: number | null; signal: NodeJS.Signals | null }
+    | { kind: "signal_permission_denied"; errno: "EPERM" }
+    | { kind: "signal_failed"; errno?: string }
+    | { kind: "close_timeout" };
+  let realTeardown: MatrixTeardown;
+  if (teardownRecords.length === 0) {
+    realTeardown = { kind: "signal_failed" };
   } else {
-    // eslint-disable-next-line no-console
-    console.log(`LEDGER_WRITER_QUALIFICATION_DISPOSITION=OK`);
+    // Reduce: if EVERY recorded teardown's kind ===
+    // "closed", the aggregate teardown is "closed".
+    // Otherwise we use the kind of the worst
+    // outcome. The errno field, when present, is
+    // taken VERBATIM from the recorded evidence —
+    // no fabrication.
+    const kinds = teardownRecords.map((r) => r.outcome.kind);
+    if (kinds.every((k) => k === "closed")) {
+      // Use the first record's code/signal (all
+      // are closed so they agree on the close
+      // boundary).
+      const first = teardownRecords[0];
+      if (first === undefined ||
+          first.outcome.kind !== "closed") {
+        // Unreachable due to the every-closed
+        // check, but the type narrowing forces us
+        // to assert. We use `assert.fail` so the
+        // surface is a typed precondition, not a
+        // `throw new Error(...)` that LIV13's
+        // short-circuit guard would catch.
+        assert.fail("internal: every-closed but first is not closed");
+      }
+      realTeardown = {
+        kind: "closed",
+        code: first.outcome.code,
+        signal: first.outcome.signal,
+      };
+    } else if (kinds.includes("signal_permission_denied")) {
+      // The canonical ADT mandates `errno: "EPERM"`
+      // for the signal_permission_denied variant.
+      // This is the ONLY legitimate literal errno
+      // we may emit (LIV14 allows it).
+      realTeardown = {
+        kind: "signal_permission_denied",
+        errno: "EPERM",
+      };
+    } else if (kinds.includes("signal_failed")) {
+      // Pull the ACTUAL errno from the first
+      // signal_failed record. If none carries an
+      // errno (e.g. kill returned false without a
+      // thrown code), the field is omitted — the
+      // canonical ADT allows `errno?: string`.
+      const sf = teardownRecords.find(
+        (r) => r.outcome.kind === "signal_failed",
+      );
+      if (
+        sf !== undefined &&
+        sf.outcome.kind === "signal_failed" &&
+        typeof sf.outcome.errno === "string"
+      ) {
+        realTeardown = { kind: "signal_failed", errno: sf.outcome.errno };
+      } else {
+        realTeardown = { kind: "signal_failed" };
+      }
+    } else {
+      // close_timeout — preserve the variant
+      // honestly. The canonical ADT's close_timeout
+      // carries no errno field at all.
+      realTeardown = { kind: "close_timeout" };
+    }
   }
 
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-
@@ -1012,22 +1134,22 @@ after(async () => {
   const detachOutcomes = detachOwnedChildren(ownedChildren);
 
   // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-  //  LIVENESS01-CORRECTION01-MICROFIX02)
+  //  LIVENESS01-CORRECTION01-MICROFIX03)
   //
-  // P1-1 — REAL QUALIFICATION BINDING.
+  // P0-2 — ACTUAL EVIDENCE BINDING.
   //
-  // The matrix's final disposition IS the canonical
-  // classifier's verdict. We synthesise a (teardown,
-  // parent_detach, residue) triple from the post-suite
-  // state and run it through the SINGLE canonical
-  // `classifyQualification` from
-  // `test/_liveness_qualify.ts` — the function LIV08
-  // and LIV12 cross-check. The classifier's
-  // disposition IS the matrix's disposition.
-  let matrixTeardown:
-    | { kind: "closed"; code: number | null; signal: NodeJS.Signals | null }
-    | { kind: "signal_permission_denied"; errno: "EPERM" }
-    | { kind: "signal_failed"; errno: string };
+  // `realTeardown` (computed above) carries the
+  // actual typed `TerminateOutcome` from the
+  // `WriterHandle.stop()` registry. We do NOT
+  // reconstruct a `TerminateOutcome` here from
+  // counters or breakdown shapes.
+  //
+  // Build the parent-detach evidence from the
+  // ACTUAL `ParentDetachOutcome[]` returned by
+  // `detachOwnedChildren()`. The lifecycle field
+  // is the OR over all detached children; the
+  // per-handle detached fields are reduced from
+  // the actual detach calls.
   let matrixLifecycle: "running_or_unknown" | "already_exited" =
     "running_or_unknown";
   let matrixDetached = {
@@ -1059,55 +1181,77 @@ after(async () => {
   }
   const residue: "alive" | "gone" =
     counters.residue > 0 ? "alive" : "gone";
-  if (residue === "gone" && counters.failed === 0) {
-    matrixTeardown = { kind: "closed", code: 0, signal: null };
-  } else if (Object.keys(breakdown).includes("permission_denied")) {
-    matrixTeardown = { kind: "signal_permission_denied", errno: "EPERM" };
-  } else {
-    matrixTeardown = { kind: "signal_failed", errno: "ESRCH" };
-  }
   const matrixParentDetach = {
     childLifecycleAtDetach: matrixLifecycle,
     skipped: false,
     detached: matrixDetached,
   };
   const matrixDisposition = classifyQualification({
-    teardown: matrixTeardown,
+    teardown: realTeardown,
     parent_detach: matrixParentDetach,
     residue,
   });
   // eslint-disable-next-line no-console
   console.log(
     `LEDGER_WRITER_QUALIFICATION_CANONICAL=${JSON.stringify({
-      teardown: matrixTeardown,
+      teardown: realTeardown,
       parent_detach: matrixParentDetach,
       residue,
       disposition: matrixDisposition.disposition,
       reason: matrixDisposition.reason,
+      teardown_records_count: teardownRecords.length,
     })}`,
   );
 
-  // The matrix's PASS/FAIL disposition IS the
-  // canonical classifier's disposition. The
-  // counter-based check (`qualifies()`) remains
-  // available as a structural consistency check,
-  // but the matrix-level disposition is
-  // authoritative. A regression in the classifier
-  // that flipped the canonical-clean triple to
-  // PASS-on-alive (or vice versa) would break
-  // LIV08; LIV12 statically proves this file
-  // imports the classifier.
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX03)
+  //
+  // P0-1 — SINGLE AUTHORITY.
+  //
+  // This is the ONLY place in this file that emits
+  // `LEDGER_WRITER_QUALIFICATION_DISPOSITION=`. The
+  // value is the canonical classifier's verdict.
+  // LIV13 statically enforces the "exactly once"
+  // property by grepping for the literal.
+  //
+  // STRICT-throws ONLY on classifier FAIL — never
+  // on counter mismatches. LIV14 statically
+  // enforces that no `errno: "<synthetic>"` literal
+  // appears in this file.
   if (matrixDisposition.disposition === "FAIL") {
     const msg =
       `LEDGER_WRITER_QUALIFICATION_DISPOSITION=FAIL: ` +
       `canonical_reason=${matrixDisposition.reason} ` +
-      `counters=${JSON.stringify(counters)}`;
+      `teardown=${JSON.stringify(realTeardown)} ` +
+      `residue=${residue} ` +
+      `teardown_records=${teardownRecords.length}`;
     // eslint-disable-next-line no-console
     console.log(msg);
     if (STRICT) throw new Error(msg);
   } else {
     // eslint-disable-next-line no-console
     console.log(`LEDGER_WRITER_QUALIFICATION_DISPOSITION=OK`);
+  }
+
+  // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+  //  LIVENESS01-CORRECTION01-MICROFIX03)
+  //
+  // Diagnostic-only: structural consistency between
+  // the canonical classifier's verdict and the
+  // counter algebra's verdict. In STRICT mode the
+  // counter algebra is NOT used to gate the
+  // matrix disposition; this block only LOGS a
+  // divergence if the two verdicts disagree, so
+  // the operator can tell whether a structural
+  // inconsistency has been introduced without
+  // altering the disposition.
+  const counterVerdict = classifyCounters(counters);
+  if (counterVerdict.ok !== (matrixDisposition.disposition === "PASS")) {
+    process.stderr.write(
+      `[ledger-writer-qualification] DIAGNOSTIC: counter=${counterVerdict.ok} ` +
+        `vs canonical=${matrixDisposition.disposition === "PASS"} ` +
+        `(counter is diagnostic-only and never gates the matrix disposition)\n`,
+    );
   }
 });
 

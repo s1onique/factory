@@ -1259,6 +1259,152 @@ test("LIV12: strict qualification matrix imports the canonical classifier (real-
   );
 });
 
+// --------------------------------------------------------------------
+// LIV13 — SINGLE-DISPOSITION-AUTHORITY
+//
+// The strict qualification matrix
+// (`ledger-writer-live-qualification.test.ts`) MUST
+// emit `LEDGER_WRITER_QUALIFICATION_DISPOSITION=`
+// at exactly ONE site in executable code, and that
+// site MUST come AFTER the canonical classifier
+// call (so a regression in the counter algebra
+// cannot throw the matrix FAIL before the canonical
+// verdict is consulted).
+//
+// Before MICROFIX03, the matrix emitted the
+// disposition twice: once from the counter
+// algebra (`qualifies(counters, STRICT)`) and once
+// from the canonical classifier. STRICT-throws
+// could fire on EITHER path. That violated the
+// single-authority principle: the canonical
+// classifier was downstream of a different
+// authority that could short-circuit the verdict.
+//
+// LIV13 statically proves:
+//   (a) The string
+//       `LEDGER_WRITER_QUALIFICATION_DISPOSITION=`
+//       appears in EXECUTABLE code (comments
+//       stripped) exactly once OR as a single
+//       if/else split (FAIL branch + OK branch)
+//       under the same canonical classifier call.
+//   (b) The first occurrence is preceded (in
+//       source order) by a call to
+//       `classifyQualification(`, proving the
+//       classifier is the authority.
+//   (c) No `throw new Error(...)` fires in the
+//       after() block BEFORE the
+//       `classifyQualification(` call — counter
+//       algebra must never short-circuit the
+//       canonical verdict.
+// --------------------------------------------------------------------
+test("LIV13: matrix has exactly ONE disposition emitter (single-authority)", async () => {
+  const { readFile, stat } = await import("node:fs/promises");
+  const matrixPath = path.join(
+    HERE,
+    "../test/ledger-writer/ledger-writer-live-qualification.test.ts",
+  );
+  await stat(matrixPath);
+  const src = await readFile(matrixPath, "utf8");
+  const codeOnly = src
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  // (a) Exactly 1 or 2 emissions — the if/else
+  // split for FAIL/OK is allowed since both
+  // branches share the same canonical
+  // classifier verdict.
+  const occurrences = (codeOnly.match(
+    /LEDGER_WRITER_QUALIFICATION_DISPOSITION\s*=/g,
+  ) ?? []).length;
+  assert.ok(
+    occurrences >= 1 && occurrences <= 2,
+    `LIV13: matrix MUST emit LEDGER_WRITER_QUALIFICATION_DISPOSITION= at exactly one or two sites (FAIL + OK branches); got ${occurrences}`,
+  );
+  // (b) The first emission MUST be downstream
+  // (in source order) of `classifyQualification(`.
+  const classifierIdx = codeOnly.indexOf("classifyQualification(");
+  assert.ok(
+    classifierIdx >= 0,
+    "LIV13: classifyQualification call site must be present in the matrix",
+  );
+  const firstEmissionIdx = codeOnly.indexOf(
+    "LEDGER_WRITER_QUALIFICATION_DISPOSITION=",
+  );
+  assert.ok(
+    firstEmissionIdx > classifierIdx,
+    "LIV13: first LEDGER_WRITER_QUALIFICATION_DISPOSITION= emission MUST come AFTER classifyQualification( call (single-authority)",
+  );
+  // (c) No `throw new Error(...)` between
+  // `after(async` and the classifier call.
+  const afterIdx = codeOnly.indexOf("after(async");
+  const matrixBlock = codeOnly.slice(
+    afterIdx,
+    classifierIdx,
+  );
+  assert.equal(
+    /throw\s+new\s+Error/.test(matrixBlock),
+    false,
+    "LIV13: no `throw new Error(...)` MUST occur in the after() block BEFORE the classifyQualification() call (counter algebra must never short-circuit)",
+  );
+});
+
+// --------------------------------------------------------------------
+// LIV14 — NO-SYNTHETIC-ERRNO
+//
+// The matrix MUST NOT fabricate errno values from
+// counter shapes. Specifically: no literal
+// `errno: "ESRCH"` (or other placeholder errnos
+// that the kernel never actually returned).
+// Real errno evidence flows from the
+// `TerminateOutcome` records keyed by
+// WriterLifetimeId in `_writer_teardown_registry.ts`.
+//
+// `errno: "EPERM"` IS allowed in the matrix
+// because that literal IS the typed ADT marker
+// for the `signal_permission_denied` variant in
+// `_writer_teardown.ts:TerminateOutcome`. It is
+// the canonical kernel-meaningful errno for "we
+// tried to kill and were refused". Anything else
+// (synthesised `"ESRCH"`, invented `"UNKNOWN"`,
+// borrowed `"CLOSE_TIMEOUT"` etc.) IS
+// fabrication and is forbidden.
+//
+// LIV14 statically forbids those placeholder
+// patterns in the matrix's executable code.
+//
+// Additionally: the matrix MUST call
+// `getAllWriterTeardowns()` to pull real evidence.
+// A regression that removes the registry read
+// would be caught.
+// --------------------------------------------------------------------
+test("LIV14: matrix does not fabricate synthetic errno values (actual-evidence binding)", async () => {
+  const { readFile, stat } = await import("node:fs/promises");
+  const matrixPath = path.join(
+    HERE,
+    "../test/ledger-writer/ledger-writer-live-qualification.test.ts",
+  );
+  await stat(matrixPath);
+  const src = await readFile(matrixPath, "utf8");
+  const codeOnly = src
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const forbidden = [
+    /errno:\s*["']ESRCH["']/,
+    /errno:\s*["']UNKNOWN["']/,
+    /errno:\s*["']CLOSE_TIMEOUT["']/,
+  ];
+  for (const re of forbidden) {
+    assert.equal(
+      re.test(codeOnly),
+      false,
+      `LIV14: matrix MUST NOT contain literal placeholder errno values (fabrication). Matched: ${re}`,
+    );
+  }
+  assert.ok(
+    /getAllWriterTeardowns/.test(codeOnly),
+    "LIV14: matrix MUST call getAllWriterTeardowns() to pull actual TerminateOutcome evidence (no synthetic teardown reconstruction)",
+  );
+});
+
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
 //  LIVENESS01-CORRECTION01) The LIV oracle itself
 // spawns orphan children for the LIV07/LIV08/LIV09

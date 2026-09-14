@@ -112,9 +112,11 @@ export type TerminateOutcome =
  *
  * These two outcomes are orthogonal dimensions.
  * A `signal_permission_denied` teardown outcome
- * can coexist with a `completed` parent-detach
- * outcome — the parent has detached its view, the
- * kernel has not terminated the child.
+ * can coexist with a parent-detach outcome whose
+ * `childLifecycleAtDetach === "running_or_unknown"`
+ * (and whose per-handle `detached` evidence is
+ * populated) — the parent has detached its view,
+ * the kernel has not terminated the child.
  *
  * ─────────────────────────────────────────────────────
  * MICROFIX02 P1-2 — ORTHOGONAL EXIT VS DETACH
@@ -449,11 +451,13 @@ export async function terminateHelperAndAwaitTyped(
 //     child remains alive in the kernel.
 //
 //   - This does NOT imply successful termination. A
-//     `parent_detach = completed` outcome alongside
-//     `teardown = signal_permission_denied` is the
-//     exact shape that yields `residue = alive` and
-//     STILL fails qualification. We never repurpose
-//     this primitive as cleanup proof.
+//     parent-detach outcome whose
+//     `childLifecycleAtDetach === "running_or_unknown"`
+//     alongside `teardown = signal_permission_denied`
+//     is the exact shape that yields
+//     `residue = alive` and STILL fails
+//     qualification. We never repurpose this
+//     primitive as cleanup proof.
 //
 // Calling this on a non-closed outcome detaches all
 // three FD views. The child process itself is NOT

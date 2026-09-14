@@ -36,8 +36,9 @@
  *
  *   The return value is a `ParentDetachOutcome[]`
  *   — one outcome per passed-in child. A non-closed
- *   teardown outcome paired with a
- *   `parent_detach = completed` outcome yields the
+ *   teardown outcome paired with an orthogonal
+ *   `childLifecycleAtDetach` of `"running_or_unknown"`
+ *   and per-handle detached evidence yields the
  *   exact `residue = alive` shape that STILL fails
  *   qualification (per LIV08). The two diagnostic
  *   dimensions are orthogonal: parent-liveness is

@@ -176,4 +176,3 @@ export function isQualificationPass(args: {
 }): boolean {
   return classifyQualification(args).disposition === "PASS";
 }
-
