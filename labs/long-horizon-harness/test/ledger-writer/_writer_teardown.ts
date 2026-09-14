@@ -310,30 +310,35 @@ export function detachUnreachableChild(child: ChildProcess): void {
     // child may already be exited / disconnected;
     // unref() is idempotent and safe to ignore.
   }
-  // (2,3) stdio pipes — drain and detach. We do NOT
-  // destroy the streams (some callers may still
-  // consume them) but we DO unref them so the
-  // parent's event loop is not pinned. If the
-  // caller had previously attached a `'data'`
-  // listener, this still preserves that subscription.
+  // (2,3) stdio pipes — drain AND destroy. On a
+  // sandboxed host where the kernel refuses to kill
+  // the writer child, the child remains alive in `ps`
+  // but the test FILE has nothing more to read from /
+  // write to it. We close the parent's view of the
+  // stdio pipes so the parent's event loop is no
+  // longer pinned. The child itself is unaffected
+  // (it does not own these FDs — the parent does).
   //
-  // The TypeScript signatures for `Readable`/`Writable`
-  // do NOT include `unref()`, but the underlying
-  // libuv handles DO have it at runtime. We cast
-  // through a narrow helper to keep the type-checker
-  // happy without lying about the surface.
-  tryUnrefStream(child.stdout);
-  tryUnrefStream(child.stderr);
-  tryUnrefStream(child.stdin);
+  // We BOTH `destroy()` (close the FD in the parent)
+  // and `unref()` (decrement the libuv refcount in
+  // case the FD handle survives `destroy()`).
+  tryDestroyAndUnref(child.stdout);
+  tryDestroyAndUnref(child.stderr);
+  tryDestroyAndUnref(child.stdin);
 }
 
-function tryUnrefStream(
+function tryDestroyAndUnref(
   s: NodeJS.ReadableStream | NodeJS.WritableStream | null | undefined,
 ): void {
   try {
-    (s as { unref?: () => void } | null)?.unref?.();
+    (s as { destroy?: () => void } | null)?.destroy?.();
   } catch {
     // ignore — stream may already be closed
+  }
+  try {
+    (s as { unref?: () => void } | null)?.unref?.();
+  } catch {
+    // ignore
   }
 }
 
