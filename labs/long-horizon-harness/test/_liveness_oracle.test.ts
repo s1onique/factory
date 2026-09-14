@@ -1608,20 +1608,55 @@ test("LIV15: qualifier classifies cleanup errors from err.code (no evidence-prov
   };
 
   // Find every `catch (NAME) { ... }` block and check
-  // whether the body references classifyCleanupError.
+  // that the synchronous kill() failure path
+  // EITHER:
+  //   (a) directly invokes classifyCleanupError(err)
+  //       (older MF04–MF07 pattern), OR
+  //   (b) delegates to `finalize("error", err)`
+  //       which transitively classifies via
+  //       classifyCleanupError(syncErr) inside
+  //       the settled-guarded branch (MF08+
+  //       pattern — the cleaner one because the
+  //       settled guard governs outcome mutation).
+  // What MUST NOT happen: assigning
+  // `state.cleanupOutcome = <hardcoded value>`
+  // inside the catch BEFORE finalize(). That
+  // is the evidence-provenance inversion the
+  // prior oracle defended against.
   const catchOpenings = [...src.matchAll(/\}\s*catch\s*\(\s*(\w+)\s*\)\s*\{/g)];
-  let catchUsesClassifier = false;
+  let catchUsesClassifierOrFinalize = false;
+  let catchHardcodesOutcome = false;
   for (const m of catchOpenings) {
     const openIdx = m.index + m[0].length - 1; // position of `{`
     const block = extractBalancedBlock(src, openIdx);
-    if (block && /classifyCleanupError\s*\(/.test(block.body)) {
-      catchUsesClassifier = true;
-      break;
+    if (!block) continue;
+    const body = block.body;
+    if (
+      /classifyCleanupError\s*\(/.test(body) ||
+      /finalize\s*\(\s*["']error["']/.test(body)
+    ) {
+      catchUsesClassifierOrFinalize = true;
+    }
+    // Detect the FORBIDDEN pattern: a direct
+    // write to `state.cleanupOutcome = <expr>`
+    // where <expr> does NOT go through finalize
+    // and does NOT come from the syncErr
+    // argument directly. Conservative regex:
+    //   state.cleanupOutcome\s*=\s*(?!classifyCleanupError|state\.cleanupOutcome|cleanupOutcome\s*=\s*cleanupObserved)
+    if (
+      /state\.cleanupOutcome\s*=\s*(?!classifyCleanupError)/.test(body) ||
+      /cleanupOutcome\s*=\s*classifyCleanupError\s*\(/.test(body)
+    ) {
+      catchHardcodesOutcome = true;
     }
   }
   assert.ok(
-    catchUsesClassifier,
-    "LIV15: classifyCleanupError(err) MUST be invoked from a `catch (err) { ... }` block (the synchronous kill() failure path). Hardcoding cleanupOutcome in the catch is the prior evidence-provenance inversion.",
+    catchUsesClassifierOrFinalize,
+    "LIV15: catch (err) MUST either invoke `classifyCleanupError(err)` directly OR delegate to `finalize('error', err)` (MF08+ pattern).",
+  );
+  assert.ok(
+    !catchHardcodesOutcome,
+    "LIV15: catch (err) MUST NOT hardcode `state.cleanupOutcome = ...` BEFORE finalize(). That is the evidence-provenance inversion.",
   );
 
   // Find the `child.on('error', (err) => { ... })`
@@ -1685,6 +1720,920 @@ test("LIV15: qualifier classifies cleanup errors from err.code (no evidence-prov
     /spawned\s*\?\s*["']SIGNAL_ERROR["']\s*:\s*["']SPAWN_ERROR["']/.test(codeOnly) ||
       /!\s*spawned[^A-Za-z][\s\S]{0,80}["']SPAWN_ERROR["']/.test(codeOnly),
     "LIV15: qualifier MUST gate spawn-error classification on the typed 'spawned' flag from the ChildProcess 'spawn' event",
+  );
+});
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01-MICROFIX05)
+//
+// LIV16 — BEHAVIORAL TWO-PHASE CLEANUP ORACLE.
+//
+// Reviewer's MICROFIX04 verdict (remaining P1):
+//   "the asynchronous handler that can correct
+//   'SENT' to 'PERMISSION_DENIED' or 'FAILED' is
+//   separate ... therefore this interleaving is
+//   valid: deadline → kill() returns true →
+//   cleanupOutcome = SENT → settledPromise resolves
+//   → qualifier emits SENT → process.exit() →
+//   async 'error' would have reported EPERM"
+// LIV15 was a static-source oracle (wiring only).
+// LIV16 is a BEHAVIORAL oracle that exercises the
+// LIVE qualifier's exported `runDeadlineCleanup`
+// helper against an injectable fake ChildProcess
+// seam for the adversarial cases the reviewer
+// named. The LIVE main flow calls the SAME helper,
+// so LIV16 passing proves the LIVE flow cannot
+// regress to the prior race by construction.
+test("LIV16: qualifier waits for async cleanup error before emitting final evidence (behavioral)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as {
+    runDeadlineCleanup: (args: any) => Promise<any>;
+  };
+  assert.equal(
+    typeof runDeadlineCleanup,
+    "function",
+    "LIV16: qualifier MUST export `runDeadlineCleanup`",
+  );
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  // Minimal fake ChildProcess — supports .kill(),
+  // .on(), .removeListener(), and emits events.
+  // `killBehavior` (optional) lets a test register a
+  // SYNCHRONOUS side-effect that fires during the
+  // kill() call (e.g. emit an error event or an
+  // exit event). MICROFIX06 requires that the
+  // helper observes lifecycle events that fire
+  // synchronously DURING kill(); this seam must
+  // model that.
+  type FakeChildOverrides = {
+    killResult?: boolean;
+    killThrow?: Error | null;
+    killBehavior?: ((child: any) => void) | null;
+  };
+  const makeFakeChild = (overrides: FakeChildOverrides = {}) => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [],
+      exit: [],
+      close: [],
+    };
+    const child: any = {
+      _killResult: overrides.killResult ?? true,
+      _killThrow: overrides.killThrow ?? null,
+      _killBehavior: overrides.killBehavior ?? null,
+      kill(_sig: string) {
+        // Fire the synchronous lifecycle event BEFORE
+        // returning/throw — this is the seam LIV17
+        // uses to exercise the listeners-armed-before-
+        // kill invariant.
+        if (this._killBehavior) this._killBehavior(this);
+        if (this._killThrow) throw this._killThrow;
+        return this._killResult;
+      },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const idx = handlers[ev].indexOf(fn);
+          if (idx >= 0) handlers[ev].splice(idx, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of [...(handlers[ev] ?? [])]) fn(...args);
+      },
+    };
+    return child;
+  };
+
+  // CASE A — kill returns true, async EPERM error
+  // → PERMISSION_DENIED.
+  // Under MICROFIX06, the helper's own listener
+  // observes the err directly; the shared caller
+  // handler is no longer needed.
+  {
+    const child = makeFakeChild({ killResult: true });
+    const state: {
+      cleanupOutcome: string;
+    } = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const p = runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    setImmediate(() => {
+      child._emit("error", Object.assign(new Error("EPERM"), { code: "EPERM" }));
+    });
+    const r = await p;
+    assert.equal(
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV16 CASE A: kill=true + async EPERM MUST be PERMISSION_DENIED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(r.observed.error, true, "LIV16 CASE A: observed.error must be true");
+  }
+
+  // CASE B — kill returns true, async ESRCH error
+  // → FAILED.
+  {
+    const child = makeFakeChild({ killResult: true });
+    const state: {
+      cleanupOutcome: string;
+    } = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const p = runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    setImmediate(() => {
+      child._emit("error", Object.assign(new Error("ESRCH"), { code: "ESRCH" }));
+    });
+    const r = await p;
+    assert.equal(
+      r.cleanupOutcome, "FAILED",
+      `LIV16 CASE B: kill=true + async ESRCH MUST be FAILED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(r.observed.error, true, "LIV16 CASE B: observed.error must be true");
+  }
+
+  // CASE C — kill returns false (no exception).
+  // Phase-2 observation MUST NOT run; result is FAILED.
+  {
+    const child = makeFakeChild({ killResult: false });
+    const state = {
+      cleanupOutcome: "NOT_ATTEMPTED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "FAILED",
+      `LIV16 CASE C: kill=false MUST be FAILED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(r.killResult, false, "LIV16 CASE C: killResult must be false");
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV16 CASE C: observation MUST NOT run when kill returned false",
+    );
+  }
+
+  // CASE D — kill THROWS EPERM → PERMISSION_DENIED.
+  {
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    const child = makeFakeChild({ killThrow: eperm });
+    const state = {
+      cleanupOutcome: "NOT_ATTEMPTED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV16 CASE D: kill THROW EPERM MUST be PERMISSION_DENIED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(r.threw, true, "LIV16 CASE D: threw must be true");
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV16 CASE D: observation MUST NOT run when kill threw",
+    );
+  }
+
+  // CASE E — kill returns true, async `'exit'`
+  // observed → SIGNAL_ACCEPTED.
+  {
+    const child = makeFakeChild({ killResult: true });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const p = runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    setImmediate(() => {
+      child._emit("exit", null, "SIGKILL");
+    });
+    const r = await p;
+    assert.equal(
+      r.cleanupOutcome, "SIGNAL_ACCEPTED",
+      `LIV16 CASE E: kill=true + async exit MUST be SIGNAL_ACCEPTED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(r.observed.exit, true, "LIV16 CASE E: observed.exit must be true");
+  }
+
+  // CASE F — kill returns true, no observation events
+  // → SIGNAL_ACCEPTED_UNCONFIRMED.
+  {
+    const child = makeFakeChild({ killResult: true });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 30, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "SIGNAL_ACCEPTED_UNCONFIRMED",
+      `LIV16 CASE F: kill=true + no events MUST stay at SIGNAL_ACCEPTED_UNCONFIRMED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.timedOut, true,
+      "LIV16 CASE F: observed.timedOut must be true",
+    );
+  }
+
+  // LIVE-binding check: the LIVE main flow MUST
+  // call the same `runDeadlineCleanup` helper.
+  const { readFile } = await import("node:fs/promises");
+  const qualifierPath = path.join(
+    HERE,
+    "../scripts/qualify-test-runner-liveness.mjs",
+  );
+  const src = await readFile(qualifierPath, "utf8");
+  assert.ok(
+    /await\s+runDeadlineCleanup\s*\(/.test(src),
+    "LIV16: LIVE main flow MUST call `await runDeadlineCleanup({...})`",
+  );
+  assert.ok(
+    /boundary\s*===\s*["']DEADLINE["']/.test(src) &&
+      /runDeadlineCleanup\(/.test(src),
+    "LIV16: LIVE main flow MUST guard `runDeadlineCleanup` on `boundary === 'DEADLINE'`",
+  );
+});
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01-MICROFIX06)
+//
+// LIV17 — SYNCHRONOUS-EVENT LISTENERS-BEFORE-KILL ORACLE.
+//
+// Reviewer's MICROFIX05 verdict (remaining P1):
+//   "Phase 2 reintroduces the listeners-after-kill
+//    race. runDeadlineCleanup() still calls
+//    child.kill() BEFORE it arms its own 'error' /
+//    'exit' / 'close' observers ... Case G should
+//    mechanically fail the current implementation."
+//
+// LIV16 (cases A–F) only proved that the helper
+// observes events fired ASYNCHRONOUSLY AFTER the
+// kill call returned. LIV17 closes this gap by
+// exercising the seam with events fired
+// SYNCHRONOUSLY inside the kill() call body, before
+// it returns. These cases CANNOT pass under the
+// prior MICROFIX05 implementation, where listeners
+// were attached AFTER kill() returned.
+//
+// MICROFIX06 invariant under test:
+//   arm observers BEFORE kill → sync lifecycle
+//   events DURING kill() are observable.
+test("LIV17: helper arms observers BEFORE kill (sync err/exit/throw-during-kill)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as {
+    runDeadlineCleanup: (args: any) => Promise<any>;
+  };
+  assert.equal(
+    typeof runDeadlineCleanup,
+    "function",
+    "LIV17: qualifier MUST export `runDeadlineCleanup`",
+  );
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  type FakeChildOverrides = {
+    killResult?: boolean;
+    killThrow?: Error | null;
+    killBehavior?: ((child: any) => void) | null;
+  };
+  const makeFakeChild = (overrides: FakeChildOverrides = {}) => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [],
+      exit: [],
+      close: [],
+    };
+    const child: any = {
+      _killResult: overrides.killResult ?? true,
+      _killThrow: overrides.killThrow ?? null,
+      _killBehavior: overrides.killBehavior ?? null,
+      kill(_sig: string) {
+        if (this._killBehavior) this._killBehavior(this);
+        if (this._killThrow) throw this._killThrow;
+        return this._killResult;
+      },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const idx = handlers[ev].indexOf(fn);
+          if (idx >= 0) handlers[ev].splice(idx, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of [...(handlers[ev] ?? [])]) fn(...args);
+      },
+    };
+    return child;
+  };
+
+  // CASE G — kill returns true AND synchronously
+  // emits 'error' with EPERM DURING kill()
+  // → PERMISSION_DENIED.
+  // Under MICROFIX05 (listeners-after-kill), this
+  // case could not be observed. Under MICROFIX06
+  // (listeners-before-kill but
+  // setImmediate-deferred), this case ALSO FAILS
+  // for cases J/K below (the directly-observed
+  // err loses the race against the post-kill
+  // `killResult === false` branch because the
+  // deferred finalize hasn't run yet). Under
+  // MICROFIX07 (sync settlement), this case
+  // PASSES because the sync `'error'` listener
+  // settles the helper synchronously BEFORE
+  // kill() returns.
+  {
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    const child = makeFakeChild({
+      killResult: true,
+      killBehavior: (c: any) => {
+        c._emit("error", eperm);
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV17 CASE G: sync 'error' EPERM DURING kill MUST be PERMISSION_DENIED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.error, true,
+      "LIV17 CASE G: observed.error must be true (sync during kill)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE G: must NOT time out (settled synchronously)",
+    );
+  }
+
+  // CASE H — kill returns true AND synchronously
+  // emits 'exit' (null, SIGKILL) DURING kill()
+  // → SIGNAL_ACCEPTED.
+  {
+    const child = makeFakeChild({
+      killResult: true,
+      killBehavior: (c: any) => {
+        c._emit("exit", null, "SIGKILL");
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "SIGNAL_ACCEPTED",
+      `LIV17 CASE H: sync 'exit' DURING kill MUST be SIGNAL_ACCEPTED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.exit, true,
+      "LIV17 CASE H: observed.exit must be true (sync during kill)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE H: must NOT time out (settled synchronously)",
+    );
+  }
+
+  // CASE I — kill synchronously emits 'error' with
+  // EPERM AND throws an EPERM Error.
+  // → EXACTLY ONE settlement: PERMISSION_DENIED;
+  //   no orphan listeners, no double-settle.
+  {
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    let emitCount = 0;
+    let errorListenerCount = 0;
+    let exitListenerCount = 0;
+    let closeListenerCount = 0;
+    const child = makeFakeChild({
+      killResult: false,
+      killBehavior: (c: any) => {
+        emitCount++;
+        c._emit("error", eperm);
+      },
+      killThrow: eperm,
+    });
+    const realOn = child.on.bind(child);
+    const realRemove = child.removeListener.bind(child);
+    child.on = (ev: string, fn: any) => {
+      if (ev === "error") errorListenerCount++;
+      if (ev === "exit") exitListenerCount++;
+      if (ev === "close") closeListenerCount++;
+      return realOn(ev, fn);
+    };
+    child.removeListener = (ev: string, fn: any) => {
+      if (ev === "error") errorListenerCount--;
+      if (ev === "exit") exitListenerCount--;
+      if (ev === "close") closeListenerCount--;
+      return realRemove(ev, fn);
+    };
+
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV17 CASE I: sync 'error' EPERM + sync throw MUST be PERMISSION_DENIED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      emitCount, 1,
+      `LIV17 CASE I: killBehavior must fire exactly once (got ${emitCount})`,
+    );
+    assert.equal(
+      errorListenerCount, 0,
+      `LIV17 CASE I: 'error' listener MUST be removed after settle (leaked ${errorListenerCount})`,
+    );
+    assert.equal(
+      exitListenerCount, 0,
+      `LIV17 CASE I: 'exit' listener MUST be removed after settle (leaked ${exitListenerCount})`,
+    );
+    assert.equal(
+      closeListenerCount, 0,
+      `LIV17 CASE I: 'close' listener MUST be removed after settle (leaked ${closeListenerCount})`,
+    );
+    assert.equal(
+      r.observed.error, true,
+      "LIV17 CASE I: observed.error must be true",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE I: must NOT time out (settled via throw)",
+    );
+  }
+
+  // CASE J — sync 'error' EPERM DURING kill() AND
+  // kill returns false.
+  // → PERMISSION_DENIED (sync typed err wins
+  //   over the killResult===false → FAILED
+  //   branch).
+  // The reviewer's MICROFIX06 verdict named
+  // this exact race: under setImmediate
+  // deferral, the deferred `finalize('error',
+  // err)` loses the race against the immediate
+  // `finalize('error', null)` from
+  // `killResult === false`, so cleanupOutcome
+  // ends up as FAILED instead of
+  // PERMISSION_DENIED. MICROFIX07 (sync
+  // settlement) makes the sync listener win
+  // before the killResult branch runs.
+  {
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    const child = makeFakeChild({
+      killResult: false,
+      killBehavior: (c: any) => {
+        c._emit("error", eperm);
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV17 CASE J: sync 'error' EPERM + kill=false MUST be PERMISSION_DENIED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.error, true,
+      "LIV17 CASE J: observed.error must be true (sync typed err wins)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE J: must NOT time out (settled via sync 'error')",
+    );
+  }
+
+  // CASE K — sync 'exit' DURING kill() AND kill
+  // returns false.
+  // MF09 ORTHOGONAL TRUTH (the case the reviewer
+  // flagged as a category error):
+  //   signalAttempt:        FAILED (kill returned false)
+  //   terminationObservation: EXIT_OBSERVED (sync
+  //                                  'exit' fired
+  //                                  during kill)
+  // PRE-MF09 collapsed these into SIGNAL_ACCEPTED,
+  // falsely claiming the signal was delivered.
+  // MF09 preserves both facts independently.
+  // Legacy cleanupOutcome derivation:
+  //   (FAILED, EXIT_OBSERVED) → FAILED
+  {
+    const child = makeFakeChild({
+      killResult: false,
+      killBehavior: (c: any) => {
+        c._emit("exit", null, "SIGKILL");
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV17 CASE K: signalAttempt MUST be FAILED (kill returned false), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      (r as any).terminationObservation, "EXIT_OBSERVED",
+      `LIV17 CASE K: terminationObservation MUST be EXIT_OBSERVED, got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      r.cleanupOutcome, "FAILED",
+      `LIV17 CASE K: legacy cleanupOutcome derived as FAILED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.exit, true,
+      "LIV17 CASE K: observed.exit must be true (sync during kill)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE K: must NOT time out (settled via sync 'exit')",
+    );
+  }
+
+  // CASE L — sync 'close' DURING kill() AND kill
+  // returns false.
+  // MF09 ORTHOGONAL TRUTH:
+  //   signalAttempt:        FAILED
+  //   terminationObservation: CLOSE_OBSERVED
+  // PRE-MF09 falsely reported SIGNAL_ACCEPTED.
+  {
+    const child = makeFakeChild({
+      killResult: false,
+      killBehavior: (c: any) => {
+        c._emit("close", null, "SIGKILL");
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV17 CASE L: signalAttempt MUST be FAILED, got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      (r as any).terminationObservation, "CLOSE_OBSERVED",
+      `LIV17 CASE L: terminationObservation MUST be CLOSE_OBSERVED, got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      r.cleanupOutcome, "FAILED",
+      `LIV17 CASE L: legacy cleanupOutcome derived as FAILED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.close, true,
+      "LIV17 CASE L: observed.close must be true (sync during kill)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE L: must NOT time out (settled via sync 'close')",
+    );
+  }
+
+  // CASE M — sync 'exit' DURING kill() AND then
+  // kill throws EPERM. CONFLICTING evidence
+  // across orthogonal dimensions:
+  //   'exit' wants termination=EXIT_OBSERVED
+  //   throw EPERM wants signal=PERMISSION_DENIED
+  // MF09: BOTH facts survive independently.
+  //   signalAttempt=FAILED (kill threw,
+  //                        not signal-delivered)
+  //   terminationObservation=EXIT_OBSERVED
+  // PRE-MF09 either overwrote to PERMISSION_DENIED
+  // (MF07) or claimed SIGNAL_ACCEPTED (older).
+  // MF09 is the first to capture both.
+  {
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    const child = makeFakeChild({
+      killThrow: eperm,
+      killBehavior: (c: any) => {
+        c._emit("exit", null, "SIGKILL");
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV17 CASE M: signalAttempt MUST be FAILED (kill threw), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      (r as any).terminationObservation, "EXIT_OBSERVED",
+      `LIV17 CASE M: terminationObservation MUST be EXIT_OBSERVED, got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      r.cleanupOutcome, "FAILED",
+      `LIV17 CASE M: legacy cleanupOutcome = FAILED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.exit, true,
+      "LIV17 CASE M: observed.exit must be true (sync event fired before throw)",
+    );
+    assert.equal(
+      r.threw, true,
+      "LIV17 CASE M: threw must be true (kill did throw EPERM)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE M: must NOT time out (settled via sync 'exit')",
+    );
+  }
+
+  // CASE N — sync typed 'error' EPERM DURING kill()
+  // AND then kill throws ESRCH.
+  // MF09 ORTHOGONAL TRUTH:
+  //   signalAttempt=PERMISSION_DENIED (sync 'error'
+  //             classified; throw ESRCH is
+  //             ignored by settled guard)
+  //   terminationObservation=NOT_OBSERVED ('error'
+  //             does NOT promote termination per
+  //             MF09 invariant)
+  // Legacy cleanupOutcome = PERMISSION_DENIED.
+  {
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    const esrch = Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    const child = makeFakeChild({
+      killThrow: esrch,
+      killBehavior: (c: any) => {
+        c._emit("error", eperm);
+      },
+    });
+    const state = {
+      cleanupOutcome: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    };
+    const r = await runDeadlineCleanup({
+      child, observationWindowMs: 50, classifyCleanupError, state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV17 CASE N: signalAttempt MUST be PERMISSION_DENIED, got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      (r as any).terminationObservation, "NOT_OBSERVED",
+      `LIV17 CASE N: terminationObservation MUST be NOT_OBSERVED ('error' does not imply termination), got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      r.cleanupOutcome, "PERMISSION_DENIED",
+      `LIV17 CASE N: legacy cleanupOutcome = PERMISSION_DENIED, got ${r.cleanupOutcome}`,
+    );
+    assert.equal(
+      r.observed.error, true,
+      "LIV17 CASE N: observed.error must be true (sync typed err fired before throw)",
+    );
+    assert.equal(
+      r.threw, true,
+      "LIV17 CASE N: threw must be true (kill did throw ESRCH)",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV17 CASE N: must NOT time out (settled via sync typed err)",
+    );
+  }
+});
+
+// (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
+//  LIVENESS01-CORRECTION01-MICROFIX09)
+//
+// MICROFIX09 — LIV18 PRODUCT-ALGEBRA ORACLE.
+//
+// LIV17 verifies the listener-arming invariant
+// for ONE specific dimension at a time. LIV18
+// verifies the FULL PRODUCT ALGEBRA of MF09's
+// two orthogonal dimensions:
+//
+//   signalAttempt × terminationObservation
+//
+// The expected pairs come from the reviewer's
+// table. Every cell is reachable from real Node
+// behavior.
+//
+// Additionally, LIV18 enforces the reviewer's
+// CORE INVARIANT:
+//
+//   EXIT_OBSERVED  ⇒ signal attempted
+//                    successfully IS NOT
+//                    established.
+//   CLOSE_OBSERVED ⇒ signal attempted
+//                    successfully IS NOT
+//                    established.
+//
+// A helper that reports EXIT_OBSERVED with
+// signalAttempt=ACCEPTED WITHOUT ALSO observing
+// kill() returned true (or 'error' with success
+// semantics) violates this invariant. LIV18 pins
+// the algebra so a future refactor cannot
+// quietly restore the category error.
+test("LIV18: product algebra — signalAttempt × terminationObservation (MF09 orthogonal dimensions)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as { runDeadlineCleanup: (args: any) => Promise<any> };
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  // Local fake ChildProcess with the same
+  // contract as LIV17's makeFakeChild. Kept
+  // local because LIV17's helper is closure-
+  // scoped and not exported.
+  type FakeChildOverrides = {
+    killResult?: boolean | undefined;
+    killThrow?: Error | null | undefined;
+    killBehavior?: ((child: any) => void) | null | undefined;
+  };
+  const makeFakeChild = (overrides: FakeChildOverrides = {}) => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [],
+      exit: [],
+      close: [],
+    };
+    const child: any = {
+      _killResult: overrides.killResult ?? true,
+      _killThrow: overrides.killThrow ?? null,
+      _killBehavior: overrides.killBehavior ?? null,
+      kill(_sig: string) {
+        if (this._killBehavior) this._killBehavior(this);
+        if (this._killThrow) throw this._killThrow;
+        return this._killResult;
+      },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const i = handlers[ev].indexOf(fn);
+          if (i >= 0) handlers[ev].splice(i, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of (handlers[ev] ?? []).slice()) fn(...args);
+      },
+    };
+    return child;
+  };
+
+  type Cell = {
+    label: string;
+    killResult?: boolean;
+    killThrow?: Error | null;
+    killBehavior?: ((c: any) => void) | null;
+    expectedSignalAttempt: string;
+    expectedTermination: string;
+    expectedLegacy: string;
+  };
+  const cells: Cell[] = [
+    {
+      label: "kill=true, no events",
+      killResult: true,
+      expectedSignalAttempt: "ACCEPTED",
+      expectedTermination: "NOT_OBSERVED",
+      expectedLegacy: "SIGNAL_ACCEPTED_UNCONFIRMED",
+    },
+    {
+      label: "kill=true, async exit",
+      killResult: true,
+      killBehavior: (c: any) => {
+        setTimeout(() => c._emit("exit", null, "SIGKILL"), 5);
+      },
+      expectedSignalAttempt: "ACCEPTED",
+      expectedTermination: "EXIT_OBSERVED",
+      expectedLegacy: "SIGNAL_ACCEPTED",
+    },
+    {
+      label: "kill=false, no events",
+      killResult: false,
+      expectedSignalAttempt: "FAILED",
+      expectedTermination: "NOT_OBSERVED",
+      expectedLegacy: "FAILED",
+    },
+    {
+      label: "kill=false, sync exit",
+      killResult: false,
+      killBehavior: (c: any) => c._emit("exit", null, "SIGKILL"),
+      expectedSignalAttempt: "FAILED",
+      expectedTermination: "EXIT_OBSERVED",
+      expectedLegacy: "FAILED",
+    },
+    {
+      label: "kill=false, sync close",
+      killResult: false,
+      killBehavior: (c: any) => c._emit("close", null, "SIGKILL"),
+      expectedSignalAttempt: "FAILED",
+      expectedTermination: "CLOSE_OBSERVED",
+      expectedLegacy: "FAILED",
+    },
+    {
+      label: "kill=true, sync EPERM 'error'",
+      killResult: true,
+      killBehavior: (c: any) => {
+        const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+        c._emit("error", eperm);
+      },
+      expectedSignalAttempt: "PERMISSION_DENIED",
+      expectedTermination: "NOT_OBSERVED",
+      expectedLegacy: "PERMISSION_DENIED",
+    },
+    {
+      label: "kill=true, async EPERM 'error'",
+      killResult: true,
+      killBehavior: (c: any) => {
+        const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+        setTimeout(() => c._emit("error", eperm), 5);
+      },
+      expectedSignalAttempt: "PERMISSION_DENIED",
+      expectedTermination: "NOT_OBSERVED",
+      expectedLegacy: "PERMISSION_DENIED",
+    },
+    {
+      label: "kill throws EPERM, no events",
+      killThrow: Object.assign(new Error("EPERM"), { code: "EPERM" }),
+      expectedSignalAttempt: "PERMISSION_DENIED",
+      expectedTermination: "NOT_OBSERVED",
+      expectedLegacy: "PERMISSION_DENIED",
+    },
+  ];
+
+  for (const cell of cells) {
+    const child = makeFakeChild({
+      killResult: cell.killResult as any,
+      killThrow: cell.killThrow,
+      killBehavior: cell.killBehavior,
+    });
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 50,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt,
+      cell.expectedSignalAttempt,
+      `LIV18 [${cell.label}]: signalAttempt expected ${cell.expectedSignalAttempt}, got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      (r as any).terminationObservation,
+      cell.expectedTermination,
+      `LIV18 [${cell.label}]: terminationObservation expected ${cell.expectedTermination}, got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      r.cleanupOutcome,
+      cell.expectedLegacy,
+      `LIV18 [${cell.label}]: legacy cleanupOutcome expected ${cell.expectedLegacy}, got ${r.cleanupOutcome}`,
+    );
+  }
+
+  // ---- MICROFIX09 REVIEWER INVARIANT. ----
+  //
+  // Source-level guard so a future refactor
+  // cannot quietly restore the category error.
+  const qualifierSrc = await readFile(
+    `${HERE}/../scripts/qualify-test-runner-liveness.mjs`,
+    "utf8",
+  );
+  assert.ok(
+    !/reason\s*===\s*["']exit["'][\s\S]{0,400}signalAttempt\s*=\s*["']ACCEPTED["']/.test(
+      qualifierSrc,
+    ),
+    "LIV18 INVARIANT: source MUST NOT promote signalAttempt=ACCEPTED from an 'exit' listener.",
+  );
+  assert.ok(
+    !/reason\s*===\s*["']close["'][\s\S]{0,400}signalAttempt\s*=\s*["']ACCEPTED["']/.test(
+      qualifierSrc,
+    ),
+    "LIV18 INVARIANT: source MUST NOT promote signalAttempt=ACCEPTED from a 'close' listener.",
+  );
+  assert.ok(
+    !/if\s*\(\s*observed\.exit\s*\|\|\s*observed\.close\s*\)\s*\{?\s*[^}]*cleanupOutcome\s*=\s*["']SIGNAL_ACCEPTED["']/.test(
+      qualifierSrc,
+    ),
+    "LIV18 INVARIANT: source MUST NOT contain `if (observed.exit || observed.close) { ... cleanupOutcome = 'SIGNAL_ACCEPTED' }`.",
   );
 });
 

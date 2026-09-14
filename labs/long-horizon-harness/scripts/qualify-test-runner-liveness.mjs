@@ -1,5 +1,5 @@
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01-CORRECTION01-MICROFIX03)
+//  LIVENESS01-CORRECTION01-MICROFIX09)
 //
 // External qualifier for the canonical-main test
 // runner liveness.
@@ -35,7 +35,7 @@
 //   well above the observed ~80 second canonical
 //   post-fix runtime.
 //
-// Output (MICROFIX03 P1-3):
+// Output (MICROFIX07 — preserved in MF08/MF09):
 //
 //   The qualifier emits FIVE independent key=value
 //   lines on stdout. `RUNNER_LIVENESS_QUALIFIER_DISPOSITION`
@@ -90,16 +90,42 @@
 //                 disposition could not be
 //                 observed.
 //
-//     QUALIFIER_CLEANUP_OUTCOME=SENT|PERMISSION_DENIED|FAILED|NOT_ATTEMPTED
+//     QUALIFIER_CLEANUP_OUTCOME=SIGNAL_ACCEPTED|SIGNAL_ACCEPTED_UNCONFIRMED|PERMISSION_DENIED|FAILED|NOT_ATTEMPTED
 //       How the qualifier attempted to clean up
 //       the runner child AFTER the verdict was
-//       settled. SENT means the signal was
-//       delivered. PERMISSION_DENIED means the
-//       kernel refused (EPERM). FAILED means kill
-//       returned false or threw an unexpected
-//       error. NOT_ATTEMPTED means no cleanup was
-//       attempted (e.g. SPAWN_ERROR — no child
-//       existed to clean up).
+//       settled. The MICROFIX07 qualifier performs (preserved in MF08/MF09):
+//       two-phase settlement: the runner's liveness
+//       boundary is settled FIRST, and THEN the
+//       cleanup outcome is observed by waiting
+//       boundedly for the asynchronous `'error'`,
+//       `'exit'`, or `'close'` event from the
+//       ChildProcess.
+//
+//       SIGNAL_ACCEPTED — `child.kill('SIGKILL')`
+//         returned true AND the qualifier
+//         subsequently observed the child's
+//         `'exit'` (or `'close'`) event within
+//         the bounded cleanup-observation window.
+//         Per Node docs, `kill()` returning true
+//         does NOT prove termination; this value
+//         requires positive observation.
+//       SIGNAL_ACCEPTED_UNCONFIRMED —
+//         `child.kill('SIGKILL')` returned true
+//         but neither `'exit'`, `'close'`, nor
+//         `'error'` fired within the bounded
+//         cleanup-observation window. The
+//         qualifier was UNABLE to positively
+//         observe termination, so we honestly
+//         report unconfirmed signal acceptance.
+//       PERMISSION_DENIED — the kernel refused
+//         signal delivery (`err.code === "EPERM"`).
+//       FAILED — kill() returned false, or
+//         threw a non-EPERM error, or async
+//         `'error'` reported any other err.code.
+//       NOT_ATTEMPTED — no cleanup was attempted
+//         (e.g. SPAWN_ERROR — no child existed
+//         to clean up; or the runner exited
+//         cleanly under its own power).
 //
 //     DESCENDANT_CLEANUP_PROVEN=true|false
 //       Whether the qualifier actually proved
@@ -143,6 +169,372 @@ const DEADLINE_MS = Number(process.env.LIVENESS_DEADLINE_MS ?? 600_000);
 const TMPDIR = process.env.TMPDIR ?? "/tmp";
 const TRACE = process.env.LIVENESS_QUALIFIER_TRACE === "1";
 
+// --------------------------------------------------------------------
+// MICROFIX07 LIV16/LIV17 — EXPORTED PURE HELPER for
+// adversarial behavioral testing.
+//
+// The deadline's kill+observe flow is encapsulated
+// here as an exported pure function so LIV16 and
+// LIV17 can exercise it against a fake ChildProcess
+// seam (cases A–I from the reviewer's brief). The
+// helper does NOT touch module-level state — every
+// input is passed in. The LIVE main flow (below)
+// calls this same helper with the real child after
+// phase 1 settles, so LIVE behavior and TEST
+// behavior are guaranteed to match.
+//
+// MICROFIX07 — atomic listeners-before-kill + synchronous
+// settlement:
+//
+//   Per Node docs, `subprocess.kill()` may emit
+//   `'error'` SYNCHRONOUSLY when the signal cannot
+//   be delivered, and `'exit'`/`'close'` may also
+//   fire during/after the kill call. To observe
+//   these without racing, this helper arms the
+//   `'error'`, `'exit'`, and `'close'` listeners
+//   BEFORE invoking `child.kill()`.
+//
+//   Node's EventEmitter invokes listeners
+//   SYNCHRONOUSLY (in registration order), so a
+//   lifecycle event fired during `kill()` settles
+//   the helper BEFORE `kill()` returns. The
+//   `settled` flag below prevents double-settlement
+//   even when kill both synchronously emits
+//   `'error'` and throws (case I). Timers and
+//   listeners are always torn down on the first
+//   settle.
+//
+// MICROFIX09 — ORTHOGONAL EVIDENCE DIMENSIONS.
+//
+// Node's kill(2) contract has TWO independent
+// dimensions of truth:
+//
+//   signal-attempt evidence   (kill() return / throw)
+//   termination evidence      ('exit' / 'close')
+//
+// A successful kill(2) does NOT prove termination,
+// and observed termination does NOT prove the
+// signal was delivered (a child can exit on its
+// own concurrently with — or before — kill()).
+//
+// The pre-MF09 helper collapsed both into one
+// string `cleanupOutcome`. That category error
+// forced contradictory cells (e.g. kill returned
+// false + 'exit' was observed → reported as
+// SIGNAL_ACCEPTED, which claims the signal
+// succeeded when it did not).
+//
+// MF09 makes the two dimensions orthogonal:
+//
+//   signalAttempt:
+//     NOT_ATTEMPTED       — helper short-circuited
+//     ACCEPTED            — kill returned true
+//                            (or sync `'error'`
+//                             confirmed delivery)
+//     PERMISSION_DENIED   — sync/async `'error'`
+//                            with err.code=EPERM
+//     FAILED              — kill returned false,
+//                            threw non-EPERM, or
+//                            async `'error'` with
+//                            non-EPERM code
+//
+//   terminationObservation:
+//     NOT_OBSERVED        — no 'exit' / 'close' yet
+//     EXIT_OBSERVED       — 'exit' fired
+//     CLOSE_OBSERVED      — 'close' fired
+//
+// The legacy single-string `cleanupOutcome` is
+// still emitted for backward-compat with LIV16
+// cases A–F and the downstream log key
+// `QUALIFIER_CLEANUP_OUTCOME`. It is now DERIVED
+// from the orthogonal pair, not authoritative.
+//
+// Mapping (helper → legacy string):
+//
+//   (NOT_ATTEMPTED, _)                    → NOT_ATTEMPTED
+//   (ACCEPTED, EXIT_OBSERVED|CLOSE_OBS.)  → SIGNAL_ACCEPTED
+//   (ACCEPTED, NOT_OBSERVED)              → SIGNAL_ACCEPTED_UNCONFIRMED
+//   (PERMISSION_DENIED, _)                → PERMISSION_DENIED
+//   (FAILED, _)                           → FAILED
+//
+// MICROFIX09 invariant (the reviewer's call):
+//
+//   EXIT_OBSERVED  ⇒ signal attempted successfully
+//                    IS NOT established.
+//   CLOSE_OBSERVED ⇒ signal attempted successfully
+//                    IS NOT established.
+//
+// The two dimensions are reported together. No
+// "first observation wins" is needed across
+// orthogonal facts — both survive.
+// --------------------------------------------------------------------
+/**
+ * @param {{
+ *   child: { kill:(sig:string)=>boolean, on:(ev:string,fn:any)=>any, removeListener:(ev:string,fn:any)=>any },
+ *   observationWindowMs: number,
+ *   classifyCleanupError: (err:any)=>"PERMISSION_DENIED"|"FAILED",
+ *   state: { signalAttempt?: string, terminationObservation?: string, cleanupOutcome?: string },
+ * }} args
+ * @returns {Promise<{
+ *   killResult: boolean,
+ *   threw: boolean,
+ *   cleanupOutcome: string,
+ *   signalAttempt: "NOT_ATTEMPTED"|"ACCEPTED"|"PERMISSION_DENIED"|"FAILED",
+ *   terminationObservation: "NOT_OBSERVED"|"EXIT_OBSERVED"|"CLOSE_OBSERVED",
+ *   observed: {error: boolean, exit: boolean, close: boolean, timedOut: boolean}
+ * }>}
+ */
+export const runDeadlineCleanup = async (args) => {
+  const {
+    child,
+    observationWindowMs,
+    classifyCleanupError,
+    state,
+  } = args;
+  // The bounded observation envelope: arm the
+  // lifecycle observers BEFORE requesting the
+  // transition. This guarantees synchronous
+  // `'error'` / `'exit'` / `'close'` events fired
+  // DURING `child.kill()` are observable.
+  //
+  // MICROFIX07 — EventEmitter synchrony (preserved in MF08/MF09):
+  //   Node's EventEmitter invokes listeners
+  //   SYNCHRONOUSLY, in registration order. We
+  //   therefore settle synchronously from each
+  //   handler — no setImmediate() deferral.
+  //   Synchronous settlement is what makes the
+  //   post-kill logic trustworthy: when kill()
+  //   returns, `settled` already reflects any
+  //   sync `'error'` / `'exit'` / `'close'` that
+  //   fired during the call, so the post-kill
+  //   inspection is not racing.
+  //
+  // The single closure-scoped `settled` flag
+  // guarantees exactly-once settlement even when
+  // kill() synchronously emits multiple events,
+  // throws, and returns false in the same call.
+  // MICROFIX09 — orthogonal dimensions initialized.
+  // Both default to "no evidence yet"; the helper's
+  // first settle will publish authoritative values
+  // for each independently. No single string is
+  // authoritative; the legacy cleanupOutcome is
+  // derived at the bottom from the pair.
+  const observed = { error: false, exit: false, close: false, timedOut: false };
+  let killResult = false;
+  let threw = false;
+  // signalAttempt is mutated ONLY via finalize();
+  // the same `settled` guard governs both the
+  // Promise resolution AND each dimension's
+  // mutation. This is the MF08 invariant applied
+  // to TWO outputs instead of one.
+  let signalAttempt = "NOT_ATTEMPTED";
+  let terminationObservation = "NOT_OBSERVED";
+
+  await new Promise((resolve) => {
+    let settled = false;
+    const finalize = (reason, syncErr) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      child.removeListener("close", onClose);
+      observed[reason] = true;
+      // MICROFIX09 — orthogonal finalize.
+      // Each branch sets EXACTLY ONE dimension
+      // (or none, for 'timedOut'). The two
+      // dimensions are independent — no
+      // "first-observation-wins" coupling
+      // between them.
+      if (reason === "error") {
+        signalAttempt = syncErr
+          ? classifyCleanupError(syncErr)
+          : "FAILED";
+      } else if (reason === "exit") {
+        terminationObservation = "EXIT_OBSERVED";
+      } else if (reason === "close") {
+        terminationObservation = "CLOSE_OBSERVED";
+      }
+      // reason === "timedOut": no change to either
+      // dimension. The pre-timer values stand.
+      resolve();
+    };
+    // ---- SYNCHRONOUS handlers (EventEmitter guarantee). ----
+    const onError = (err) => finalize("error", err);
+    const onExit = () => finalize("exit");
+    const onClose = () => finalize("close");
+
+    // ---- ARM observers BEFORE kill. ----
+    child.on("error", onError);
+    child.on("exit", onExit);
+    child.on("close", onClose);
+    const timer = setTimeout(() => finalize("timedOut"), observationWindowMs);
+
+    // ---- Request the lifecycle transition. ----
+    // Sync `'error'` / `'exit'` / `'close'` here
+    // are observable via the listeners armed above,
+    // and EventEmitter invokes them SYNCHRONOUSLY
+    // (so by the time kill() returns, `settled`
+    // already reflects any sync observation).
+    try {
+      killResult = child.kill("SIGKILL");
+    } catch (err) {
+      threw = true;
+      killResult = false;
+      // MICROFIX08: defer to finalize(); the
+      // settled-guard governs signalAttempt
+      // mutation. terminationObservation is
+      // UNCHANGED — a thrown kill does not
+      // imply termination. (MF09 orthogonal.)
+      finalize("error", err);
+      // MF09: if the settle guard rejected
+      // finalize() because a sync `'exit'` /
+      // `'close'` listener already fired
+      // (LIV17 case M: emit 'exit' then throw
+      // EPERM), signalAttempt may still be
+      // NOT_ATTEMPTED. fill it from killResult
+      // (= false here, since we threw).
+      if (signalAttempt === "NOT_ATTEMPTED") {
+        signalAttempt = killResult ? "ACCEPTED" : "FAILED";
+      }
+      return;
+    }
+    // kill() returned without throwing. By this
+    // point, any sync lifecycle event has already
+    // been observed (EventEmitter synchrony).
+    if (settled) {
+      // A sync listener already settled during
+      // kill (sync error / exit / close).
+      //   * If it was an `'error'` listener,
+      //     finalize() already set signalAttempt
+      //     via classifyCleanupError; do not
+      //     overwrite it here.
+      //   * If it was `'exit'` or `'close'`,
+      //     finalize() set terminationObservation
+      //     but did NOT touch signalAttempt.
+      //     Fill signalAttempt from killResult
+      //     so the pair is consistent:
+      //     kill returned true  → ACCEPTED
+      //     kill returned false → FAILED
+      // (MF09: kill returning false + 'exit'
+      // observed is now correctly reported as
+      // (FAILED, EXIT_OBSERVED). PRE-MF09 it
+      // was SIGNAL_ACCEPTED — a category
+      // error.)
+      if (signalAttempt === "NOT_ATTEMPTED") {
+        signalAttempt = killResult ? "ACCEPTED" : "FAILED";
+      }
+      return;
+    }
+    if (killResult === false) {
+      // kill refused synchronously without
+      // throwing AND no lifecycle event fired.
+      // finalize("error", null) sets
+      // signalAttempt=FAILED via the err=null
+      // fallback path. terminationObservation
+      // stays NOT_OBSERVED — kill returning
+      // false does not prove termination.
+      // (MF09: this used to settle as
+      // SIGNAL_ACCEPTED in the cleanupOutcome
+      // path, which falsely claimed the signal
+      // was delivered. The orthogonal algebra
+      // preserves the truth: signal failed,
+      // termination unobserved.)
+      finalize("error", null);
+      return;
+    }
+    // kill returned true AND no sync observation
+    // arrived. Optimistic signalAttempt=ACCEPTED.
+    // terminationObservation stays NOT_OBSERVED;
+    // the async listener may still flip it to
+    // EXIT_OBSERVED / CLOSE_OBSERVED before the
+    // bounded observation window expires.
+    // (MF09: not stored in state.cleanupOutcome
+    // directly — the legacy string is DERIVED
+    // below from the pair.)
+    signalAttempt = "ACCEPTED";
+  });
+
+  // After the helper settles, derive the legacy
+  // single-string cleanupOutcome from the
+  // orthogonal pair. This preserves the
+  // downstream log key
+  // `QUALIFIER_CLEANUP_OUTCOME` and LIV16 cases
+  // A–F.
+  //
+  // Mapping (helper → legacy string):
+  //
+  //   (NOT_ATTEMPTED, *)                   → NOT_ATTEMPTED
+  //   (PERMISSION_DENIED, *)               → PERMISSION_DENIED
+  //   (FAILED, *)                          → FAILED
+  //   (ACCEPTED, EXIT_OBSERVED|CLOSE_OBS.) → SIGNAL_ACCEPTED
+  //   (ACCEPTED, NOT_OBSERVED)             → SIGNAL_ACCEPTED_UNCONFIRMED
+  //
+  // Note: with the orthogonal algebra, a
+  // `kill=false + exit observed` pair (case K)
+  // now reports `(FAILED, EXIT_OBSERVED)` →
+  // legacy `FAILED`. PRE-MF09 this case
+  // reported `SIGNAL_ACCEPTED`, which falsely
+  // claimed the signal was delivered. MF09
+  // truthfully reports the signal attempt
+  // failed and termination was observed
+  // anyway — which is exactly the cause/effect
+  // separation the reviewer requested.
+  let cleanupOutcome;
+  if (signalAttempt === "NOT_ATTEMPTED") {
+    cleanupOutcome = "NOT_ATTEMPTED";
+  } else if (signalAttempt === "PERMISSION_DENIED") {
+    cleanupOutcome = "PERMISSION_DENIED";
+  } else if (signalAttempt === "FAILED") {
+    cleanupOutcome = "FAILED";
+  } else if (signalAttempt === "ACCEPTED") {
+    cleanupOutcome = (terminationObservation === "EXIT_OBSERVED" ||
+        terminationObservation === "CLOSE_OBSERVED")
+      ? "SIGNAL_ACCEPTED"
+      : "SIGNAL_ACCEPTED_UNCONFIRMED";
+  } else {
+    // Defensive default — should not happen.
+    cleanupOutcome = "FAILED";
+  }
+
+  // Reflect the derived legacy value back onto
+  // state so the LIVE main flow can read it
+  // through state.cleanupOutcome as before.
+  if (typeof state.cleanupOutcome === "string") {
+    state.cleanupOutcome = cleanupOutcome;
+  }
+
+  return {
+    killResult,
+    threw,
+    cleanupOutcome,
+    signalAttempt,
+    terminationObservation,
+    observed,
+  };
+};
+
+// Detect whether the script is being imported (test
+// harness) vs executed directly. When imported, only
+// the helper above is exported; the spawn below and
+// the rest of the main flow are skipped.
+const isMain = (() => {
+  try {
+    return import.meta.url === `file://${process.argv[1]}`;
+  } catch {
+    return false;
+  }
+})();
+if (!isMain) {
+  // Test harness import path — do NOT spawn npm or
+  // run the qualification flow; only the exported
+  // `runDeadlineCleanup` helper is needed.
+}
+
+const CLEANUP_OBSERVATION_MS = Number(
+  process.env.LIVENESS_CLEANUP_OBSERVATION_MS ?? 2_000,
+);
+
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
 //  LIVENESS01-CORRECTION01-MICROFIX01)
 //
@@ -153,56 +545,93 @@ const TRACE = process.env.LIVENESS_QUALIFIER_TRACE === "1";
 // its TTY-aware stdout (the runner writes its
 // `test_runner_start` / `test_runner_finish` JSON lines
 // to stderr).
-const child = spawn(
-  "npm",
-  ["test"],
-  {
-    cwd: root,
-    stdio: ["ignore", "ignore", "pipe"],
-    env: {
-      ...process.env,
-      TMPDIR,
-      FACTORY_TEST_RUNNER_TRACE: "1",
+const child = isMain
+  ? spawn(
+    "npm",
+    ["test"],
+    {
+      cwd: root,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: {
+        ...process.env,
+        TMPDIR,
+        FACTORY_TEST_RUNNER_TRACE: "1",
+      },
     },
-  },
-);
+  )
+  : null;
 
 let stderrBuf = "";
-child.stderr?.on("data", (d) => { stderrBuf += d.toString(); });
+child?.stderr?.on("data", (d) => { stderrBuf += d.toString(); });
 
 const start = Date.now();
 
 // --------------------------------------------------------------------
-// MICROFIX03 P1-3 — DEADLINE/KILL RACE FIX.
+// MICROFIX07 — TWO-PHASE SETTLEMENT.
 //
-// The previous implementation had a race: when the
-// deadline fired it called `child.kill('SIGKILL')`,
-// which could itself synchronously fail (e.g. EPERM
-// on a sandboxed host) and emit the ChildProcess
-// `'error'` event. The `'error'` handler would then
-// resolve with `{kind:'error'}`, OVERWRITING the
-// `{kind:'deadline'}` settlement and reporting
-// `SPAWN_ERROR` for a child that had actually been
-// running fine until the deadline fired.
+// The qualifier settles the runner's liveness in TWO
+// distinct phases:
 //
-// Fix:
+//   Phase 1 — `runnerSettledPromise`
+//     Resolves when the runner's liveness boundary is
+//     KNOWN: `'exit'` (CLEAN_EXIT), pre-settlement
+//     `'error'` (SPAWN_ERROR / SIGNAL_ERROR), or the
+//     wall-clock deadline firing (DEADLINE).
+//
+//   Phase 2 — bounded cleanup observation
+//     Resolves AFTER phase 1, ONLY if phase 1 settled
+//     as DEADLINE. Phase 2 calls the exported
+//     `runDeadlineCleanup` helper, which:
+//       1. Calls `child.kill('SIGKILL')`.
+//       2. If kill returns true, waits boundedly
+//          (CLEANUP_OBSERVATION_MS, default 2000ms)
+//          for one of:
+//          * `'error'`   — kill failed async, re-classify
+//                           via classifyCleanupError(err).
+//          * `'exit'`/`'close'` — child observed as
+//                           terminated. Promote
+//                           SIGNAL_ACCEPTED_UNCONFIRMED
+//                           → SIGNAL_ACCEPTED.
+//          * cleanup-observation deadline — neither
+//                           event arrived. Stay at
+//                           SIGNAL_ACCEPTED_UNCONFIRMED.
+//     This eliminates the prior race where the
+//     qualifier emitted SENT before the async
+//     `'error'` event that would have correctly
+//     re-classified it to PERMISSION_DENIED.
+//
+// Node docs are explicit: `subprocess.kill()`
+// returning true does NOT prove termination; the
+// `'exit'` event is the only positive signal of
+// termination. Phase 2 enforces that the qualifier
+// waits for positive observation (or its bounded
+// budget) before emitting final evidence.
+//
+// MICROFIX03 P1-3 (carried forward):
 //   (1) The deadline is settled FIRST, via a single-
 //       settlement guard.
 //   (2) The kill attempt happens AFTER settlement
 //       and its outcome is recorded separately as
 //       QUALIFIER_CLEANUP_OUTCOME.
-//   (3) `'error'` after settlement is IGNORED (not
-//       a re-settlement); `'error'` BEFORE the
-//       runner has even emitted `test_runner_start`
-//       is reported as `SPAWN_ERROR`; `'error'`
-//       AFTER `test_runner_start` is reported as
-//       `SIGNAL_ERROR`.
+//   (3) `'error'` after settlement is IGNORED for
+//       boundary purposes; it only feeds the
+//       cleanup-outcome re-classification in phase 2.
 // --------------------------------------------------------------------
 let settled = false;
 /** @type {"DEADLINE"|"CLEAN_EXIT"|"SPAWN_ERROR"|"SIGNAL_ERROR"|null} */
 let boundary = null;
-/** @type {"SENT"|"PERMISSION_DENIED"|"FAILED"|"NOT_ATTEMPTED"} */
+/** @type {"SIGNAL_ACCEPTED"|"SIGNAL_ACCEPTED_UNCONFIRMED"|"PERMISSION_DENIED"|"FAILED"|"NOT_ATTEMPTED"} */
 let cleanupOutcome = "NOT_ATTEMPTED";
+/** Optimistic cleanup state set during phase 1 — may
+ *  be re-classified by async `'error'` in phase 2.
+ *  (MICROFIX07: removed — the phase-2 helper
+ *  observes lifecycle events directly via its
+ *  own listeners and does not depend on a
+ *  cross-handler pending reclassification
+ *  written by an outer shared `'error'` handler.
+ *  The helper's own `onError` catches the err
+ *  synchronously and passes it to classifyCleanupError.)
+ */
 let descendantCleanupProven = false;
 /** @type {number|null} */
 let runnerExitCode = null;
@@ -279,72 +708,107 @@ const settleOnce = (kind) => {
   boundary = kind;
 };
 
-const settledPromise = new Promise((resolve) => {
-  const onSettled = () => resolve();
-  const timer = setTimeout(() => {
-    settleOnce("DEADLINE");
-    let killResult;
-    try {
-      killResult = child.kill("SIGKILL");
-      // If kill() returned true synchronously we
-      // optimistically record SENT, but the async
-      // `'error'` handler (below) may re-classify to
-      // PERMISSION_DENIED or FAILED based on err.code
-      // if the kill actually failed.
-      cleanupOutcome = "SENT";
+let settledPromise;
+if (isMain) {
+  settledPromise = new Promise((resolve) => {
+    const onSettled = () => resolve();
+    const timer = setTimeout(() => {
+      // Phase 1 — settle the boundary only. The
+      // kill + bounded-observation step is the LIVE
+      // main flow's responsibility (see
+      // `runDeadlineCleanup` invocation below).
+      settleOnce("DEADLINE");
       descendantCleanupProven = false;
-    } catch (err) {
-      // Synchronous kill failure (e.g. EPERM thrown).
-      cleanupOutcome = classifyCleanupError(err);
-      killResult = false;
-    }
-    if (killResult === false && cleanupOutcome !== "PERMISSION_DENIED") {
-      // kill() returned false WITHOUT an exception
-      // (e.g. the child was already dead — ESRCH).
-      // Without an err.code we treat that as FAILED.
-      cleanupOutcome = "FAILED";
-    }
-    clearTimeout(timer);
-    onSettled();
-  }, DEADLINE_MS);
+      onSettled();
+    }, DEADLINE_MS);
 
-  // QFIX03: typed spawn authority.
-  child.once("spawn", () => {
-    spawned = true;
+    // QFIX03: typed spawn authority.
+    child.once("spawn", () => {
+      spawned = true;
+    });
+
+    child.on("exit", (code, signal) => {
+      runnerExitCode = code;
+      runnerSignal = signal;
+      if (!settled) {
+        settleOnce("CLEAN_EXIT");
+        cleanupOutcome = "NOT_ATTEMPTED";
+        clearTimeout(timer);
+        onSettled();
+        return;
+      }
+      // Post-settlement: phase-2 will observe this.
+    });
+
+    child.on("close", () => {
+      // `'close'` fires after `'exit'` once all
+      // stdio streams are drained. Phase-2 listens
+      // for this as a positive termination signal.
+    });
+
+    child.on("error", (err) => {
+      if (settled) {
+        // Post-settlement: this is an async error
+        // that arrived after phase 1 already
+        // settled the boundary. MICROFIX07: the
+        // phase-2 helper observes errors via its
+        // OWN listener (the one it armed before
+        // kill()), so this outer shared handler
+        // does NOT need to do anything here. We
+        // deliberately do not reclassify: any
+        // authoritative cleanup outcome is
+        // produced by the phase-2 helper's own
+        // observation. Returning here keeps the
+        // shared handler non-authoritative for
+        // cleanup outcomes.
+        return;
+      }
+      // Pre-settlement: classify by whether the child
+      // was ever actually spawned (QFIX03).
+      settleOnce(spawned ? "SIGNAL_ERROR" : "SPAWN_ERROR");
+      cleanupOutcome = spawned
+        ? classifyCleanupError(err)
+        : "NOT_ATTEMPTED";
+      clearTimeout(timer);
+      onSettled();
+    });
   });
+}
 
-  child.on("exit", (code, signal) => {
-    runnerExitCode = code;
-    runnerSignal = signal;
-    if (settled) return; // boundary remains DEADLINE
-    settleOnce("CLEAN_EXIT");
-    cleanupOutcome = "NOT_ATTEMPTED";
-    clearTimeout(timer);
-    onSettled();
-  });
-
-  child.on("error", (err) => {
-    if (settled) {
-      // Post-settlement: this is a cleanup error from
-      // the deadline's kill() attempt. Classify
-      // strictly on err.code.
-      cleanupOutcome = classifyCleanupError(err);
-      return;
-    }
-    // Pre-settlement: classify by whether the child
-    // was ever actually spawned (QFIX03).
-    settleOnce(spawned ? "SIGNAL_ERROR" : "SPAWN_ERROR");
-    cleanupOutcome = spawned ? classifyCleanupError(err) : "NOT_ATTEMPTED";
-    clearTimeout(timer);
-    onSettled();
-  });
-});
-
+// MAIN ENTRYPOINT BLOCK — only runs when this script
+// is invoked directly. The test-harness import path
+// short-circuits here, before any awaits run.
+if (!isMain) {
+  // Stop early for test-harness imports. The
+  // `runDeadlineCleanup` export is the only thing
+  // LIV16 needs.
+} else {
 await settledPromise;
+// Phase 2 — bounded cleanup observation. Only run
+// when the deadline fired (the only case where the
+// cleanup outcome is not already finalized). For all
+// other boundaries, the cleanup outcome is already
+// determined (NOT_ATTEMPTED for CLEAN_EXIT, the
+// sync-classified value for SPAWN_ERROR/SIGNAL_ERROR).
+let cleanupObservationArmed = false;
+let cleanupObserved = null;
+if (boundary === "DEADLINE") {
+  cleanupObservationArmed = true;
+  cleanupObserved = await runDeadlineCleanup({
+    child,
+    observationWindowMs: CLEANUP_OBSERVATION_MS,
+    classifyCleanupError,
+    state: {
+      cleanupOutcome,
+    },
+  });
+  cleanupOutcome = cleanupObserved.cleanupOutcome;
+}
+
 const elapsed_ms = Date.now() - start;
 
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01-CORRECTION01-MICROFIX03)
+//  LIVENESS01-CORRECTION01-MICROFIX09)
 //
 // Classify liveness and test disposition INDEPENDENTLY.
 //
@@ -395,6 +859,9 @@ const observed = {
     has_start: /"kind":"test_runner_start"/.test(stderrBuf),
     has_finish: /"kind":"test_runner_finish"/.test(stderrBuf),
     spawned_via_typed_event: spawned,
+    // MICROFIX07 phase-2 audit trail.
+    cleanup_observation_armed: cleanupObservationArmed,
+    cleanup_observation_window_ms: CLEANUP_OBSERVATION_MS,
     stderr_tail: stderrBuf.slice(-500),
   },
 };
@@ -433,3 +900,5 @@ process.stderr.write(
     `cleanup=${cleanupOutcome}\n`,
 );
 process.exit(0);
+
+} // end of main-entrypoint isMain block
