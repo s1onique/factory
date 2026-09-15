@@ -1,10 +1,10 @@
-// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX10)
+// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX11)
 //
 // Ambient type declarations for the qualifier's
 // exported `runDeadlineCleanup` helper. LIV16,
-// LIV17, LIV18, and LIV19 import this helper
-// for behavioral adversarial testing against
-// an injected fake ChildProcess.
+// LIV17, LIV18, LIV19, and LIV20 import this
+// helper for behavioral adversarial testing
+// against an injected fake ChildProcess.
 //
 // MICROFIX07: removed `pendingCleanupReclassification`
 // from `state` (the helper no longer reads it —
@@ -34,6 +34,25 @@
 // observation machine with cells that assert
 // BOTH dimensions survive regardless of event
 // ordering.
+//
+// MICROFIX11: COMPLETION BOUNDARY (Option A).
+// `'close'` is the strongest terminal observation
+// in the lattice; the helper WAITS for it (or
+// for the observation window to expire) before
+// resolving. All close-out paths funnel through
+// a single idempotent `finishOperation()` which
+// cancels the timer and removes every listener
+// so no refs outlive the returned result. The
+// flag `anyListenerFired` is renamed
+// `lifecycleOrErrorEventObserved` and is mutated
+// ONLY from the listener handlers themselves
+// (never from `killResult`/`throw` processing).
+// Result shape gains `closedByTimeout` — explicit
+// proof the observation window expired versus
+// resolved naturally because all dim-specific
+// listeners fired. LIV20 pins async exit-then-
+// close fidelity and clean timer/listener
+// teardown.
 
 export type CleanupOutcome =
   | "SIGNAL_ACCEPTED"

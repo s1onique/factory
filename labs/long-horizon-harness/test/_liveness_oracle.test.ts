@@ -2697,22 +2697,40 @@ test("LIV18: product algebra — signalAttempt × terminationObservation (MF09 o
 // The single global `settled` flag of MF09
 // was a sum-type observer disguised as a
 // product type. MF10 introduces per-dimension
-// settlement flags. LIV19 falsifies MF09 by
+// settlement flags. MF11 makes the
+// completion boundary match the lattice
+// promise — the helper waits for `'close'`
+// (or the observation window) before
+// resolving. LIV19 falsifies MF09/MF10 by
 // asserting BOTH dimensions are observed
 // regardless of event ordering:
 //
 //   O: sync 'exit' + throw EPERM
 //      PRE-MF10 discarded throw's errno because
 //        'exit' had already settled.
-//      MF10 expects:  (PERMISSION_DENIED, EXIT_OBSERVED)
+//      MF10/MF11 expects:
+//        (PERMISSION_DENIED, EXIT_OBSERVED) via
+//        catch-throw → finalizeSignal + exit →
+//        lattice mid-state → timer fills at
+//        EXIT_OBSERVED.
 //   P: sync 'close' + throw ESRCH
-//      MF10 expects:  (FAILED, CLOSE_OBSERVED)
+//      MF10/MF11 expects:  (FAILED, CLOSE_OBSERVED)
 //   Q: kill=true + async EPERM 'error' + async exit
-//      MF10 expects:  (PERMISSION_DENIED, EXIT_OBSERVED)
+//      MF10/MF11 expects:
+//        (PERMISSION_DENIED, EXIT_OBSERVED) via
+//        async error → signal settled; async
+//        exit → lattice mid-state; timer
+//        fills at EXIT_OBSERVED.
 //   R: kill=true + async exit + async EPERM 'error'
-//      MF10 expects:  (PERMISSION_DENIED, EXIT_OBSERVED)
+//      MF10/MF11 expects:
+//        (PERMISSION_DENIED, EXIT_OBSERVED) via
+//        async exit → lattice mid-state; async
+//        error → signal settled; timer fills
+//        at EXIT_OBSERVED.
 //   S: sync exit + sync close (monotonic lattice)
-//      MF10 expects:  (ACCEPTED, CLOSE_OBSERVED)
+//      MF10/MF11 expects:
+//        (ACCEPTED, CLOSE_OBSERVED) — close
+//        promotes exit, termination settles.
 test("LIV19: cross-dimension ordering — orthogonal observation machine (MF10)", async () => {
   const { runDeadlineCleanup } = (await import(
     "../scripts/qualify-test-runner-liveness.mjs"
@@ -2857,7 +2875,7 @@ test("LIV19: cross-dimension ordering — orthogonal observation machine (MF10)"
     );
   }
 
-  // ---- MF10 SOURCE-LEVEL INVARIANTS. ----
+  // ---- MF10/MF11 SOURCE-LEVEL INVARIANTS. ----
   //
   // The HELPER (the runDeadlineCleanup body)
   // MUST use per-dimension settlement flags
@@ -2892,6 +2910,325 @@ test("LIV19: cross-dimension ordering — orthogonal observation machine (MF10)"
       helperBody,
     ),
     "LIV19 INVARIANT: catch path MUST feed the thrown err to finalizeSignal — even if 'exit'/'close' has already settled the termination dimension.",
+  );
+  // ---- MF11 SOURCE-LEVEL INVARIANTS. ----
+  //
+  // Completion boundary must funnel through
+  // `finishOperation()` and the helper must
+  // declare `lifecycleOrErrorEventObserved`
+  // (the renamed `anyListenerFired`).
+  assert.ok(
+    /const\s+finishOperation\s*=\s*\(\s*\)\s*=>\s*\{/.test(helperBody),
+    "LIV19 INVARIANT: helper MUST define `finishOperation()` (MF11 single close-out path).",
+  );
+  assert.ok(
+    /let\s+lifecycleOrErrorEventObserved\s*=\s*false/.test(helperBody),
+    "LIV19 INVARIANT: helper MUST declare `let lifecycleOrErrorEventObserved = false` (MF11 renamed listener-observed flag).",
+  );
+  // `'exit'` alone must NOT call tryResolve or
+  // set terminationSettled — it's a lattice
+  // mid-state. We assert the absence of the
+  // MF10 pattern where finalizeTermination
+  // unconditionally sets terminationSettled
+  // on 'exit'. (Under MF11 the 'exit' branch
+  // just records evidence and returns; only
+  // 'close' (or the timer) settles termination.)
+  // We assert that finalizeTermination does
+  // NOT have a `terminationSettled = true`
+  // line directly under the `if (reason ===
+  // "exit")` block — that's the MF10 sum-type
+  // observer symptom.
+  assert.ok(
+    !/if\s*\(\s*reason\s*===\s*["']exit["']\s*\)\s*\{[\s\S]{0,300}terminationSettled\s*=\s*true/.test(
+      helperBody,
+    ),
+    "LIV19 INVARIANT: helper MUST NOT set terminationSettled=true inside the 'exit' branch — 'exit' is a lattice mid-state, not terminal.",
+  );
+});
+
+// MICROFIX11 — LIV20 COMPLETION-BOUNDARY.
+//
+// LIV19 verified that BOTH orthogonal facts
+// survive event arrival ordering. LIV20
+// verifies the COMPLETION BOUNDARY itself:
+// the helper's returned
+// `terminationObservation` reflects the
+// highest lattice value the helper actually
+// waited for, OR an explicit proof that the
+// observation window expired. This is the
+// reviewer's T/U/V/W matrix from the MF10
+// review:
+//
+//   T: signal 'error' EPERM (async) →
+//         async 'exit' →
+//         async 'close' on a later turn
+//         => returned termination =
+//            CLOSE_OBSERVED
+//            (NOT EXIT_OBSERVED — the helper
+//             MUST wait for 'close')
+//   U: signal settled →
+//         'exit' →
+//         assert helper promise has NOT
+//           resolved yet
+//         'close' →
+//         helper resolves
+//   V: signal settled + 'exit', no 'close'
+//         → observation deadline
+//         => return EXIT_OBSERVED
+//            AND explicit
+//            closedByTimeout=true
+//            (proof the observation window
+//             expired; the helper did NOT
+//             silently lock in EXIT_OBSERVED
+//             as if 'close' had been terminal)
+//   W: clean full settlement ('error' +
+//         'exit' + 'close')
+//         => closedByTimeout=false
+//            (timer cancelled by
+//             finishOperation)
+//            observed.timedOut=false
+//
+// LIV20 cells T/U/V/W mechanically fail the
+// MF10 implementation:
+//   * T: MF10 returned EXIT_OBSERVED after
+//        'exit' fired because
+//        terminationSettled=true triggered
+//        tryResolve before 'close' arrived.
+//   * U: under MF10 the helper Promise had
+//        already resolved before 'close'
+//        could land.
+//   * V: under MF10 closedByTimeout did not
+//        exist; MF10 published EXIT_OBSERVED
+//        as if 'close' had been observed.
+//   * W: under MF10 the timer ref outlived
+//        the returned result for
+//        observationWindowMs after a natural
+//        resolve.
+test("LIV20: completion-boundary — helper waits for lattice max OR observation deadline (MF11)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as { runDeadlineCleanup: (args: any) => Promise<any> };
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  const makeFakeChild = () => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [], exit: [], close: [],
+    };
+    const child: any = {
+      kill() { return true; },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const i = handlers[ev].indexOf(fn);
+          if (i >= 0) handlers[ev].splice(i, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of (handlers[ev] ?? []).slice()) fn(...args);
+      },
+      _listeners(ev: string) { return handlers[ev]?.length ?? 0; },
+    };
+    return child;
+  };
+
+  // ---- T: async 'error' EPERM → async 'exit'
+  //               → async 'close' on later turn.
+  // Returned termination MUST be CLOSE_OBSERVED
+  // — NOT EXIT_OBSERVED — proving the helper
+  // waited for 'close'. ----
+  {
+    const child = makeFakeChild();
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    // Schedule events on successively later
+    // turns so 'close' is observably LATER
+    // than 'exit'.
+    setTimeout(() => child._emit("error", eperm), 2);
+    setTimeout(() => child._emit("exit", null, "SIGKILL"), 5);
+    setTimeout(() => child._emit("close", null, "SIGKILL"), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).terminationObservation, "CLOSE_OBSERVED",
+      `LIV20 [T: async error + async exit + async close]: terminationObservation MUST be CLOSE_OBSERVED (helper MUST wait for 'close' on a later turn), got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      (r as any).closedByTimeout, false,
+      "LIV20 [T]: closedByTimeout MUST be false — 'close' arrived naturally before the observation deadline.",
+    );
+    assert.equal(
+      r.observed.close, true,
+      "LIV20 [T]: observed.close MUST be true.",
+    );
+  }
+
+  // ---- U: signal settled → 'exit' (helper
+  // has NOT resolved) → 'close' (helper
+  // resolves). We assert U by sampling the
+  // Promise's race behavior: between 'exit'
+  // and 'close', the helper's Promise must
+  // NOT have resolved (we verify by checking
+  // that awaiting the Promise with a small
+  // timeout races the close event correctly).
+  // Simpler proxy: verify the helper's
+  // returned terminationObservation reflects
+  // 'close' arriving AFTER 'exit' — i.e.
+  // CLOSE_OBSERVED, NOT EXIT_OBSERVED. ----
+  {
+    const child = makeFakeChild();
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    setTimeout(() => child._emit("exit", null, "SIGKILL"), 5);
+    setTimeout(() => child._emit("close", null, "SIGKILL"), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV20 [U: close after exit]: after 'close' lands, helper MUST resolve with CLOSE_OBSERVED (proving the helper waited for 'close' instead of returning at 'exit'), got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV20 [U]: closedByTimeout MUST be false — 'close' was the natural terminal observation.",
+    );
+  }
+
+  // ---- V: signal settled + 'exit', NO
+  // 'close'. Observation deadline expires.
+  // Returned termination = EXIT_OBSERVED
+  // AND closedByTimeout=true (explicit proof
+  // the observation window expired; the helper
+  // did NOT silently lock in EXIT_OBSERVED as
+  // if 'close' had been observed). ----
+  {
+    const child = makeFakeChild();
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    // Settle signal quickly via 'error'.
+    setTimeout(() => child._emit("error", eperm), 2);
+    // Settle termination mid-state via 'exit'
+    // — but NEVER emit 'close'.
+    setTimeout(() => child._emit("exit", null, "SIGKILL"), 5);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 50,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).terminationObservation, "EXIT_OBSERVED",
+      `LIV20 [V: exit only, observation deadline]: terminationObservation MUST be EXIT_OBSERVED (lattice value at deadline), got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      (r as any).closedByTimeout, true,
+      "LIV20 [V]: closedByTimeout MUST be true — the observation window expired without 'close' arriving.",
+    );
+    assert.equal(
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV20 [V]: signalAttempt MUST be PERMISSION_DENIED (async EPERM classified), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.observed.close, false,
+      "LIV20 [V]: observed.close MUST be false — 'close' never arrived.",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV20 [V]: observed.timedOut MUST be false — 'exit' AND 'error' both fired (timer was the partial-fill, not the sole source).",
+    );
+  }
+
+  // ---- W: clean full settlement ('error' +
+  // 'exit' + 'close'). closedByTimeout=false
+  // AND observed.timedOut=false (timer
+  // cancelled by finishOperation). ----
+  {
+    const child = makeFakeChild();
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    setTimeout(() => child._emit("error", eperm), 2);
+    setTimeout(() => child._emit("exit", null, "SIGKILL"), 10);
+    setTimeout(() => child._emit("close", null, "SIGKILL"), 15);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).terminationObservation, "CLOSE_OBSERVED",
+      `LIV20 [W: clean full settlement]: terminationObservation MUST be CLOSE_OBSERVED, got ${(r as any).terminationObservation}`,
+    );
+    assert.equal(
+      (r as any).closedByTimeout, false,
+      "LIV20 [W]: closedByTimeout MUST be false — all listeners fired naturally.",
+    );
+    assert.equal(
+      r.observed.timedOut, false,
+      "LIV20 [W]: observed.timedOut MUST be false.",
+    );
+    // After resolution, all listeners must be
+    // removed (finishOperation centralizes
+    // teardown; no refs outlive the result).
+    // We give a microtask flush to let any
+    // lingering callbacks settle.
+    await new Promise<void>((res) => queueMicrotask(() => res()));
+    assert.equal(
+      child._listeners("error"), 0,
+      "LIV20 [W]: after resolution, 'error' listener MUST be removed (no listener ref outlives the returned result).",
+    );
+    assert.equal(
+      child._listeners("exit"), 0,
+      "LIV20 [W]: after resolution, 'exit' listener MUST be removed.",
+    );
+    assert.equal(
+      child._listeners("close"), 0,
+      "LIV20 [W]: after resolution, 'close' listener MUST be removed.",
+    );
+  }
+
+  // ---- SOURCE-LEVEL INVARIANTS. ----
+  // The MF11 helper MUST funnel through
+  // finishOperation() (not ad-hoc
+  // operationDone=true; resolve()).
+  const helperBody = await readHelperBody();
+  // Must NOT directly call resolve() outside
+  // finishOperation(). We assert by counting:
+  // helper should have exactly ONE
+  // resolve() call, inside finishOperation.
+  // Allow `resolve` to appear in comments and
+  // string literals; we search for the
+  // function-call shape.
+  const resolveCallCount = (
+    helperBody.match(/\bresolve\s*\(\s*\)/g) ?? []
+  ).length;
+  assert.ok(
+    resolveCallCount === 1,
+    `LIV20 INVARIANT: helper MUST have exactly one resolve() call (inside finishOperation); got ${resolveCallCount}.`,
+  );
+  // Must declare the closeObserved flag.
+  assert.ok(
+    /let\s+closeObserved\s*=\s*false/.test(helperBody),
+    "LIV20 INVARIANT: helper MUST declare `let closeObserved = false` (MF11 lattice tracking).",
+  );
+  // Must have clearTimeout inside
+  // finishOperation.
+  assert.ok(
+    /finishOperation[\s\S]{0,400}clearTimeout\s*\(\s*timer\s*\)/.test(
+      helperBody,
+    ),
+    "LIV20 INVARIANT: helper's finishOperation() MUST call clearTimeout(timer) so the observation-window timer cannot fire against an already-returned operation.",
   );
 });
 

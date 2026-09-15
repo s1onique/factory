@@ -322,6 +322,11 @@ export const runDeadlineCleanup = async (args) => {
   const observed = { error: false, exit: false, close: false, timedOut: false };
   let killResult = false;
   let threw = false;
+  // MF11 — hoisted out of the Promise executor
+  // so the post-Promise return shape can read
+  // it. Set to true by finalizeTimeout; read
+  // by the helper's final return.
+  let closedByTimeout = false;
   // MICROFIX10 — TWO INDEPENDENT DIMENSIONAL
   // SETTLEMENT FLAGS.
   //
@@ -366,137 +371,515 @@ export const runDeadlineCleanup = async (args) => {
   // because Node docs document `'close'` as
   // occurring AFTER process termination and stdio
   // closure — strictly later than `'exit'`.
+  //
+  // MICROFIX11 — COMPLETION BOUNDARY (Option A).
+  //
+  // The MF10 helper published its result as
+  // soon as BOTH per-dimension settlement flags
+  // were true. That meant `'exit'` alone was
+  // enough to publish `EXIT_OBSERVED` even
+  // though the deliberately-retained `'close'`
+  // listener had not yet fired — a disposition-
+  // to-code mismatch: the lattice promised
+  // CLOSE_OBSERVED as the upper bound, but the
+  // return boundary locked in EXIT_OBSERVED.
+  //
+  // MF11 chooses Option A explicitly:
+  //   * `'close'` IS the strongest terminal
+  //      observation in the lattice.
+  //   * The helper WAITS for `'close'` unless
+  //      the observation window expires.
+  //   * Concretely:
+  //       `'exit'`  lands  → EXIT_OBSERVED,
+  //                          'close' listener
+  //                          STAYS armed,
+  //                          helper does NOT
+  //                          resolve.
+  //       `'close'` lands → CLOSE_OBSERVED,
+  //                          helper may resolve
+  //                          if signal also
+  //                          settled.
+  //       observation
+  //       deadline        → termination settles
+  //                          at whatever the
+  //                          current lattice
+  //                          value is
+  //                          (NOT_OBSERVED /
+  //                           EXIT_OBSERVED /
+  //                           CLOSE_OBSERVED).
+  //                          That result is
+  //                          explicit proof the
+  //                          observation window
+  //                          expired.
+  //
+  // Every close-out path — natural OR timeout —
+  // is funneled through `finishOperation()`,
+  // which is idempotent and centralizes timer /
+  // listener teardown so no refs outlive the
+  // returned result.
+  //
+  // Also: `anyListenerFired` is renamed to
+  // `lifecycleOrErrorEventObserved` and is
+  // mutated ONLY from `onError`, `onExit`,
+  // `onClose` — never from direct return/throw
+  // processing. The original name implied
+  // "any listener fired" but
+  // `finalizeSignal("killResult", ...)` was
+  // setting it, which muddied `observed.timedOut`.
+  // The timer is a no-evidence source and MUST
+  // NOT count.
   let signalAttempt = "NOT_ATTEMPTED";
   let terminationObservation = "NOT_OBSERVED";
 
   await new Promise((resolve) => {
-    // MF10 — per-dimension settlement flags.
+    // MF10/MF11 — per-dimension settlement flags
+    // + completion-boundary machinery.
     let signalSettled = false;
+    // terminationSettled is the SIGNAL that the
+    // termination dimension has reached its
+    // TERMINAL value. Under MF11 the terminal
+    // value is either CLOSE_OBSERVED (lattice
+    // max via the 'close' listener) OR the
+    // observation-window-expired fallback at
+    // whatever current lattice state was
+    // observed. `'exit'` alone does NOT settle
+    // termination — it is a lattice mid-state.
     let terminationSettled = false;
+    let closeObserved = false;
     let operationDone = false;
-    // closedByTimeout tracks whether the helper
-    // resolved because the observation window
-    // expired (true) versus because both dim-
-    // specific listeners fired naturally (false).
-    let closedByTimeout = false;
-    // anyListenerFired tracks whether ANY dim-
-    // specific listener fired during this run.
-    // If no listener fired at all and the timer
-    // expires, observed.timedOut is true. If at
-    // least one listener fired (even on the
-    // OTHER dim), observed.timedOut stays false
-    // because the helper's eventual close was
-    // not a "no-evidence" timeout.
-    let anyListenerFired = false;
+    // MF11 — killReturned tracks whether
+    // child.kill() has returned. Used by
+    // deriveSignalAttempt to distinguish
+    // "kill hasn't returned yet, so killResult
+    // is still its default" from "kill returned
+    // false". The former is the case when a
+    // sync 'close' fires from inside kill()
+    // (killBehavior) — killResult is unknown
+    // at that moment but the absence of error/
+    // throw implies the implicit signal will
+    // be ACCEPTED.
+    let killReturned = false;
+    // closedByTimeout is hoisted to the helper
+    // outer scope (see above) so it can be
+    // read in the post-Promise return shape.
+    // MF11 — rename tracked separately.
+    // lifecycleOrErrorEventObserved: true iff
+    // at least one of `onError`/`onExit`/
+    // `onClose` actually fired. Set ONLY by the
+    // listener handlers themselves — never by
+    // direct return/throw processing or the
+    // kill() return value. Under MF11 this is
+    // the canonical "did any lifecycle event
+    // arrive" boolean, used by the timer path
+    // to decide whether `observed.timedOut`
+    // should be true.
+    let lifecycleOrErrorEventObserved = false;
+    // listenerRemoved tracks whether each
+    // listener has already been removed by a
+    // per-dimension finalizer. finishOperation
+    // uses this to avoid double-removing
+    // (which would otherwise break tests that
+    // count removeListener calls).
+    const listenerRemoved = { error: false, exit: false, close: false };
+    // lastErrorEventErr captures the err
+    // payload from the most recent 'error'
+    // event. tryResolve uses it to derive
+    // signalAttempt with priority over
+    // killResult. The async 'error' listener
+    // can land AFTER closeObserved, so we
+    // re-derive each call.
+    let lastErrorEventErr = null;
+    // throwErr captures the err thrown by
+    // kill() so deriveSignalAttempt can
+    // classify it if no 'error' event
+    // arrives. The throw path is sync
+    // (catch block); finalizeSignal("throw")
+    // sets it.
+    let throwErr = null;
 
-    // Close out the helper when BOTH dimensions
-    // have finalized. Used by per-dim finalizers.
+    // The single close-out path. Idempotent.
+    // Centralizes timer cancel, listener removal,
+    // and Promise resolution so the helper
+    // cannot leave the observation envelope
+    // armed after returning. Every finalizer
+    // (per-dim + timeout) calls this.
+    const finishOperation = () => {
+      if (operationDone) return;
+      operationDone = true;
+      // Cancel the observation-window timer so
+      // its callback cannot fire against an
+      // already-returned operation.
+      clearTimeout(timer);
+      // Remove every listener we may have
+      // installed. `removeListener` is a no-op
+      // on the underlying EventEmitter if the
+      // listener is already gone, but a
+      // wrapped/observed removeListener would
+      // count a no-op call. We use a local
+      // flag set so finishOperation removes
+      // each listener EXACTLY once — if a
+      // per-dimension finalizer already removed
+      // it, finishOperation skips that
+      // removal.
+      if (!listenerRemoved.error) {
+        child.removeListener("error", onError);
+        listenerRemoved.error = true;
+      }
+      if (!listenerRemoved.exit) {
+        child.removeListener("exit", onExit);
+        listenerRemoved.exit = true;
+      }
+      if (!listenerRemoved.close) {
+        child.removeListener("close", onClose);
+        listenerRemoved.close = true;
+      }
+      resolve();
+    };
+
+    // Try to advance toward operation close.
+    // MF11 — Option A from the review.
+    //
+    // The helper completes when:
+    //   * termination is terminal — EITHER
+    //      closeObserved (lattice max from
+    //      the 'close' listener) OR the
+    //      closedByTimeout fallback fires —
+    //      AND
+    //   * signal has a defined value.
+    //
+    // Signal value is derived from the most
+    // authoritative source. The async `'error'`
+    // listener can still land AFTER
+    // closeObserved and upgrade the signal
+    // value before finishOperation actually
+    // resolves the Promise. We re-derive each
+    // call so a late 'error' can still win.
+    const deriveSignalAttempt = () => {
+      // Priority order:
+      //   1. observed.error → use classify on
+      //      whatever typed err was last seen.
+      //   2. threw → use classify on throwErr.
+      //   3. killResult=false → FAILED.
+      //   4. killResult=true → ACCEPTED.
+      //
+      // NB: at the moment `'close'` fires
+      // SYNCHRONOUSLY from inside kill() (LIV17
+      // cell S + LIV19 cell S — killBehavior
+      // emits events before kill returns), the
+      // helper has NOT yet assigned `killResult`
+      // from the kill() return value. The
+      // signal's "ACCEPTED" inference at that
+      // moment depends on whether we observed
+      // any error/throw, NOT on the
+      // killResult. We use this fallback to
+      // avoid the race where deriveSignalAttempt
+      // sees killResult=false (the default)
+      // before kill() returns. The post-kill
+      // finalizeSignal call will refine if
+      // killResult=false; otherwise the helper
+      // waits for the timer or close to settle.
+      if (observed.error && lastErrorEventErr) {
+        return classifyCleanupError(lastErrorEventErr);
+      }
+      if (observed.error) {
+        // 'error' fired but we didn't capture
+        // the err (shouldn't happen with the
+        // current handler shape).
+        return "FAILED";
+      }
+      if (threw) {
+        return classifyCleanupError(throwErr);
+      }
+      // If kill() has already returned, its
+      // value is authoritative. If kill() is
+      // still in flight (sync 'close' fired
+      // from inside kill() before killResult
+      // was assigned), the absence of error
+      // AND throw means the implicit signal
+      // is ACCEPTED — kill will return true
+      // for any process it can actually
+      // signal, and 'close' arriving sync
+      // means the process exited cleanly. If
+      // kill() later returns false, the
+      // post-kill finalizeSignal path will
+      // overwrite signalAttempt with FAILED.
+      if (killReturned) {
+        return killResult ? "ACCEPTED" : "FAILED";
+      }
+      return "ACCEPTED";
+    };
     const tryResolve = () => {
       if (operationDone) return;
-      if (signalSettled && terminationSettled) {
-        operationDone = true;
-        resolve();
+      // Always re-derive signal every call so a
+      // late 'error' or late throw can upgrade
+      // from ACCEPTED to PERMISSION_DENIED /
+      // FAILED before close-out. deriveSignalAttempt
+      // honors priority: observed.error > threw
+      // > killResult.
+      const nextSignal = deriveSignalAttempt();
+      if (nextSignal !== signalAttempt || !signalSettled) {
+        signalAttempt = nextSignal;
+        signalSettled = true;
+        // NB: we do NOT remove the 'error'
+        // listener here. The async 'error'
+        // listener can still land AFTER an
+        // implicit settle; if we remove it
+        // here we lose that upgrade path.
+        // finalizeSignal removes 'error' ONLY
+        // when reason === "error" (the actual
+        // listener firing).
+      }
+      if (terminationSettled && signalSettled) {
+        finishOperation();
       }
     };
 
     // Per-dimension finalizers. Each is guarded
     // by ITS OWN flag. Listener removal is
     // scoped to the dimension it serves.
+    //
+    // MF11 — signal finalization is now
+    // DEFERRED to `deriveSignalAttempt()` in
+    // `tryResolve()`. The reason this function
+    // exists at all is to capture the err
+    // payloads (lastErrorEventErr, throwErr)
+    // and to handle the synchronous-completion
+    // short-circuit when no listener will ever
+    // fire. The actual `signalAttempt` value is
+    // derived at tryResolve time so a late
+    // 'error' can upgrade from ACCEPTED to
+    // PERMISSION_DENIED before close-out.
     const finalizeSignal = (reason, syncErr) => {
-      if (signalSettled) return;
+      // MF11 — signalAttempt can be UPGRADED
+      // by a later authoritative source even
+      // after an implicit settle. An implicit
+      // ACCEPTED (from sync 'close' during
+      // kill) can be replaced by:
+      //   * an explicit `'error'` event with
+      //      a classified errno
+      //   * an explicit throw from kill()
+      //   * killResult=false
+      // We only allow upgrade — never
+      // downgrade (ACCEPTED → FAILED via a
+      // later killResult=false is fine; but
+      // FAILED → ACCEPTED is not).
+      const upgrading =
+        !signalSettled ||
+        (reason === "error" && signalAttempt !== "PERMISSION_DENIED") ||
+        (reason === "killResult" && syncErr === false) ||
+        (reason === "throw" && signalAttempt !== "FAILED");
+      if (!upgrading) return;
       signalSettled = true;
-      anyListenerFired = true;
-      child.removeListener("error", onError);
-      observed.error = (reason === "error");
+      if (!listenerRemoved.error) {
+        child.removeListener("error", onError);
+        listenerRemoved.error = true;
+      }
+      observed.error = observed.error || (reason === "error");
+      // Capture the err payload for
+      // deriveSignalAttempt.
       if (reason === "error") {
-        signalAttempt = syncErr
-          ? classifyCleanupError(syncErr)
-          : "FAILED";
-      } else if (reason === "killResult") {
-        signalAttempt = syncErr ? "ACCEPTED" : "FAILED";
+        lastErrorEventErr = syncErr;
       } else if (reason === "throw") {
-        signalAttempt = classifyCleanupError(syncErr);
+        throwErr = syncErr;
+      }
+      // Re-derive signal value with the new
+      // authoritative info.
+      signalAttempt = deriveSignalAttempt();
+      // signalAttempt is set by tryResolve →
+      // deriveSignalAttempt, which honors
+      // priority: observed.error > threw >
+      // killResult.
+      //
+      // MF11 — SYNCHRONOUS COMPLETION SHORT-CIRCUIT.
+      //
+      // If the signal dimension settles via
+      // direct return/throw processing (i.e.
+      // reason is "killResult" or "throw" —
+      // NOT "error"), AND no lifecycle or
+      // error event has fired yet, the helper
+      // CANNOT gain any further meaningful
+      // evidence about termination. The signal
+      // has DEFINITIVELY failed (kill returned
+      // false) or DEFINITIVELY threw; the
+      // helper should not sit for
+      // `observationWindowMs` waiting for
+      // events that cannot rescue the already-
+      // decided signal. Mark
+      // `closedByTimeout=true`, settle
+      // termination at the current lattice
+      // value (NOT_OBSERVED here), and
+      // resolve. This satisfies LIV16 C/D.
+      //
+      // If `lifecycleOrErrorEventObserved` is
+      // already true (a lifecycle event landed
+      // before this signal settle — possible
+      // if killResult=false interleaved with
+      // an async 'exit' on a different turn),
+      // we do NOT short-circuit. The helper
+      // still waits for 'close' / timer.
+      if (
+        (reason === "killResult" || reason === "throw") &&
+        !lifecycleOrErrorEventObserved
+      ) {
+        closedByTimeout = true;
+        if (!terminationSettled) {
+          terminationSettled = true;
+        }
+        // Derive signal value BEFORE
+        // finishOperation so the returned
+        // result carries the correct
+        // signalAttempt.
+        signalAttempt = deriveSignalAttempt();
+        signalSettled = true;
+        finishOperation();
+        return;
       }
       tryResolve();
     };
     const finalizeTermination = (reason) => {
-      // MF10 MONOTONIC LATTICE — 'close' can
-      // ALWAYS upgrade an already-settled
-      // 'exit' observation. We check for
-      // close FIRST before the early-return
-      // guard so the promotion lands even if
-      // terminationSettled is already true
-      // from a prior 'exit'.
+      // MF11 — COMPLETION BOUNDARY (Option A).
+      //
+      // `'close'` IS the strongest terminal
+      // observation. Only `'close'` settles
+      // termination (modulo the timer fallback
+      // in finalizeTimeout). `'exit'` is a
+      // lattice MID-state that records evidence
+      // but does NOT close the helper.
+      //
+      // Concretely:
+      //   * 'exit' lands  → recorded as
+      //                     EXIT_OBSERVED;
+      //                     'close' listener
+      //                     stays armed;
+      //                     helper does NOT
+      //                     resolve.
+      //   * 'close' lands → CLOSE_OBSERVED;
+      //                     termination settled;
+      //                     helper may resolve.
       if (reason === "close") {
-        // close is the upper bound of the
-        // lattice; promote unconditionally.
         observed.close = true;
+        closeObserved = true;
+        // Monotonic promotion: even if a prior
+        // 'exit' fired, close is the upper bound.
         terminationObservation = "CLOSE_OBSERVED";
-        anyListenerFired = true;
+        lifecycleOrErrorEventObserved = true;
+        // Now — and ONLY now — is termination
+        // terminal. Remove the now-redundant
+        // listeners.
         if (!terminationSettled) {
           terminationSettled = true;
-          child.removeListener("exit", onExit);
-          child.removeListener("close", onClose);
+          if (!listenerRemoved.exit) {
+            child.removeListener("exit", onExit);
+            listenerRemoved.exit = true;
+          }
+          if (!listenerRemoved.close) {
+            child.removeListener("close", onClose);
+            listenerRemoved.close = true;
+          }
         }
         tryResolve();
         return;
       }
-      if (terminationSettled) return;
-      terminationSettled = true;
-      anyListenerFired = true;
-      // MF10 MONOTONIC LATTICE — we remove ONLY
-      // the 'exit' listener here. The 'close'
-      // listener stays armed so a later 'close'
-      // can promote EXIT_OBSERVED → CLOSE_OBSERVED.
-      // ('close' is the upper bound of the
-      // lattice.)
-      child.removeListener("exit", onExit);
+      // 'exit' (or 'timer' but that's handled in
+      // finalizeTimeout, not here).
       if (reason === "exit") {
         observed.exit = true;
-        // Monotonic: NOT_OBSERVED → EXIT_OBSERVED.
+        // MF11 — lattice mid-state. Record the
+        // evidence but DO NOT settle termination.
+        // The 'close' listener STAYS armed so
+        // close can promote EXIT_OBSERVED →
+        // CLOSE_OBSERVED, which is what the
+        // completion boundary waits for.
+        lifecycleOrErrorEventObserved = true;
         if (terminationObservation === "NOT_OBSERVED") {
           terminationObservation = "EXIT_OBSERVED";
         }
+        // No tryResolve() — termination is not
+        // terminal yet. The 'close' listener
+        // stays installed.
+        return;
       }
-      tryResolve();
     };
     // Timeout: fill any unsettled dimension and
     // resolve. This is the ONLY place that closes
     // out the helper via time, and it does so
     // for BOTH dimensions.
     //
-    // `observed.timedOut` is true ONLY if the
-    // timer was the SOLE source of settlement
-    // (no dim-specific listener ever fired).
-    // If at least one listener fired (sync or
-    // async) on either dimension, observed.timedOut
-    // stays false — the helper was closed
-    // partially by listener evidence, partially
-    // by the timer filling the unfilled dim.
+    // MF11 — the timeout is THE fallback that
+    // makes termination terminal when `'close'`
+    // never arrived. After this fires,
+    // termination settles at whatever the current
+    // lattice value is (NOT_OBSERVED /
+    // EXIT_OBSERVED / CLOSE_OBSERVED), and
+    // `closedByTimeout` is the explicit proof the
+    // observation window expired. `termination
+    // Observation` already carries that lattice
+    // value — finalizeTimeout does not overwrite
+    // it; it only settles the dim and resolves.
+    //
+    // `observed.timedOut` is true ONLY if NO
+    // lifecycle or error event ever fired. If at
+    // least one of `onError`/`onExit`/`onClose`
+    // fired (sync or async) on either dimension,
+    // `observed.timedOut` stays false — the
+    // helper was closed partially by listener
+    // evidence, partially by the timer filling
+    // the unfilled dim.
+    //
+    // All close-out is funneled through
+    // `finishOperation()` so timer/listener
+    // teardown is centralized and idempotent.
     const finalizeTimeout = () => {
       closedByTimeout = true;
-      if (!signalSettled) {
-        signalSettled = true;
+      // Re-derive signalAttempt every time so
+      // any late 'error' is honored. Signal
+      // is always settleable here: by error,
+      // throw, killResult=false, or killResult=true.
+      signalAttempt = deriveSignalAttempt();
+      signalSettled = true;
+      if (!listenerRemoved.error) {
         child.removeListener("error", onError);
-        signalAttempt = killResult ? "ACCEPTED" : "FAILED";
+        listenerRemoved.error = true;
       }
       if (!terminationSettled) {
+        // The lattice value was already recorded
+        // by finalizeTermination('exit') if 'exit'
+        // fired, or stays NOT_OBSERVED. Either
+        // way, termination is now terminal via
+        // the timer fallback.
         terminationSettled = true;
-        child.removeListener("exit", onExit);
-        child.removeListener("close", onClose);
       }
-      if (!anyListenerFired) {
+      if (!lifecycleOrErrorEventObserved) {
         observed.timedOut = true;
       }
-      operationDone = true;
-      resolve();
+      // Funnel through the single close-out path.
+      finishOperation();
     };
 
     // ---- SYNCHRONOUS handlers. ----
     // Each handler finalizes ITS dimension only.
-    const onError = (err) => finalizeSignal("error", err);
-    const onExit = () => finalizeTermination("exit");
-    const onClose = () => finalizeTermination("close");
+    // The handlers themselves set
+    // `lifecycleOrErrorEventObserved = true`
+    // BEFORE delegating to the finalizer so
+    // that even if the finalizer short-circuits
+    // (e.g. signal already settled via
+    // killResult), the fact that THIS listener
+    // actually fired is recorded. This is the
+    // MF11 contract: the flag tracks whether
+    // any lifecycle/error event was OBSERVED,
+    // not whether any finalizer ran.
+    const onError = (err) => {
+      lifecycleOrErrorEventObserved = true;
+      finalizeSignal("error", err);
+    };
+    const onExit = () => {
+      lifecycleOrErrorEventObserved = true;
+      finalizeTermination("exit");
+    };
+    const onClose = () => {
+      lifecycleOrErrorEventObserved = true;
+      finalizeTermination("close");
+    };
 
     // ---- ARM observers BEFORE kill. ----
     child.on("error", onError);
@@ -529,6 +912,8 @@ export const runDeadlineCleanup = async (args) => {
     try {
       killResult = child.kill("SIGKILL");
     } catch (err) {
+      killReturned = true;
+      throwErr = err;
       threw = true;
       killResult = false;
       // MF10: feed the thrown err to the SIGNAL
@@ -539,8 +924,18 @@ export const runDeadlineCleanup = async (args) => {
       // AWAY if a sync 'exit'/'close' listener
       // had already settled (LIV19 case O).
       finalizeSignal("throw", err);
+      // MF11 — re-derive signal now that
+      // throwErr is set, so a sync 'close'
+      // that already settled signal as
+      // ACCEPTED can be OVERWRITTEN by the
+      // throw's classified evidence.
+      tryResolve();
       return;
     }
+    // MF11 — kill() returned (whether true or
+    // false). From this moment deriveSignalAttempt
+    // treats killResult as authoritative.
+    killReturned = true;
     // kill() returned without throwing.
     //   * If kill returned FALSE → the helper
     //     knows immediately that the signal
@@ -561,8 +956,22 @@ export const runDeadlineCleanup = async (args) => {
     //     The observation window timeout
     //     fills signal from killResult if
     //     nothing else arrives.
+    //
+    // MF11 — RE-DERIVE signal now that
+    // killResult is authoritative. If a sync
+    // 'close' fired from inside kill() and
+    // pre-settled signal as ACCEPTED, the
+    // kill() return can OVERWRITE it with
+    // FAILED if kill returned false.
     if (killResult === false) {
       finalizeSignal("killResult", killResult);
+    } else {
+      // kill() returned true — re-derive
+      // signal so a sync 'close' that
+      // pre-settled signal as ACCEPTED is
+      // CONFIRMED, not re-overwritten by
+      // tryResolve later.
+      tryResolve();
     }
   });
 
@@ -615,13 +1024,41 @@ export const runDeadlineCleanup = async (args) => {
     state.cleanupOutcome = cleanupOutcome;
   }
 
+  // Snapshot at return time. `closedByTimeout`,
+  // `observed`, `signalAttempt`, etc. are all
+  // mutable closure-scoped `let`s. If we
+  // returned the live variables, a later timer
+  // callback (or async listener) could mutate
+  // them AFTER the caller has received the
+  // result — but the helper has already
+  // resolved. That is a classic
+  // post-publication-mutation bug; LIV20 cell
+  // U exposes it.
+  const closedByTimeoutSnapshot = closedByTimeout;
+  const killResultSnapshot = killResult;
+  const threwSnapshot = threw;
+  const cleanupOutcomeSnapshot = cleanupOutcome;
+  const signalAttemptSnapshot = signalAttempt;
+  const terminationObservationSnapshot = terminationObservation;
+  const observedSnapshot = { ...observed };
+
   return {
-    killResult,
-    threw,
-    cleanupOutcome,
-    signalAttempt,
-    terminationObservation,
-    observed,
+    killResult: killResultSnapshot,
+    threw: threwSnapshot,
+    cleanupOutcome: cleanupOutcomeSnapshot,
+    signalAttempt: signalAttemptSnapshot,
+    terminationObservation: terminationObservationSnapshot,
+    observed: observedSnapshot,
+    // MF11 — explicit proof that the observation
+    // window expired (true) versus the helper
+    // resolved naturally because all dim-
+    // specific listeners fired (false).
+    // Snapshotted at return time so a late
+    // timer callback (or late listener firing
+    // on a closed-by-close operation) cannot
+    // mutate the value the caller already
+    // received.
+    closedByTimeout: closedByTimeoutSnapshot,
   };
 };
 
