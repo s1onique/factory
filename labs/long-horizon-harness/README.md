@@ -563,4 +563,131 @@ See:
 - `test/witness/pure.test.ts` — pure protocol/state tests
   (`npm run test:witness`)
 - `test/witness/witness-live.test.ts` — live qualification lane
+- `test/witness/witness-live.test.ts` — live qualification lane
+  (`npm run qualify:witness-live`)
+
+## FOUNDATION04 — Phase D — Experiment Subject Contract
+
+ACT `ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-PHASE-D-EXPERIMENT-SUBJECT-CONTRACT01`.
+
+> **What exactly is one experimental subject, and how can we
+> prove that two runs compared the intended subjects under
+> equivalent immutable inputs?**
+
+Phase D establishes the **immutable experimental subject** —
+the contract one run is "about." It does NOT measure
+convergence. Convergence evidence arrives in Phase E.
+
+### Doctrine
+
+```text
+RUN EVIDENCE MAY REFER TO AN EXPERIMENT SUBJECT.
+IT MAY NEVER SILENTLY REDEFINE THAT SUBJECT.
+```
+
+A SubjectManifest names everything that defines ONE
+experimental subject. It is the closed-world claim:
+
+```text
+"If you ran me with these inputs, you were running
+ experiment X about subject Y under conditions C."
+```
+
+### Required identity dimensions
+
+```text
+schema_version       : literal "phase-d.subject.v1"
+experiment_id        : ExperimentId
+subject_id_hint      : SubjectIdHint (human-readable label)
+
+harness              : { id, version, source_revision }
+model                : { provider, model_id, configuration }
+prompt               : { prompt_id, content_hash }
+task                 : { task_id, fixture_revision }
+repository           : { commit, dirty_policy }
+budget               : { wall_clock_ms, turns, tool_calls,
+                         token_limit? }
+capabilities         : { tools, network, filesystem,
+                         execution_policy }
+repetition           : { repetition_index, seed? }
+```
+
+`dirty_policy` is closed-world: `"reject" | "allow-record"`.
+`"ignore"` is rejected as a safety default — the subject MUST
+be bound to a known repository state.
+
+### SubjectId — canonical content hash
+
+```text
+subjectId = "subject:" + sha256(
+    "factory:phase-d:subject:id:v1" || "\u0000" ||
+    canonicalize(manifest)
+)
+```
+
+Properties:
+
+- **Deterministic.** Same canonical content → same SubjectId.
+- **Key-order independent.** Source-object key insertion order
+  does not affect the hash (sorted-key canonicalization).
+- **One-field-change sensitive.** Changing any required
+  dimension changes the canonical bytes → changes the
+  SubjectId.
+- **Domain-tag separated.** The v1 tag prevents collision with
+  any other Factory content identifier that uses the same
+  canonical bytes.
+
+### Decoder (the runtime authority)
+
+```ts
+import { decodeSubjectManifest, freezeSubject } from
+  "./src/subject/index.js";
+
+const r = decodeSubjectManifest(input);
+if (!r.ok) {
+  // r.failure.kind is one of:
+  //   "not_an_object"      — input was not a JSON object
+  //   "schema_validation"  — unknown key, bad type, bad enum,
+  //                          bad SHA, etc. (closed-world)
+  //   "id_construction"    — defense in depth; unreachable
+  //                          given the validator
+  return;
+}
+
+const subject: FrozenSubject =
+  freezeSubject(r.value.manifest, r.value.subjectId);
+```
+
+Unknown top-level keys fail closed. The decoder NEVER throws.
+
+### Acceptance targets
+
+```text
+SUBJECT_SCHEMA_VERSIONING       = PASS
+SUBJECT_DECODER_FAIL_CLOSED     = PASS
+UNKNOWN_FIELDS_POLICY           = EXPLICIT (fail-closed)
+CANONICAL_HASH_DETERMINISTIC    = PASS
+SUBJECT_ID_CONTENT_BOUND        = PASS
+REPO_REVISION_BOUND             = PASS
+PROMPT_CONTENT_BOUND            = PASS
+HARNESS_VERSION_BOUND           = PASS
+MODEL_CONFIGURATION_BOUND       = PASS
+BUDGET_BOUND                    = PASS
+CAPABILITY_SET_BOUND            = PASS
+MUTATION_AFTER_CREATION         = REJECTED
+REPLAY_SAME_MANIFEST_SAME_ID    = PASS
+ONE_FIELD_CHANGE_DIFFERENT_ID   = PASS
+```
+
+Phase D does NOT yet carry run evidence, gate transitions,
+or convergence metrics. Those arrive in Phase E.
+
+### See
+
+- `src/subject/` — `subject-canonicalize`, `subject-id`,
+  `subject-types`, `subject-decode`, `subject-frozen`,
+  `index`
+- `test/subject/` — unit tests for canonicalization,
+  decoder, and freeze (`npm run test:subject`)
+
   (`npm run qualify:witness-live`)

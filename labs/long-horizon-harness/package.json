@@ -42,7 +42,8 @@
     "fix:eof": "node scripts/normalize-eof.mjs",
     "normalize-eof": "node scripts/normalize-eof.mjs",
     "all": "npm run check:eof && npm run typecheck && npm run build && npm run test",
-    "test:process:live": "node --import tsx --test --test-reporter=spec --test-timeout=30000 test/process/process-live-qualification.test.ts"
+    "test:process:live": "node --import tsx --test --test-reporter=spec --test-timeout=30000 test/process/process-live-qualification.test.ts",
+    "test:subject": "node --import tsx --test --test-reporter=spec test/subject/subject-canonicalize.test.ts test/subject/subject-decode.test.ts test/subject/subject-frozen.test.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.2",
