@@ -1,5 +1,9 @@
 # Factory
 
+<p align="center">
+  <img src="./img/torch.png" alt="Factory symbol: a man holding a torch in the darkness" width="500">
+</p>
+
 Factory is an open process for building and improving feedback loops around software work.
 
 It helps turn repeated engineering practice into inspectable doctrine, reusable templates, review frameworks, examples, talks, and onboarding paths. The goal is not to prescribe one true way to build software, but to make useful development loops visible enough that others can run them, challenge them, and improve them.
