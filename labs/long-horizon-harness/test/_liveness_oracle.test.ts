@@ -1894,7 +1894,17 @@ test("LIV16: qualifier waits for async cleanup error before emitting final evide
   }
 
   // CASE C — kill returns false (no exception).
-  // Phase-2 observation MUST NOT run; result is FAILED.
+  // MF12: Phase-2 observation DOES run; the
+  // helper MUST wait for the real observation
+  // deadline even though kill() returned false,
+  // because a later `'exit'`/`'close'` is still
+  // possible (Node documents that `kill()`
+  // returning false says nothing about whether
+  // the child has reached exit/close yet).
+  // Result: FAILED signal, NOT_OBSERVED
+  // termination, closedByTimeout=true,
+  // observed.timedOut=true (no listener
+  // fired before the deadline).
   {
     const child = makeFakeChild({ killResult: false });
     const state = {
@@ -1909,12 +1919,28 @@ test("LIV16: qualifier waits for async cleanup error before emitting final evide
     );
     assert.equal(r.killResult, false, "LIV16 CASE C: killResult must be false");
     assert.equal(
-      r.observed.timedOut, false,
-      "LIV16 CASE C: observation MUST NOT run when kill returned false",
+      (r as any).signalAttempt, "FAILED",
+      `LIV16 CASE C: signalAttempt MUST be FAILED, got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "NOT_OBSERVED",
+      `LIV16 CASE C: terminationObservation MUST be NOT_OBSERVED (no listener fired), got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, true,
+      "LIV16 CASE C: closedByTimeout MUST be true — the observation window expired (the real timer fired).",
+    );
+    assert.equal(
+      r.observed.timedOut, true,
+      "LIV16 CASE C: observed.timedOut MUST be true — no listener fired before the deadline.",
     );
   }
 
   // CASE D — kill THROWS EPERM → PERMISSION_DENIED.
+  // MF12: same as C — observation runs, signal
+  // is PERMISSION_DENIED (classified throw),
+  // termination is NOT_OBSERVED,
+  // closedByTimeout=true, observed.timedOut=true.
   {
     const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
     const child = makeFakeChild({ killThrow: eperm });
@@ -1930,8 +1956,16 @@ test("LIV16: qualifier waits for async cleanup error before emitting final evide
     );
     assert.equal(r.threw, true, "LIV16 CASE D: threw must be true");
     assert.equal(
-      r.observed.timedOut, false,
-      "LIV16 CASE D: observation MUST NOT run when kill threw",
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV16 CASE D: signalAttempt MUST be PERMISSION_DENIED (throw classified), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.closedByTimeout, true,
+      "LIV16 CASE D: closedByTimeout MUST be true — the observation window expired (the real timer fired).",
+    );
+    assert.equal(
+      r.observed.timedOut, true,
+      "LIV16 CASE D: observed.timedOut MUST be true — no listener fired before the deadline.",
     );
   }
 
@@ -3232,9 +3266,303 @@ test("LIV20: completion-boundary — helper waits for lattice max OR observation
   );
 });
 
+// MICROFIX12 — LIV21 SYNCHRONOUS-FAILURE-THEN-
+// LIFECYCLE FIDELITY.
+//
+// LIV20 verified that the helper waits for
+// 'close' (or the observation deadline) before
+// resolving — but it implicitly assumed the
+// signal dimension settled synchronously.
+// LIV21 verifies the harder property: when
+// the SIGNAL dimension settles synchronously
+// (kill=false / kill throw), the TERMINATION
+// dimension STILL waits for 'close' / timer.
+// It does NOT short-circuit just because the
+// signal failed.
+//
+// The reviewer's MF11 P1 was that
+// `closedByTimeout=true` was being set inside
+// a synchronous-completion short-circuit
+// (kill=false / kill throw + no listener)
+// without the actual observation timer
+// having fired. That was synthetic timeout
+// evidence — `closedByTimeout` meant "the
+// real timer fired" but the helper used it
+// to mean "signal failed synchronously, so
+// we gave up waiting".
+//
+// MF12 removes that bypass entirely. LIV21
+// pins the truth:
+//
+//   X: kill=false (sync) →
+//         async 'exit' →
+//         async 'close' on later turn
+//         => signalAttempt=FAILED
+//            (kill returned false)
+//            termination=CLOSE_OBSERVED
+//            (helper MUST wait for 'close')
+//            closedByTimeout=false
+//
+//   Y: throw EPERM (sync) →
+//         async 'close' on later turn
+//         => signalAttempt=PERMISSION_DENIED
+//            (throw classified)
+//            termination=CLOSE_OBSERVED
+//            (helper MUST wait for 'close')
+//            closedByTimeout=false
+//
+//   Z: kill=false (sync) →
+//         no 'exit'/'close'
+//         => observation deadline expires
+//            signalAttempt=FAILED
+//            termination=NOT_OBSERVED
+//            closedByTimeout=true
+//            (the REAL timer fired)
+//            observed.timedOut=true
+//            (no listener ever fired)
+//
+//   AA: throw ESRCH (sync) →
+//         async 'exit' but no 'close'
+//         => observation deadline expires
+//            signalAttempt=FAILED
+//               (ESRCH classifies as FAILED,
+//                not EPERM)
+//            termination=EXIT_OBSERVED
+//            closedByTimeout=true
+//
+// X and Y mechanically fail the MF11
+// implementation: under MF11 the helper
+// short-circuited at kill=false/throw with
+// `closedByTimeout=true` and
+// `termination=NOT_OBSERVED`, discarding
+// the legitimate later 'close'. Restoring
+// MF12 makes all four cells pass.
+test("LIV21: synchronous-failure-then-lifecycle fidelity — termination waits even after sync signal failure (MF12)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as { runDeadlineCleanup: (args: any) => Promise<any> };
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  const makeFakeChild = () => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [], exit: [], close: [],
+    };
+    const child: any = {
+      kill() { return true; },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const i = handlers[ev].indexOf(fn);
+          if (i >= 0) handlers[ev].splice(i, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of (handlers[ev] ?? []).slice()) fn(...args);
+      },
+      _listeners(ev: string) { return handlers[ev]?.length ?? 0; },
+    };
+    return child;
+  };
+
+  // ---- X: kill=false (sync) → async 'exit' →
+  //         async 'close' on later turn.
+  // Signal is FAILED (kill returned false).
+  // Termination MUST wait for 'close' on a
+  // later turn and report CLOSE_OBSERVED.
+  // closedByTimeout MUST be false (close was
+  // natural). ----
+  {
+    const child = makeFakeChild();
+    child.kill = () => false;
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    setTimeout(() => child._emit("exit", null, "SIGKILL"), 5);
+    setTimeout(() => child._emit("close", null, "SIGKILL"), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV21 [X: kill=false then async exit+close]: signalAttempt MUST be FAILED (kill returned false), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV21 [X]: terminationObservation MUST be CLOSE_OBSERVED (helper MUST wait for 'close' after sync signal failure), got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV21 [X]: closedByTimeout MUST be false — 'close' arrived naturally before the observation deadline.",
+    );
+    assert.equal(
+      r.observed.close, true,
+      "LIV21 [X]: observed.close MUST be true.",
+    );
+  }
+
+  // ---- Y: throw EPERM (sync) → async 'close'
+  //         on later turn. ----
+  {
+    const child = makeFakeChild();
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    child.kill = () => { throw eperm; };
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    setTimeout(() => child._emit("close", null, "SIGKILL"), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV21 [Y: throw EPERM then async close]: signalAttempt MUST be PERMISSION_DENIED (throw classified), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV21 [Y]: terminationObservation MUST be CLOSE_OBSERVED, got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV21 [Y]: closedByTimeout MUST be false — 'close' arrived naturally.",
+    );
+  }
+
+  // ---- Z: kill=false (sync) → no 'exit'/'close'.
+  //         Real observation timer fires. ----
+  {
+    const child = makeFakeChild();
+    child.kill = () => false;
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 50,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV21 [Z: kill=false no events]: signalAttempt MUST be FAILED, got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "NOT_OBSERVED",
+      `LIV21 [Z]: terminationObservation MUST be NOT_OBSERVED (no listener fired), got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, true,
+      "LIV21 [Z]: closedByTimeout MUST be true — the REAL observation timer fired.",
+    );
+    assert.equal(
+      r.observed.timedOut, true,
+      "LIV21 [Z]: observed.timedOut MUST be true — no listener ever fired.",
+    );
+  }
+
+  // ---- AA: throw ESRCH (sync) → async 'exit'
+  //         but no 'close'. Real observation
+  //         timer fires. ----
+  {
+    const child = makeFakeChild();
+    const esrch = Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    child.kill = () => { throw esrch; };
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    setTimeout(() => child._emit("exit", null, "SIGKILL"), 5);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 50,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV21 [AA: throw ESRCH then async exit]: signalAttempt MUST be FAILED (ESRCH classifies as FAILED), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "EXIT_OBSERVED",
+      `LIV21 [AA]: terminationObservation MUST be EXIT_OBSERVED (lattice value at deadline), got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, true,
+      "LIV21 [AA]: closedByTimeout MUST be true — the REAL observation timer fired.",
+    );
+  }
+
+  // ---- SOURCE-LEVEL INVARIANT. ----
+  // `closedByTimeout = true` MUST occur ONLY
+  // inside `finalizeTimeout()`. Any other
+  // assignment is a synthetic-timeout-evidence
+  // bug.
+  const helperBody = await readHelperBody();
+  // Strip line comments and block comments
+  // before counting — the helper body
+  // references `closedByTimeout = true` in
+  // its own narrative comments (e.g. the MF11
+  // short-circuit narrative, the MF12
+  // narrative). Those are NOT real
+  // assignments. Only assignments in actual
+  // code count.
+  const helperBodyNoComments = helperBody
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const closedByTimeoutAssignments =
+    (helperBodyNoComments.match(/closedByTimeout\s*=\s*true/g) ?? []).length;
+  assert.equal(
+    closedByTimeoutAssignments, 1,
+    `LIV21 INVARIANT: helper MUST have exactly ONE 'closedByTimeout = true' assignment (inside finalizeTimeout); got ${closedByTimeoutAssignments}. Any other assignment is synthetic timeout evidence.`,
+  );
+  const finalizeTimeoutBlockMatch = helperBodyNoComments.match(
+    /const\s+finalizeTimeout\s*=\s*\(\s*\)\s*=>\s*\{/,
+  );
+  assert.ok(
+    finalizeTimeoutBlockMatch,
+    "LIV21 INVARIANT: helper MUST define `finalizeTimeout`.",
+  );
+  const finalizeTimeoutStart = finalizeTimeoutBlockMatch.index! +
+    finalizeTimeoutBlockMatch[0].length - 1;
+  let depth = 0;
+  let finalizeTimeoutEnd = finalizeTimeoutStart;
+  for (let i = finalizeTimeoutStart; i < helperBodyNoComments.length; i++) {
+    if (helperBodyNoComments[i] === "{") depth++;
+    else if (helperBodyNoComments[i] === "}") {
+      depth--;
+      if (depth === 0) { finalizeTimeoutEnd = i; break; }
+    }
+  }
+  const finalizeTimeoutBody = helperBodyNoComments.slice(
+    finalizeTimeoutStart,
+    finalizeTimeoutEnd + 1,
+  );
+  assert.ok(
+    /closedByTimeout\s*=\s*true/.test(finalizeTimeoutBody),
+    "LIV21 INVARIANT: `closedByTimeout = true` MUST be inside finalizeTimeout().",
+  );
+  const beforeFinalizeTimeout = helperBodyNoComments.slice(0, finalizeTimeoutStart);
+  const afterFinalizeTimeout = helperBodyNoComments.slice(finalizeTimeoutEnd + 1);
+  const outsideFinalizeTimeout = beforeFinalizeTimeout + afterFinalizeTimeout;
+  assert.ok(
+    !/closedByTimeout\s*=\s*true/.test(outsideFinalizeTimeout),
+    "LIV21 INVARIANT: `closedByTimeout = true` MUST NOT appear outside finalizeTimeout() — any such assignment is synthetic timeout evidence.",
+  );
+});
+
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
 //  LIVENESS01-CORRECTION01) The LIV oracle itself
 // spawns orphan children for the LIV07/LIV08/LIV09
+// tests. Without this after-hook, the oracle FILE
+// itself would hang. Apply the same law to itself.
+// We pass the LIV-owned child registry here; each
+// spawned orphan was registered when it was created
+// above. Detachment is ownership-scoped.
+after(() => {
+  detachOwnedChildren(LIV_OWNED_CHILDREN);
+});
 // tests. Without this after-hook, the oracle FILE
 // itself would hang. Apply the same law to itself.
 // We pass the LIV-owned child registry here; each

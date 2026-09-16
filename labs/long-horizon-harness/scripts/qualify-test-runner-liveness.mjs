@@ -638,31 +638,32 @@ export const runDeadlineCleanup = async (args) => {
     // by ITS OWN flag. Listener removal is
     // scoped to the dimension it serves.
     //
-    // MF11 — signal finalization is now
-    // DEFERRED to `deriveSignalAttempt()` in
-    // `tryResolve()`. The reason this function
-    // exists at all is to capture the err
-    // payloads (lastErrorEventErr, throwErr)
-    // and to handle the synchronous-completion
-    // short-circuit when no listener will ever
-    // fire. The actual `signalAttempt` value is
-    // derived at tryResolve time so a late
-    // 'error' can upgrade from ACCEPTED to
-    // PERMISSION_DENIED before close-out.
+    // MF12 — finalizeSignal ONLY settles
+    // the SIGNAL dimension. It does NOT
+    // touch termination or close the helper.
+    // MF11 had a "synchronous completion
+    // short-circuit" here that set
+    // `closedByTimeout=true` immediately
+    // when kill() returned false (or threw)
+    // and no listener had fired yet. That
+    // was synthetic timeout evidence — the
+    // observation timer had not actually
+    // fired. MF12 removes the bypass
+    // entirely. termination remains open
+    // until either `'close'` arrives or
+    // finalizeTimeout() runs at the real
+    // observation deadline.
+    //
+    // The `upgrading` guard preserves
+    // MF11's per-source priority: an
+    // implicit ACCEPTED settle (from a sync
+    // `'close'` that fired DURING kill(),
+    // before killResult was known) can be
+    // UPGRADED by a later authoritative
+    // source — explicit `'error'`, explicit
+    // throw, or killResult=false — but never
+    // DOWNGRADED.
     const finalizeSignal = (reason, syncErr) => {
-      // MF11 — signalAttempt can be UPGRADED
-      // by a later authoritative source even
-      // after an implicit settle. An implicit
-      // ACCEPTED (from sync 'close' during
-      // kill) can be replaced by:
-      //   * an explicit `'error'` event with
-      //      a classified errno
-      //   * an explicit throw from kill()
-      //   * killResult=false
-      // We only allow upgrade — never
-      // downgrade (ACCEPTED → FAILED via a
-      // later killResult=false is fine; but
-      // FAILED → ACCEPTED is not).
       const upgrading =
         !signalSettled ||
         (reason === "error" && signalAttempt !== "PERMISSION_DENIED") ||
@@ -685,55 +686,11 @@ export const runDeadlineCleanup = async (args) => {
       // Re-derive signal value with the new
       // authoritative info.
       signalAttempt = deriveSignalAttempt();
-      // signalAttempt is set by tryResolve →
-      // deriveSignalAttempt, which honors
-      // priority: observed.error > threw >
-      // killResult.
-      //
-      // MF11 — SYNCHRONOUS COMPLETION SHORT-CIRCUIT.
-      //
-      // If the signal dimension settles via
-      // direct return/throw processing (i.e.
-      // reason is "killResult" or "throw" —
-      // NOT "error"), AND no lifecycle or
-      // error event has fired yet, the helper
-      // CANNOT gain any further meaningful
-      // evidence about termination. The signal
-      // has DEFINITIVELY failed (kill returned
-      // false) or DEFINITIVELY threw; the
-      // helper should not sit for
-      // `observationWindowMs` waiting for
-      // events that cannot rescue the already-
-      // decided signal. Mark
-      // `closedByTimeout=true`, settle
-      // termination at the current lattice
-      // value (NOT_OBSERVED here), and
-      // resolve. This satisfies LIV16 C/D.
-      //
-      // If `lifecycleOrErrorEventObserved` is
-      // already true (a lifecycle event landed
-      // before this signal settle — possible
-      // if killResult=false interleaved with
-      // an async 'exit' on a different turn),
-      // we do NOT short-circuit. The helper
-      // still waits for 'close' / timer.
-      if (
-        (reason === "killResult" || reason === "throw") &&
-        !lifecycleOrErrorEventObserved
-      ) {
-        closedByTimeout = true;
-        if (!terminationSettled) {
-          terminationSettled = true;
-        }
-        // Derive signal value BEFORE
-        // finishOperation so the returned
-        // result carries the correct
-        // signalAttempt.
-        signalAttempt = deriveSignalAttempt();
-        signalSettled = true;
-        finishOperation();
-        return;
-      }
+      // Advance the completion boundary. If
+      // termination is also settled (lattice
+      // max reached via `'close'`), the helper
+      // resolves via finishOperation. Otherwise
+      // we wait for `'close'` / timer.
       tryResolve();
     };
     const finalizeTermination = (reason) => {

@@ -1,10 +1,10 @@
-// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX11)
+// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX12)
 //
 // Ambient type declarations for the qualifier's
 // exported `runDeadlineCleanup` helper. LIV16,
-// LIV17, LIV18, LIV19, and LIV20 import this
-// helper for behavioral adversarial testing
-// against an injected fake ChildProcess.
+// LIV17, LIV18, LIV19, LIV20, and LIV21 import
+// this helper for behavioral adversarial
+// testing against an injected fake ChildProcess.
 //
 // MICROFIX07: removed `pendingCleanupReclassification`
 // from `state` (the helper no longer reads it —
@@ -53,6 +53,22 @@
 // listeners fired. LIV20 pins async exit-then-
 // close fidelity and clean timer/listener
 // teardown.
+//
+// MICROFIX12: SYNCHRONOUS-SHORT-CIRCUIT
+// REMOVED. The MF11 synchronous-completion
+// short-circuit (when kill=false or kill throws
+// synchronously AND no listener has fired yet)
+// set `closedByTimeout=true` immediately,
+// before the observation timer had actually
+// fired. That was synthetic timeout evidence.
+// MF12 removes that bypass entirely: signal
+// can settle immediately on kill=false or
+// throw, but termination ALWAYS waits for
+// either `'close'` or the real observation
+// deadline. `closedByTimeout=true` is now
+// set ONLY inside `finalizeTimeout()` — the
+// timer is the sole authority. LIV21 cells
+// X/Y/Z/AA pin this invariant.
 
 export type CleanupOutcome =
   | "SIGNAL_ACCEPTED"
@@ -102,6 +118,16 @@ export interface RunDeadlineCleanupResult {
     close: boolean;
     timedOut: boolean;
   };
+  // MICROFIX11/12 — `closedByTimeout` is true
+  // iff the ACTUAL observation deadline
+  // fired (i.e. `finalizeTimeout()` ran).
+  // Under MF12 this is set ONLY inside
+  // `finalizeTimeout()` — never by any
+  // synchronous kill-failure short-circuit.
+  // LIV21 pins this invariant via a
+  // source-level regex on `closedByTimeout
+  // = true`.
+  closedByTimeout: boolean;
 }
 
 export const runDeadlineCleanup: (
