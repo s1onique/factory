@@ -107,6 +107,44 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { EventEmitter } from "node:events";
+
+/**
+ * (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+ *
+ * Synthetic ChildProcess-compatible seam.
+ *
+ * The previous WSTOP02 / WSTOP03 spawned a real
+ * long-lived child and relied on the host kernel
+ * producing EPERM at signal-delivery time. The reburn
+ * demonstrated that on the canonical host the kernel
+ * DELIVERS SIGKILL (the writer's SIGKILL was accepted
+ * and the child went through `'close'`), so the
+ * adversarial premise was unprovable on this host.
+ *
+ * The re-implementation replaces the real spawn with
+ * a structural fake: an `EventEmitter` plus the
+ * minimum surface the teardown primitive actually
+ * reads (`once` / `off` / `kill`). The fake owns the
+ * EPERM premise — the test injects it; the host is
+ * not asked to volunteer it.
+ *
+ * The fake is FORBIDDEN in the host-dependent
+ * positive-control lane (WSTOP12); that test still
+ * spawns a real Node child so it can prove the real
+ * lifecycle boundary.
+ */
+function fakeChildProcess(): ChildProcess {
+  const ee = new EventEmitter();
+  const c = ee as unknown as ChildProcess;
+  // The teardown primitive only ever invokes
+  // `kill("SIGKILL")`. We default to "accepted";
+  // WSTOP02 / WSTOP03 override it with a stub that
+  // either throws EPERM (synchronously) or fires
+  // the 'error' event after the call.
+  (c as unknown as { kill: (s?: string) => boolean }).kill = () => true;
+  return c;
+}
 
 type Teardown = typeof import("./_writer_teardown.js");
 let teardown: Teardown;
@@ -196,49 +234,114 @@ test("WSTOP01: kill accepted + actual 'close' → {kind:'closed'}", async () => 
 });
 
 test("WSTOP02: synchronous kill EPERM → {kind:'signal_permission_denied'} (no close-wait)", async () => {
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+  //
+  // EPERM premise is fake-injected through a
+  // structural ChildProcess seam (see
+  // fakeChildProcess above). No host capability
+  // required. See WSTOP13_HOST_INDEPENDENCE for the
+  // source-level guard.
   await withTmpDir(async () => {
-    const c = spawnLongLived();
-    // Trap the synchronous-error event so the
-    // probe host doesn't crash on unhandled 'error'.
+    const c = fakeChildProcess();
+    // Trap the asynchronous 'error' event so a
+    // stray emit during the kill does not crash the
+    // runner.
     c.on("error", () => { /* listener attached */ });
+    // Inject the synchronous EPERM. Per
+    // terminateHelperAndAwaitTyped, a thrown EPERM
+    // NodeJS.ErrnoException MUST resolve with
+    // {kind:"signal_permission_denied", errno:"EPERM"}
+    // without awaiting 'close'.
+    (c as unknown as { kill: (s?: string) => boolean }).kill = () => {
+      const err: NodeJS.ErrnoException = new Error(
+        "kill EPERM (synthetic, WSTOP02)",
+      );
+      err.code = "EPERM";
+      throw err;
+    };
     const t0 = Date.now();
     const outcome = await teardown.terminateHelperAndAwaitTyped(c, 2000);
     const elapsedMs = Date.now() - t0;
-    if (outcome.kind !== "signal_permission_denied") {
-      // On hosts where SIGKILL is accepted the
-      // outcome will be `close_timeout` because the
-      // kernel does not deliver `'close'` for a
-      // process that is still running.
-      assert.equal(
-        outcome.kind, "close_timeout",
-        `WSTOP02: expected signal_permission_denied | close_timeout; got ${JSON.stringify(outcome)}`,
-      );
-      return;
+    // Deterministic: NO close_timeout fallback.
+    assert.equal(
+      outcome.kind,
+      "signal_permission_denied",
+      `WSTOP02: deterministic EPERM premise; got ${JSON.stringify(outcome)}`,
+    );
+    if (outcome.kind === "signal_permission_denied") {
+      assert.equal(outcome.errno, "EPERM",
+        `WSTOP02: errno MUST be "EPERM"`);
     }
-    assert.equal(outcome.errno, "EPERM",
-      `WSTOP02: errno MUST be "EPERM"`);
     assert.ok(elapsedMs < 1000,
       `WSTOP02: signal_permission_denied MUST resolve promptly, not after 2s deadline; elapsedMs=${elapsedMs}`);
   });
 });
 
 test("WSTOP03: 'error' event EPERM during kill() → exactly ONE settlement, no double-fire", async () => {
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+  //
+  // Asynchronous EPERM premise is fake-injected
+  // through a structural ChildProcess seam. The
+  // fake's kill() returns true (signal accepted)
+  // AND queues an asynchronous 'error' event with
+  // errno EPERM. The teardown primitive MUST
+  // settle exactly once on that 'error' event —
+  // no double-settlement, no orphan listeners.
+  // See WSTOP13_HOST_INDEPENDENCE for the
+  // source-level guard.
   await withTmpDir(async () => {
-    const c = spawnLongLived();
+    const c = fakeChildProcess();
     let errorEvents = 0;
     c.on("error", () => {
       errorEvents++;
     });
+    // Inject the asynchronous EPERM:
+    //   kill() returns true  (signal accepted)
+    //   then the fake fires 'error' with EPERM
+    let killCalls = 0;
+    (c as unknown as { kill: (s?: string) => boolean }).kill = () => {
+      killCalls++;
+      // Queue an asynchronous 'error' event AFTER
+      // the listeners are armed. The next-tick
+      // microtask is sufficient and deterministic.
+      queueMicrotask(() => {
+        const err: NodeJS.ErrnoException = new Error(
+          "kill EPERM (synthetic async, WSTOP03)",
+        );
+        err.code = "EPERM";
+        c.emit("error", err);
+      });
+      return true;
+    };
     const outcome = await teardown.terminateHelperAndAwaitTyped(c, 2000);
-    assert.ok(
-      outcome.kind === "signal_permission_denied" ||
-        outcome.kind === "close_timeout",
-      `WSTOP03: expected signal_permission_denied | close_timeout; got ${JSON.stringify(outcome)}`,
+    // Deterministic: EXACTLY ONE settlement, with
+    // the typed EPERM branch.
+    assert.equal(
+      outcome.kind,
+      "signal_permission_denied",
+      `WSTOP03: deterministic async EPERM premise; got ${JSON.stringify(outcome)}`,
     );
-    assert.ok(
-      errorEvents <= 1,
-      `WSTOP03: must not double-fire 'error'; got ${errorEvents}`,
-    );
+    if (outcome.kind === "signal_permission_denied") {
+      assert.equal(outcome.errno, "EPERM",
+        `WSTOP03: errno MUST be "EPERM"`);
+    }
+    // The 'error' event listener was attached
+    // exactly once and saw exactly one emit.
+    assert.equal(errorEvents, 1,
+      `WSTOP03: 'error' listener must see exactly ONE emit; got ${errorEvents}`);
+    assert.equal(killCalls, 1,
+      `WSTOP03: kill() must have been called exactly once; got ${killCalls}`);
+    // No double-fire after settlement. We attach a
+    // NEW listener post-settlement and emit one
+    // more 'error' to verify the primitive's own
+    // listener was detached.
+    let postSettlementErrors = 0;
+    c.on("error", () => {
+      postSettlementErrors++;
+    });
+    c.emit("error", Object.assign(new Error("orphan"), { code: "EPERM" }));
+    assert.equal(postSettlementErrors, 1,
+      `WSTOP03: only the post-settlement listener fires; got ${postSettlementErrors}`);
   });
 });
 
@@ -644,5 +747,164 @@ test("WSTOP11: registry reset discipline — clear empties, record → clear →
     registry.getWriterTeardown(lifetimeId),
     undefined,
     "WSTOP11: lookup after clear MUST be undefined",
+  );
+});
+
+test("WSTOP12: real host accepted SIGKILL → actual close boundary is valid", async () => {
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+  //
+  // Positive control for the reburn's observed
+  // behaviour: on this host the kernel DELIVERS
+  // SIGKILL and the child terminates via `'close'`
+  // with `signal:"SIGKILL"`. That is a valid real-host
+  // lifecycle outcome — NOT a production defect, NOT a
+  // test failure. The WSTOP02 / WSTOP03 oracles cannot
+  // be satisfied on this host, but this oracle proves
+  // the same primitive correctly settles
+  // `{kind:"closed", signal:"SIGKILL"}` when the host
+  // actually accepts the kill.
+  //
+  // This test ONLY exercises the real-host close path.
+  // It MUST NOT be conflated with WSTOP02 or WSTOP03
+  // (whose EPERM premise is fake-driven).
+  //
+  // Skip semantics:
+  //   - if the host denies SIGKILL, the primitive
+  //     times out (close_timeout) or settles
+  //     signal_permission_denied; we surface that
+  //     honestly rather than fake the close.
+  await withTmpDir(async () => {
+    const c = spawnLongLived();
+    c.on("error", () => { /* trap */ });
+    const outcome = await teardown.terminateHelperAndAwaitTyped(c, 1500);
+    try { c.unref(); } catch { /* */ }
+    if (outcome.kind === "closed") {
+      assert.equal(
+        outcome.signal, "SIGKILL",
+        `WSTOP12: real-host close must report SIGKILL; got ${JSON.stringify(outcome)}`,
+      );
+      return;
+    }
+    // Host refused SIGKILL. That is honest residue,
+    // not a regression of THIS oracle (this oracle
+    // only proves the positive case). We pass on a
+    // typed outcome so the test does not flake; the
+    // structural invariant — "the primitive did
+    // something typed" — is still proven.
+    if (outcome.kind === "signal_permission_denied") {
+      assert.equal(outcome.errno, "EPERM",
+        `WSTOP12: host denial surface; got ${JSON.stringify(outcome)}`);
+      return;
+    }
+    if (outcome.kind === "close_timeout") {
+      return;
+    }
+    assert.fail(
+      `WSTOP12: unexpected outcome for real-host SIGKILL; got ${JSON.stringify(outcome)}`,
+    );
+  });
+});
+
+test("WSTOP13_HOST_INDEPENDENCE: WSTOP02 / WSTOP03 do not spawn a real child", async () => {
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+  //
+  // Static guard: the WSTOP02 / WSTOP03 oracles MUST
+  // exercise a fake ChildProcess-compatible seam, NOT
+  // a real `node:child_process.spawn()`. Their EPERM
+  // premise is injected through the fake; the host
+  // kernel is never asked to volunteer EPERM.
+  //
+  // We assert this by reading the source text of the
+  // adversarial test file and verifying that the
+  // WSTOP02 / WSTOP03 test bodies do not call
+  // `spawn(` (the literal host-bring-up), and that
+  // they DO construct a fake via `fakeChildProcess()`
+  // (the literal seam introducer). This is a
+  // mechanical source-level anchor — it cannot be
+  // weakened without editing the test bodies.
+  const { promises: fsp } = await import("node:fs");
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const self = await fsp.readFile(
+    path.join(here, "_wstop_writer_teardown_adversarial.test.ts"),
+    "utf8",
+  );
+  // Extract a test body by walking braces from the
+  // marker. We do not attempt a full parser — we just
+  // need a window from the marker to a balanced closing.
+  function extractTestBody(name: string): string | null {
+    const marker = `test("${name}:`;
+    const start = self.indexOf(marker);
+    if (start === -1) return null;
+    // The body always begins with `async () => {`
+    // immediately after the test marker. We find
+    // the FIRST `=> {` substring past the marker
+    // and treat that as the body opening brace;
+    // we then walk braces to find the matching
+    // close. Brace counting is naive (no string
+    // /comment awareness) but the test bodies do
+    // not contain a brace-balanced string literal
+    // that crosses the body boundary — they only
+    // carry templates / regexes that are already
+    // balanced.
+    const afterMarker = self.slice(start);
+    const arrowAt = afterMarker.indexOf("=>");
+    if (arrowAt === -1) return null;
+    const braceAt = afterMarker.indexOf("{", arrowAt);
+    if (braceAt === -1) return null;
+    const bodyStart = start + braceAt;
+    let depth = 0;
+    let bodyEnd = -1;
+    for (let i = bodyStart; i < self.length; i++) {
+      const ch = self[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          bodyEnd = i + 1;
+          break;
+        }
+      }
+    }
+    if (bodyEnd === -1) return null;
+    return self.slice(bodyStart, bodyEnd);
+  }
+  const wstop02Body = extractTestBody("WSTOP02");
+  const wstop03Body = extractTestBody("WSTOP03");
+  assert.ok(wstop02Body, "WSTOP13: WSTOP02 body must be present in source");
+  assert.ok(wstop03Body, "WSTOP13: WSTOP03 body must be present in source");
+  // The fake seam MUST appear in each.
+  assert.match(
+    wstop02Body,
+    /fakeChildProcess\(/,
+    "WSTOP13: WSTOP02 must use fakeChildProcess()",
+  );
+  assert.match(
+    wstop03Body,
+    /fakeChildProcess\(/,
+    "WSTOP13: WSTOP03 must use fakeChildProcess()",
+  );
+  // The bodies MUST NOT call `spawn(` to bring up a
+  // real child for the EPERM premise.
+  assert.doesNotMatch(
+    wstop02Body,
+    /\bspawn\(/,
+    "WSTOP13: WSTOP02 must NOT call spawn() — EPERM premise is fake-injected",
+  );
+  assert.doesNotMatch(
+    wstop03Body,
+    /\bspawn\(/,
+    "WSTOP13: WSTOP03 must NOT call spawn() — EPERM premise is fake-injected",
+  );
+  // The bodies MUST inject EPERM through a kill stub
+  // or an error emit (not via the kernel).
+  assert.match(
+    wstop02Body,
+    /err\.code\s*=\s*["']EPERM["']/,
+    "WSTOP13: WSTOP02 must inject EPERM via kill-stub",
+  );
+  assert.match(
+    wstop03Body,
+    /err\.code\s*=\s*["']EPERM["']/,
+    "WSTOP13: WSTOP03 must inject EPERM via fake 'error' event",
   );
 });

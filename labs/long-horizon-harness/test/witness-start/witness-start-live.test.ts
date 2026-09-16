@@ -99,16 +99,40 @@ async function terminateAndProveWitness(
     "../../test/ledger-writer/_live_registry.js"
   ).IdentityBoundChildPort;
 
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+  //
+  // Diagnostic packet capture (ACT §9). Before
+  // any WSTART lifecycle semantic change is
+  // authorized, the test MUST emit a typed
+  // WSTART_LIVE01_ABSENCE_DIAGNOSTIC packet. We
+  // capture typed observation-only evidence at
+  // every stage: before-termination, lifecycle
+  // boundary, proveChildAbsent, kernel probe,
+  // and registry. We never parse error prose.
+  const tBefore = Date.now();
+  let exitInfoSnap: { exited: boolean } | null = null;
+  try {
+    if (typeof child.exitInfo === "function") {
+      exitInfoSnap = child.exitInfo();
+    }
+  } catch { /* pure read must not throw */ }
+  let bootstrapClosedResult: "closed" | "timeout" | "no_barrier" =
+    "no_barrier";
+
   // TEST-SITE cleanup authority. The oracle is
   // observation-only; THIS call is owned by the test
   // that produced the child. We use the typed
   // `kill` from the handle — no cast.
+  let terminationRequestOutcome:
+    | { ok: true }
+    | { ok: false; threw: boolean } = { ok: true };
   try {
-    child.kill?.("SIGTERM");
+    const r = child.kill?.("SIGTERM");
+    if (r === false) {
+      terminationRequestOutcome = { ok: false, threw: false };
+    }
   } catch {
-    // best-effort; kernel may EPERM this on a sandbox
-    // host. We do not let cleanup authority fail
-    // the assertion; we ask the oracle next.
+    terminationRequestOutcome = { ok: false, threw: true };
   }
 
   // (CORRECTION01) Identity-bound lifecycle barrier.
@@ -124,16 +148,31 @@ async function terminateAndProveWitness(
   // barrier makes the subsequent residue probe
   // authoritative — we are no longer racing with a
   // still-emitting child.
+  let tLifecycleBoundary: number | null = null;
   if (typeof child.whenBootstrapOutputClosed === "function") {
-    await Promise.race([
-      child.whenBootstrapOutputClosed().catch(() => undefined),
-      new Promise((res) => setTimeout(res, 1000)),
-    ]);
+    let settled = false;
+    const closed = child.whenBootstrapOutputClosed()
+      .then(() => {
+        settled = true;
+        return "closed" as const;
+      })
+      .catch(() => {
+        settled = true;
+        return "closed" as const;
+      });
+    const timeout = new Promise<"timeout">((res) => setTimeout(() => {
+      res("timeout");
+    }, 1000));
+    const winner = await Promise.race([closed, timeout]);
+    bootstrapClosedResult = winner === "timeout" ? "timeout" : "closed";
+    if (settled) tLifecycleBoundary = Date.now();
   } else {
     // Real ChildProcess has no equivalent barrier;
     // fall back to a brief sleep so the underlying
     // exitCode/signalCode has a chance to settle.
     await new Promise((res) => setTimeout(res, 100));
+    tLifecycleBoundary = Date.now();
+    bootstrapClosedResult = "no_barrier";
   }
 
   // ORACLE call. The oracle performs NO kill, NO
@@ -142,7 +181,81 @@ async function terminateAndProveWitness(
   // previous kill above is the legacy "best effort"
   // signal that the test sends before asking the
   // oracle to PROVE what happened.
+  const tProveBefore = Date.now();
   const r = await proveChildAbsent(child);
+  const tProveAfter = Date.now();
+
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+  // Build and emit the typed WSTART_LIVE01_ABSENCE_DIAGNOSTIC
+  // packet. We capture typed observation-only
+  // evidence at every stage. We never parse
+  // human-readable error prose.
+  const witnessEntry = child as unknown as {
+    pid?: number | null | undefined;
+  };
+  const witnessPid = witnessEntry.pid;
+  let kernelObservation:
+    | { kind: "alive" }
+    | { kind: "epositive_no_perm"; errno?: string }
+    | { kind: "esrch" }
+    | { kind: "other_error"; errno?: string };
+  if (typeof witnessPid === "number" && witnessPid > 0) {
+    try {
+      process.kill(witnessPid, 0);
+      kernelObservation = { kind: "alive" };
+    } catch (e: unknown) {
+      const err = e as NodeJS.ErrnoException;
+      if (err && err.code === "ESRCH") {
+        kernelObservation = { kind: "esrch" };
+      } else if (err && err.code === "EPERM") {
+        kernelObservation = {
+          kind: "epositive_no_perm",
+          errno: "EPERM",
+        };
+      } else {
+        const errno = err && typeof err.code === "string"
+          ? err.code
+          : undefined;
+        if (errno !== undefined) {
+          kernelObservation = { kind: "other_error", errno };
+        } else {
+          kernelObservation = { kind: "other_error" };
+        }
+      }
+    }
+  } else {
+    kernelObservation = { kind: "other_error" };
+  }
+  const diagnosticPacket = {
+    runId: "wstart-live01",
+    witness: {
+      pid: typeof witnessPid === "number" ? witnessPid : null,
+      exitInfo: exitInfoSnap,
+      bootstrapOutputClosed: bootstrapClosedResult,
+      terminationRequestOutcome,
+    },
+    proveChildAbsent: r,
+    kernelObservation,
+    registry: {
+      entryKind: entry.kind,
+      registeredPid: entry.pid ?? null,
+      note: entry.note,
+    },
+    teardown: null,
+    timing: {
+      beforeTermination: tBefore,
+      lifecycleBoundary: tLifecycleBoundary,
+      proveChildAbsent: {
+        start: tProveBefore,
+        finish: tProveAfter,
+      },
+    },
+  };
+  process.stdout.write(
+    "WSTART_LIVE01_ABSENCE_DIAGNOSTIC=" +
+      JSON.stringify(diagnosticPacket) + "\n",
+  );
+
   // CORRECTION04 + CORRECTION01:
   //
   //   "pid_absent"               — kernel ESRCH
