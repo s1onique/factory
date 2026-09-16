@@ -163,21 +163,48 @@ test("WLIFE03: signal-sent without exitInfo-evidence is residue (alive), not rel
 // ----------------------------------------------------------------------
 // WLIFE04 — terminateAndProveWitness must await
 // whenBootstrapOutputClosed with a bounded deadline.
+//
+// (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX02)
+// As of MICROFIX02 the bounded-deadline wrapping
+// lives in _wstart_diagnostic_helpers.ts (shared by
+// the live lane AND the WDIAG adversarial oracles),
+// not inline in witness-start-live.test.ts. The
+// static guard now verifies both: (a) the live file
+// still calls whenBootstrapOutputClosed via the
+// helper, and (b) the helper wraps it with
+// Promise.race + setTimeout so the bounded deadline
+// is mechanical, not accidental.
 // ----------------------------------------------------------------------
 test("WLIFE04: terminateAndProveWitness must await whenBootstrapOutputClosed with a bounded deadline", async () => {
   const { promises: fs } = await import("node:fs");
-  const url = new URL(
+  const liveUrl = new URL(
     "./witness-start-live.test.ts",
     import.meta.url,
   );
-  const text = await fs.readFile(url, "utf8");
+  const helperUrl = new URL(
+    "./_wstart_diagnostic_helpers.ts",
+    import.meta.url,
+  );
+  const liveText = await fs.readFile(liveUrl, "utf8");
+  const helperText = await fs.readFile(helperUrl, "utf8");
+  // Live file must STILL call whenBootstrapOutputClosed
+  // (through the helper) — its existence in the live
+  // file proves the live path uses the barrier.
   assert.ok(
-    /whenBootstrapOutputClosed/.test(text),
-    "WLIFE04: must call whenBootstrapOutputClosed()",
+    /whenBootstrapOutputClosed/.test(liveText),
+    "WLIFE04: live test must call whenBootstrapOutputClosed (directly or via helper)",
+  );
+  // Helper file must wrap the barrier in
+  // Promise.race + setTimeout (the bounded deadline).
+  assert.ok(
+    /whenBootstrapOutputClosed/.test(helperText),
+    "WLIFE04: helper must implement whenBootstrapOutputClosed()",
   );
   assert.ok(
-    /Promise\.race/.test(text),
-    "WLIFE04: must wrap whenBootstrapOutputClosed in a bounded deadline (Promise.race against setTimeout)",
+    /Promise\.race/.test(helperText) &&
+      /setTimeout/.test(helperText) &&
+      /clearTimeout/.test(helperText),
+    "WLIFE04: helper must wrap whenBootstrapOutputClosed in a bounded deadline (Promise.race + setTimeout + clearTimeout)",
   );
 });
 

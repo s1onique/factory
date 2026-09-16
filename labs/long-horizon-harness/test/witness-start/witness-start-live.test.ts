@@ -46,6 +46,10 @@ import {
   type LiveFixtureEntry,
 } from "../ledger-writer/_live_registry.js";
 import { detachOwnedChildren } from "../_liveness_helpers.js";
+import {
+  observeLifecycle,
+  type DiagnosticPort,
+} from "./_wstart_diagnostic_helpers.js";
 
 const STRICT = process.env.FACTORY_STRICT_WITNESS_START_LIVE === "1";
 const REQUIRED = 3;
@@ -99,47 +103,73 @@ async function terminateAndProveWitness(
     "../../test/ledger-writer/_live_registry.js"
   ).IdentityBoundChildPort;
 
-  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX01)
-  //
-  // Diagnostic packet capture (ACT §9). Before any
-  // WSTART lifecycle semantic change is authorized,
-  // the test MUST emit a typed
-  // WSTART_LIVE01_ABSENCE_DIAGNOSTIC packet. We
-  // capture typed observation-only evidence at every
-  // stage. We never parse human-readable error prose.
-  //
-  // MICROFIX01 temporal-fidelity correction: the
-  // previous revision sampled `child.exitInfo()`
-  // BEFORE the kill request and then reported the
-  // sampled value as "post-termination evidence". The
-  // sample was stale. The diagnostic now records the
-  // exit boundary state at THREE distinct moments:
-  //
-  //   T0  exitInfoBeforeTermination
-  //        — observed BEFORE any kill request. Acts
-  //          as provenance / pre-state.
-  //
-  //   T1  exitInfoAfterLifecycleBoundary
-  //        — observed AFTER the lifecycle barrier
-  //          (`whenBootstrapOutputClosed()` resolves,
-  //          or its bounded deadline elapses) and
-  //          BEFORE the oracle runs. This is the
-  //          relevant "post-teardown" observation.
-  //
-  //   T2  exitInfoAfterProof
-  //        — observed AFTER `proveChildAbsent()`
-  //          returns. Catches late-boundary cases.
-  //
-  // Only T1 / T2 are used to classify WS-C1..C5; T0
-  // remains as provenance.
-  //
-  // MICROFIX01 also widens the bootstrap boundary
-  // from a stringy `"closed"` to a typed
-  // `bootstrapOutputBoundary` discriminator so the
-  // operator can distinguish success from rejection
-  // (the previous `.then(...).catch(...)` collapsed
-  // both into `"closed"`).
+  // ─────────────────────────────────────────────
+  // Run the lifecycle observation sequence from the
+  // shared helper. The helper exposes two orthogonal
+  // channels:
+  //   processExitObservation   — process lifecycle
+  //   bootstrapOutputBoundary  — stdio accounting
+  // The live packet below records BOTH as
+  // independent facts and derives its lifecycle
+  // classification exclusively from
+  // processExitObservation (and from
+  // errorEventObserved). It NEVER promotes the
+  // output boundary to lifecycle authority.
+  // ─────────────────────────────────────────────
   const tBefore = Date.now();
+  const onAdapter = ((child as unknown) as {
+    on?: (
+      ev: "exit" | "error",
+      cb: (...args: unknown[]) => void,
+    ) => unknown;
+  }).on;
+  const port: DiagnosticPort = {
+    ...(typeof child.pid !== "undefined" ? { pid: child.pid } : {}),
+    ...(typeof child.kill === "function" ? { kill: child.kill } : {}),
+    ...(typeof child.exitInfo === "function" ? { exitInfo: child.exitInfo } : {}),
+    on: typeof onAdapter === "function"
+      ? (event, listener) => {
+          if (event === "exit") {
+            onAdapter("exit", (code: unknown, signal: unknown) => {
+              listener(
+                typeof code === "number" ? code : null,
+                typeof signal === "string"
+                  ? (signal as NodeJS.Signals)
+                  : null,
+              );
+            });
+          }
+        }
+      : undefined,
+    onError: typeof onAdapter === "function"
+      ? (event, listener) => {
+          if (event === "error") {
+            onAdapter("error", (err: unknown) => {
+              listener(err as Error);
+            });
+          }
+        }
+      : undefined,
+    whenBootstrapOutputClosed:
+      typeof (child as unknown as {
+        whenBootstrapOutputClosed?: () => Promise<unknown>;
+      }).whenBootstrapOutputClosed === "function"
+        ? () => (child as unknown as {
+            whenBootstrapOutputClosed: () => Promise<unknown>;
+          }).whenBootstrapOutputClosed()
+        : undefined,
+  };
+
+  const obs = await observeLifecycle(port, {
+    processDeadlineMs: 1000,
+    outputDeadlineMs: 1000,
+  });
+
+  // ─────────────────────────────────────────────
+  // T2: post-proof exitInfo sample. Catches the
+  // late-boundary case where the handle observed
+  // the exit during or after the oracle ran.
+  // ─────────────────────────────────────────────
   function readExitInfo():
     | { exited: boolean; code?: unknown; signal?: unknown }
     | null
@@ -160,167 +190,50 @@ async function terminateAndProveWitness(
       return null;
     }
   }
-  const exitInfoBeforeTermination = readExitInfo();
-
-  // Typed boundary discriminator. See block comment
-  // above for the four arms.
-  let bootstrapOutputBoundary:
-    | { readonly kind: "closed" }
-    | { readonly kind: "timeout" }
-    | { readonly kind: "no_barrier" }
-    | { readonly kind: "error"; readonly code?: string } =
-    { kind: "no_barrier" };
-
-  // TEST-SITE cleanup authority. The oracle is
-  // observation-only; THIS call is owned by the test
-  // that produced the child. We use the typed
-  // `kill` from the handle — no cast.
-  // MICROFIX01 over-claim correction: a
-  // `kill() === false` return only means "the OS
-  // did not report this kill request as accepted".
-  // It does NOT prove "kernel rejects SIGTERM". A
-  // Node `'error'` event with code EPERM is the
-  // minimum evidence for a permission-rejection
-  // claim. We capture both signals and emit them as
-  // separate typed fields.
-  let signalRequestOutcome:
-    | { readonly kind: "accepted" }
-    | { readonly kind: "returned_false" }
-    | { readonly kind: "threw"; readonly code?: string } =
-    { kind: "accepted" };
-  let errorEventObserved:
-    | { readonly seen: false }
-    | {
-        readonly seen: true;
-        readonly code?: string;
-        readonly message?: string;
-      } = { seen: false };
-  {
-    const onError = (e: unknown): void => {
-      const err = e as NodeJS.ErrnoException;
-      errorEventObserved = {
-        seen: true,
-        ...(typeof err?.code === "string" ? { code: err.code } : {}),
-        ...(typeof err?.message === "string"
-          ? { message: err.message }
-          : {}),
-      };
-    };
-    const maybeEmitter = child as unknown as {
-      on?: (ev: string, cb: (...args: unknown[]) => void) => unknown;
-      removeListener?: (
-        ev: string,
-        cb: (...args: unknown[]) => void,
-      ) => unknown;
-    };
-    if (typeof maybeEmitter.on === "function") {
-      try { maybeEmitter.on("error", onError); } catch { /* */ }
-    }
-    try {
-      const r = child.kill?.("SIGTERM");
-      if (r === false) {
-        signalRequestOutcome = { kind: "returned_false" };
-      }
-    } catch (e: unknown) {
-      const err = e as NodeJS.ErrnoException;
-      signalRequestOutcome = {
-        kind: "threw",
-        ...(typeof err?.code === "string" ? { code: err.code } : {}),
-      };
-    }
-    // Single microtask tick so a synchronous 'error'
-    // emit has a chance to surface before the
-    // lifecycle barrier runs.
-    await Promise.resolve();
-    if (typeof maybeEmitter.removeListener === "function") {
-      try {
-        maybeEmitter.removeListener("error", onError);
-      } catch { /* */ }
-    }
-  }
-
-  // (CORRECTION01) Identity-bound lifecycle barrier.
-  //
-  // If the handle exposes
-  // `whenBootstrapOutputClosed()` (a real
-  // WitnessSpawnHandle does; CORRECTION10), await it
-  // with a bounded deadline. This is the strongest
-  // identity-bound evidence the handle can offer:
-  // "the original child I spawned has terminated AND
-  // its bounded stdio drains have observed their
-  // terminal lifecycle boundary". Resolving this
-  // barrier makes the subsequent residue probe
-  // authoritative — we are no longer racing with a
-  // still-emitting child.
-  let tLifecycleBoundary: number | null = null;
-  if (typeof child.whenBootstrapOutputClosed === "function") {
-    const barrierPromise = child.whenBootstrapOutputClosed()
-      .then(() => ({ kind: "closed" as const }))
-      .catch((e: unknown) => {
-        const err = e as NodeJS.ErrnoException;
-        return {
-          kind: "error" as const,
-          ...(typeof err?.code === "string" ? { code: err.code } : {}),
-        };
-      });
-    const timeoutPromise = new Promise<{ kind: "timeout" }>((res) =>
-      setTimeout(() => { res({ kind: "timeout" }); }, 1000),
-    );
-    const winner = await Promise.race([barrierPromise, timeoutPromise]);
-    bootstrapOutputBoundary = winner;
-    tLifecycleBoundary = Date.now();
-  } else {
-    // Real ChildProcess has no equivalent barrier;
-    // fall back to a brief sleep so the underlying
-    // exitCode/signalCode has a chance to settle.
-    await new Promise((res) => setTimeout(res, 100));
-    tLifecycleBoundary = Date.now();
-    bootstrapOutputBoundary = { kind: "no_barrier" };
-  }
+  const exitInfoAfterProof = readExitInfo();
 
   // ─────────────────────────────────────────────
-  // T1: post-boundary, pre-proof exitInfo sample.
-  // This is the sample that classifications are
-  // drawn from — the handle has had a chance to
-  // observe whatever the kill triggered.
+  // ORACLE call. Observation-only — performs NO
+  // kill. The previous kill is owned by this test
+  // site.
   // ─────────────────────────────────────────────
-  const exitInfoAfterLifecycleBoundary = readExitInfo();
-
-  // ORACLE call. The oracle performs NO kill, NO
-  // signal; it only observes (kill(pid, 0),
-  // exitInfo().exited, exitCode, signalCode). The
-  // previous kill above is the legacy "best effort"
-  // signal that the test sends before asking the
-  // oracle to PROVE what happened.
   const tProveBefore = Date.now();
   const r = await proveChildAbsent(child);
   const tProveAfter = Date.now();
-
-  // ─────────────────────────────────────────────
-  // T2: post-proof exitInfo sample. Catches the
-  // late-boundary case where the handle observed
-  // the exit during or after the oracle ran.
-  // ─────────────────────────────────────────────
-  const exitInfoAfterProof = readExitInfo();
-
-  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX01)
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX02)
   // Build and emit the typed
-  // WSTART_LIVE01_ABSENCE_DIAGNOSTIC packet. We
-  // capture typed observation-only evidence at
-  // every stage. We never parse human-readable
-  // error prose.
+  // WSTART_LIVE01_ABSENCE_DIAGNOSTIC packet. The
+  // schema is the one pinned by
+  // _wstart_diagnostic_helpers.ts; this packet is
+  // observation-only evidence at every stage.
   //
-  // MICROFIX01 packet shape:
-  //   witness.exitInfo                          — DELETED
-  //   witness.exitInfoBeforeTermination         — T0 (provenance)
-  //   witness.exitInfoAfterLifecycleBoundary    — T1 (classification source)
-  //   witness.bootstrapOutputBoundary           — typed discriminator
-  //   witness.signalRequestOutcome              — kill() return contract
-  //   witness.errorEventObserved                — 'error' event with code
-  //   ...
-  //   proveChildAbsent.exitInfoAfterProof       — T2 (classification source)
-  //   ...
-  // All other fields unchanged.
+  // MICROFIX02 packet shape (vs MICROFIX01):
+  //
+  //   REMOVED — exitInfoAfterLifecycleBoundary
+  //             (renamed; the boundary was stdio
+  //             accounting, not lifecycle)
+  //   REMOVED — tLifecycleBoundary
+  //             (renamed; was implicitly treating
+  //             output accounting as lifecycle)
+  //
+  //   RENAMED — exitInfoAfterOutputBoundaryWait
+  //             (the output-barrier sample is now
+  //             honestly named)
+  //   ADDED   — processExitObservation
+  //             (NEW orthogonal dimension, driven
+  //             by the handle's 'exit' and 'error'
+  //             events, armed BEFORE kill)
+  //   ADDED   — exitInfoAfterProcessObservation
+  //             (NEW T1a sample, taken after
+  //             process observation settles, NOT
+  //             after output barrier)
+  //
+  //   KEPT    — bootstrapOutputBoundary (typed,
+  //             orthogonal, NEVER promoted)
+  //   KEPT    — signalRequestOutcome
+  //   KEPT    — errorEventObserved
+  //   KEPT    — exitInfoBeforeTermination (T0)
+  //   KEPT    — exitInfoAfterProof (T2)
   const witnessEntry = child as unknown as {
     pid?: number | null | undefined;
   };
@@ -347,11 +260,9 @@ async function terminateAndProveWitness(
         const errno = err && typeof err.code === "string"
           ? err.code
           : undefined;
-        if (errno !== undefined) {
-          kernelObservation = { kind: "other_error", errno };
-        } else {
-          kernelObservation = { kind: "other_error" };
-        }
+        kernelObservation = errno !== undefined
+          ? { kind: "other_error", errno }
+          : { kind: "other_error" };
       }
     }
   } else {
@@ -361,11 +272,13 @@ async function terminateAndProveWitness(
     runId: "wstart-live01",
     witness: {
       pid: typeof witnessPid === "number" ? witnessPid : null,
-      exitInfoBeforeTermination,
-      exitInfoAfterLifecycleBoundary,
-      bootstrapOutputBoundary,
-      signalRequestOutcome,
-      errorEventObserved,
+      exitInfoBeforeTermination: obs.exitInfoBeforeTermination,
+      exitInfoAfterProcessObservation: obs.exitInfoAfterProcessObservation,
+      exitInfoAfterOutputBoundaryWait: obs.exitInfoAfterOutputBoundaryWait,
+      processExitObservation: obs.processExitObservation,
+      bootstrapOutputBoundary: obs.bootstrapOutputBoundary,
+      signalRequestOutcome: obs.signalRequestOutcome,
+      errorEventObserved: obs.errorEventObserved,
     },
     proveChildAbsent: {
       ...r,
@@ -380,7 +293,6 @@ async function terminateAndProveWitness(
     teardown: null,
     timing: {
       beforeTermination: tBefore,
-      lifecycleBoundary: tLifecycleBoundary,
       proveChildAbsent: {
         start: tProveBefore,
         finish: tProveAfter,
@@ -400,16 +312,10 @@ async function terminateAndProveWitness(
   //                                AND kernel is NOT
   //                                positive (releases)
   //
-  // All other observations — child_terminated
-  // (possible PID reuse), alive (kernel says we're
-  // still running, Node didn't see exit),
-  // permission_denied (kernel EPERM, Node didn't see
-  // exit), identity_unavailable — retain the fixture
-  // so the strict lane reports residue. "absent" (the
-  // old overloaded label) is gone; kernel ESRCH is
-  // `pid_absent`, handle exit boundary is
-  // `child_terminated_proven`. `cleanup_failed` is
-  // also gone — the oracle never performs cleanup.
+  // The lifecycle classification that drives this
+  // decision is derived from
+  // processExitObservation (NOT from
+  // bootstrapOutputBoundary).
   const absent =
     r.kind === "pid_absent" ||
     r.kind === "child_terminated_proven";
@@ -418,6 +324,8 @@ async function terminateAndProveWitness(
   }
   return absent;
 }
+
+
 
 function emit(rec: unknown): void {
   process.stdout.write(JSON.stringify(rec) + "\n");
