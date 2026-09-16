@@ -52,7 +52,7 @@ import {
   makeHarnessHandle,
   type HarnessHandle,
 } from "../domain/ids.js";
-import type { JsonValue } from "./subject-json.js";
+import type { JsonObject } from "./subject-json.js";
 
 // Re-export IDENTIFIER_GRAMMAR so consumers of subject-types
 // can pull the grammar alongside their subject types without
@@ -227,14 +227,22 @@ export type SubjectHarness = {
  * as an OPEN JSON namespace (the only one in the manifest)
  * so future knobs do not require schema bumps; the decoder
  * recursively validates and CLONES its contents into an
- * INERT OWNED JsonValue (D-M05). Callers receive the owned
- * snapshot; the caller's live object graph never enters
- * the manifest.
+ * INERT OWNED JsonValue tree (D-M05, D-M09, D-M10). Callers
+ * receive the owned snapshot; the caller's live object graph
+ * never enters the manifest.
+ *
+ * D-M11: the static type of `configuration` is JsonObject,
+ * not JsonValue. validateSubjectManifest() requires the
+ * configuration to be a plain object (it calls isPlainObject
+ * on the value during structural validation); a primitive,
+ * array, or exotic at this position is REJECTED before the
+ * recursive JsonValue walk. The type surface now matches
+ * that runtime contract.
  */
 export type SubjectModel = {
   readonly provider: string;
   readonly model_id: string;
-  readonly configuration: JsonValue;
+  readonly configuration: JsonObject;
 };
 
 /**

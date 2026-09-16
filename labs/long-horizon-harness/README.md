@@ -704,15 +704,30 @@ INERT_OWNED_JSON_SNAPSHOT       = PASS  (D-M05: SubjectId is a
                                             function of captured
                                             inert storage, not
                                             caller live graph)
-SHAPE_CLOSED_WORLD_REJECTION    = PASS  (D-M06: accessors,
+OBJECT_SHAPE_CLOSED_WORLD       = PASS  (D-M06: accessors,
                                             symbol keys,
-                                            non-enumerable keys,
-                                            sparse arrays all
-                                            rejected — SNAP01–09)
+                                            non-enumerable keys
+                                            rejected — SNAP01–04)
+ARRAY_SHAPE_CLOSED_WORLD        = PASS  (D-M09: extra string
+                                            keys, symbol keys,
+                                            accessor indices,
+                                            non-enumerable
+                                            indices all rejected
+                                            — SNAP11–14)
+PROTO_KEY_PRESERVATION          = PASS  (D-M10: __proto__ is an
+                                            own data property of
+                                            a null-prototype
+                                            record; SubjectId
+                                            reflects it — SNAP16–18)
 CALLER_MUTATION_ISOLATION       = PASS  (D-M07: mutating input
                                             after decode cannot
                                             affect DecodedSubject
-                                            — SNAP08, SNAP10)
+                                            — SNAP07, SNAP08,
+                                            SNAP10)
+TYPE_SURFACE_MATCHES_DECODER    = PASS  (D-M11: configuration is
+                                            JsonObject, matching
+                                            validateSubjectManifest's
+                                            runtime contract)
 CANONICAL_HASH_DETERMINISTIC    = PASS
 SUBJECT_ID_CONTENT_BOUND        = PASS
 REPO_REVISION_BOUND             = PASS

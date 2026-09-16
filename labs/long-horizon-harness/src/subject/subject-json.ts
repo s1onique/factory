@@ -77,10 +77,11 @@
  * The closed-world definition of a JSON value.
  */
 export type JsonPrimitive = null | boolean | number | string;
+export type JsonObject = { readonly [key: string]: JsonValue };
 export type JsonValue =
   | JsonPrimitive
   | ReadonlyArray<JsonValue>
-  | { readonly [key: string]: JsonValue };
+  | JsonObject;
 
 export type JsonValidation =
   | { readonly ok: true; readonly value: JsonValue }
@@ -156,26 +157,7 @@ function snapshotJsonValueInner(
   ancestors.add(obj);
   try {
     if (Array.isArray(value)) {
-      const src = value as ReadonlyArray<unknown>;
-      const len = src.length;
-      const out: JsonValue[] = [];
-      // Build a FRESH dense Array via explicit push. We
-      // never use `new Array(len)` because it produces a
-      // sparse array; instead we push each slot. This
-      // rejects any array with holes (D-M06).
-      for (let i = 0; i < len; i++) {
-        if (!(i in src)) {
-          return fail(`${path}[${i}]: sparse array hole`);
-        }
-        const elem = src[i];
-        if (elem === undefined) {
-          return fail(`${path}[${i}]: undefined is not a JsonValue`);
-        }
-        const r = snapshotJsonValueInner(elem, `${path}[${i}]`, ancestors);
-        if (!r.ok) return r;
-        out.push(r.value);
-      }
-      return ok(out as ReadonlyArray<JsonValue>);
+      return snapshotArray(value as ReadonlyArray<unknown>, path, ancestors);
     }
 
     // Reject non-plain objects (Date, Map, Set, Promise, ...).
@@ -190,16 +172,23 @@ function snapshotJsonValueInner(
     //   - symbol keys
     //   - non-enumerable string keys
     //   - accessor descriptors
+    // D-M10: null-prototype output preserves "__proto__"
+    // as DATA.
     const ownKeys = Reflect.ownKeys(obj);
-    const out: { [k: string]: JsonValue } = {};
+    // D-M10: use a null-prototype record. An ordinary
+    // `{}` would, on assignment to "__proto__", trigger
+    // the inherited Object.prototype.__proto__ setter and
+    // CORRUPT THE PROTOTYPE instead of creating an own
+    // data property. A null-prototype object has no such
+    // setter, so "__proto__" is just an own string key
+    // like any other.
+    const out = Object.create(null) as { [k: string]: JsonValue };
     for (const k of ownKeys) {
       if (typeof k !== "string") {
         return fail(`${path}: symbol own-key is not a JsonValue`);
       }
       const d = Object.getOwnPropertyDescriptor(obj, k);
       if (d === undefined) {
-        // A Proxy could return a key from ownKeys that has
-        // no descriptor. Reject - the boundary is hostile.
         return fail(
           `${path}.${k}: own-key returned by Reflect.ownKeys has no descriptor`,
         );
@@ -210,24 +199,18 @@ function snapshotJsonValueInner(
       if (d.get !== undefined || d.set !== undefined) {
         return fail(`${path}.${k}: accessor property`);
       }
-      // Data descriptor. Note: Node's Proxy handler
-      // normalization (ToPropertyDescriptor) fills in
-      // `{value: undefined, writable: false}` when the trap
-      // returns a malformed descriptor like
-      // `{enumerable:true, configurable:true}` — so we
-      // cannot reliably distinguish "hostile getter" from
-      // "honest undefined property" at this layer. Either
-      // way the snapshotter rejects `value: undefined`,
-      // so the hostile trap cannot smuggle a getter-fired
-      // value past the boundary.
       const v: unknown = d.value;
       if (v === undefined) {
         return fail(`${path}.${k}: undefined is not a JsonValue`);
       }
       const r = snapshotJsonValueInner(v, `${path}.${k}`, ancestors);
       if (!r.ok) return r;
+      // Direct assignment into a null-prototype record is
+      // safe even when k === "__proto__": no inherited
+      // setter can hijack the assignment.
       out[k] = r.value;
     }
+    Object.freeze(out);
     return ok(out as { readonly [k: string]: JsonValue });
   } finally {
     ancestors.delete(obj);
@@ -251,4 +234,116 @@ export function validateJsonValue(
     return { ok: true, value: null };
   }
   return r;
+}
+
+/**
+ * Array-specific snapshot (D-M09).
+ *
+ *   Arrays get the same descriptor discipline as ordinary
+ *   objects: walk own-keys, restrict the permitted set to
+ *   EXACTLY "length" and the string keys "0".."len-1",
+ *   reject every other own-key (including symbols and
+ *   "extra" string properties), validate the descriptor
+ *   for each index, and never execute a getter by reading
+ *   `src[i]` directly.
+ *
+ *   Without this discipline the snapshotter would:
+ *     - silently drop `arr.foo = "bar"` (extra string key)
+ *     - silently drop `arr[Symbol(...)] = "x"` (symbol key)
+ *     - execute accessor getters for individual indices
+ *       (mutating caller's state, drifting identity
+ *        between two reads)
+ *     - silently reshape non-enumerable index descriptors
+ *       and sparse holes
+ *   None of those are honest capture; all violate the
+ *   Phase D identity invariant.
+ */
+function snapshotArray(
+  src: ReadonlyArray<unknown>,
+  path: string,
+  ancestors: Set<object>,
+): JsonValidation {
+  // (1) Walk own-keys. The permitted set is exactly
+  //     "length" plus the string indices "0".."len-1".
+  //     Anything else (symbol, extra string, ...) is a
+  //     shape violation.
+  const ownKeys = Reflect.ownKeys(src);
+  let declaredLen = -1;
+  for (const k of ownKeys) {
+    if (k === "length") {
+      const d = Object.getOwnPropertyDescriptor(src, "length");
+      if (d === undefined) {
+        return fail(
+          `${path}.length: array length key has no descriptor`,
+        );
+      }
+      if (d.get !== undefined || d.set !== undefined) {
+        return fail(`${path}.length: array length accessor`);
+      }
+      declaredLen = Number(d.value);
+      continue;
+    }
+    if (typeof k !== "string") {
+      return fail(`${path}: array symbol own-key is not a JsonValue`);
+    }
+    // Index must be a non-negative integer in canonical
+    // string form. Anything else (a numeric-looking key
+    // like "01", a negative, a float, a string that
+    // happens to look like an integer but isn't one)
+    // is rejected.
+    if (!/^(0|[1-9][0-9]*)$/.test(k)) {
+      return fail(
+        `${path}: array own-key "${k}" is not a permitted index or "length"`,
+      );
+    }
+    const i = Number(k);
+    if (!Number.isInteger(i) || i < 0) {
+      return fail(
+        `${path}: array own-key "${k}" is not a permitted index`,
+      );
+    }
+    if (declaredLen !== -1 && i >= declaredLen) {
+      return fail(
+        `${path}[${i}]: array own-key beyond declared length ${declaredLen}`,
+      );
+    }
+    const d = Object.getOwnPropertyDescriptor(src, k);
+    if (d === undefined) {
+      return fail(
+        `${path}[${i}]: array index has no descriptor`,
+      );
+    }
+    if (d.get !== undefined || d.set !== undefined) {
+      return fail(`${path}[${i}]: array accessor element`);
+    }
+    if (!d.enumerable) {
+      return fail(`${path}[${i}]: non-enumerable array element`);
+    }
+    const v: unknown = d.value;
+    if (v === undefined) {
+      return fail(`${path}[${i}]: undefined is not a JsonValue`);
+    }
+  }
+
+  // (2) Build the dense fresh array. We do NOT read
+  //     `src[i]` (which would execute getters); we re-use
+  //     the descriptors we already validated above.
+  const declaredLength = declaredLen === -1 ? src.length : declaredLen;
+  const out: JsonValue[] = [];
+  for (let i = 0; i < declaredLength; i++) {
+    const d = Object.getOwnPropertyDescriptor(src, String(i));
+    if (d === undefined) {
+      // Index not in ownKeys: hole. Reject.
+      return fail(`${path}[${i}]: sparse array hole`);
+    }
+    const v: unknown = d.value;
+    if (v === undefined) {
+      return fail(`${path}[${i}]: undefined is not a JsonValue`);
+    }
+    const r = snapshotJsonValueInner(v, `${path}[${i}]`, ancestors);
+    if (!r.ok) return r;
+    out.push(r.value);
+  }
+  Object.freeze(out);
+  return ok(out as ReadonlyArray<JsonValue>);
 }

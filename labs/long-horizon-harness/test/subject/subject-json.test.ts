@@ -15,6 +15,64 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { validateJsonValue, snapshotJsonValue } from "../../src/subject/subject-json.js";
+import { decodeSubjectManifest } from "../../src/subject/subject-decode.js";
+
+/**
+ * Build a structurally valid SubjectManifest whose
+ * model.configuration is exactly the given object. Used by
+ * SNAP18 to compare SubjectIds across configurations that
+ * differ ONLY in their __proto__ key.
+ */
+function makeConfigurationLikeForDecode(
+  configuration: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    schema_version: "phase-d.subject.v1",
+    experiment_id: "exp-001",
+    subject_id_hint: "subj-hint-001",
+    harness: {
+      id: "cline",
+      version: "0.1.0",
+      source_revision:
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    },
+    model: {
+      provider: "factory-lab",
+      model_id: "fake-model-v1",
+      configuration,
+    },
+    prompt: {
+      prompt_id: "prompt-A",
+      content_hash:
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    },
+    task: {
+      task_id: "task-001",
+      fixture_revision: "fixture-rev-001",
+    },
+    repository: {
+      commit:
+        "3333333333333333333333333333333333333333333333333333333333333333",
+      dirty_policy: "reject",
+    },
+    budget: {
+      wall_clock_ms: 600_000,
+      turns: 50,
+      tool_calls: 200,
+      token_limit: 1_000_000,
+    },
+    capabilities: {
+      tools: ["read_file", "write_file", "bash"],
+      network: false,
+      filesystem: true,
+      execution_policy: "sandbox",
+    },
+    repetition: {
+      repetition_index: 0,
+      seed: "seed-A",
+    },
+  };
+}
 
 test("JSON-BOUND-01: primitives pass", () => {
   for (const v of [null, true, false, 0, -1, 3.14, "", "hello"]) {
@@ -327,12 +385,23 @@ test("SNAP07: shared DAG -> accepted; snapshot has independent storage", () => {
   assert.equal(r.ok, true);
   if (r.ok) {
     const out = r.value as { left: { x: number }; right: { x: number } };
-    // Independent storage: mutating one branch must not
-    // affect the other.
-    (out.left as { x: number }).x = 99;
-    assert.equal((out.right as { x: number }).x, 1);
+    // Independent storage: the snapshot is frozen (no
+    // post-decode mutation is possible at all), AND the
+    // two branches are independent objects (mutating one
+    // never affects the other).
+    assert.equal(Object.isFrozen(out.left), true);
+    assert.equal(Object.isFrozen(out.right), true);
+    assert.notEqual(out.left, out.right);
     // The CALLER's input must not have been mutated either.
     assert.equal((shared as { x: number }).x, 1);
+    // Attempting to mutate the snapshot must throw in
+    // strict mode (TypeError on a frozen object).
+    assert.throws(
+      () => { (out.left as { x: number }).x = 99; },
+      TypeError,
+    );
+    // The right branch is unchanged (was never written).
+    assert.equal((out.right as { x: number }).x, 1);
   }
 });
 
@@ -459,4 +528,167 @@ test("JSON13: trap throws Proxy whose getPrototypeOf throws -> no throw", () => 
     threw = true;
   }
   assert.equal(threw, false);
+});
+
+/*
+ * SNAP11-SNAP15: array shape closed-world (D-M09).
+ * The snapshotter must reject every "extra" own-key on an
+ * array, including symbol keys, accessor descriptors on
+ * indices, and non-enumerable indices. SNAP15 is a control:
+ * an ordinary dense array of primitives passes.
+ */
+
+test("SNAP11: array extra string property -> rejected", () => {
+  const a: unknown[] = [1, 2];
+  (a as unknown as Record<string, unknown>).extra = 42;
+  const r = snapshotJsonValue(a);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.match(
+      r.reason,
+      /array own-key "extra" is not a permitted index or "length"/,
+    );
+  }
+});
+
+test("SNAP12: array symbol own-key -> rejected", () => {
+  const a: unknown[] = [1];
+  (a as unknown as Record<symbol, unknown>)[Symbol("secret")] = 42;
+  const r = snapshotJsonValue(a);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /array symbol own-key/);
+});
+
+test("SNAP13: array accessor index -> rejected, getter never invoked", () => {
+  let n = 0;
+  const a: unknown[] = [];
+  Object.defineProperty(a, "0", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      n++;
+      return 99;
+    },
+  });
+  a.length = 1;
+  const r = snapshotJsonValue(a);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /array accessor element/);
+  assert.equal(n, 0, "getter must not have been invoked");
+});
+
+test("SNAP14: array non-enumerable index -> rejected", () => {
+  const a: unknown[] = [];
+  Object.defineProperty(a, "0", {
+    value: "x",
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  a.length = 1;
+  const r = snapshotJsonValue(a);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /non-enumerable array element/);
+});
+
+test("SNAP15: ordinary dense array -> accepted", () => {
+  const r = snapshotJsonValue([1, 2, "three", null, true, { x: 1 }]);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    // The snapshot array is frozen and contains the
+    // expected elements in order.
+    assert.equal(Object.isFrozen(r.value), true);
+    // Element [5] is a snapshot record (null prototype);
+    // compare via key/value rather than deepEqual.
+    const arr = r.value as ReadonlyArray<unknown>;
+    assert.equal(arr.length, 6);
+    assert.equal(arr[0], 1);
+    assert.equal(arr[1], 2);
+    assert.equal(arr[2], "three");
+    assert.equal(arr[3], null);
+    assert.equal(arr[4], true);
+    const rec = arr[5] as Record<string, unknown>;
+    assert.equal(rec.x, 1);
+    assert.equal(Object.getPrototypeOf(rec), null);
+  }
+});
+
+/*
+ * SNAP16-SNAP18: __proto__ is preserved as DATA on a
+ * null-prototype record (D-M10). The reviewer's
+ * identity-oracle: a configuration with an own __proto__
+ * key has a DIFFERENT SubjectId from the same content
+ * without that key.
+ */
+
+test("SNAP16: own __proto__ key preserved in snapshot", () => {
+  const input = JSON.parse('{"__proto__":{"admin":true},"normal":1}');
+  const r = snapshotJsonValue(input);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    const out = r.value as Record<string, unknown>;
+    // The captured __proto__ MUST be an own data
+    // property of the snapshot, not a prototype mutation.
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(out, "__proto__"),
+      true,
+      "__proto__ must be an own data property of the snapshot",
+    );
+    // Its value is the cloned admin record.
+    const protoVal = out.__proto__ as Record<string, unknown>;
+    assert.equal(protoVal.admin, true);
+  }
+});
+
+test("SNAP17: snapshot record prototype is null", () => {
+  const r = snapshotJsonValue({ a: 1 });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(Object.getPrototypeOf(r.value), null);
+  }
+});
+
+test("SNAP18: __proto__ content contributes to SubjectId", () => {
+  // Identity oracle: an attacker-controlled __proto__ key
+  // changes the SubjectId. If the snapshotter silently
+  // dropped __proto__ or mutated the prototype instead,
+  // the two configurations would hash identically.
+  //
+  // We use Object.defineProperty to install __proto__ as
+  // an OWN data property; direct assignment via
+  // `config.__proto__ = ...` would invoke the inherited
+  // setter (mutating the prototype) rather than creating
+  // an own property — exactly the attack we are guarding
+  // against.
+  function makeWithProto(): Record<string, unknown> {
+    const cfg: Record<string, unknown> = { normal: 1 };
+    Object.defineProperty(cfg, "__proto__", {
+      value: { admin: true },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return cfg;
+  }
+  const withProto = makeConfigurationLikeForDecode(makeWithProto());
+  const withoutProto = makeConfigurationLikeForDecode({ normal: 1 });
+  // Sanity: withProto's __proto__ is an own data property.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      (withProto.model as Record<string, unknown>).configuration,
+      "__proto__",
+    ),
+    true,
+  );
+  const r1 = decodeSubjectManifest(withProto);
+  const r2 = decodeSubjectManifest(withoutProto);
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true);
+  if (r1.ok && r2.ok) {
+    assert.notEqual(
+      r1.value.subjectId,
+      r2.value.subjectId,
+      "__proto__ must contribute to the SubjectId",
+    );
+  }
 });

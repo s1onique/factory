@@ -127,7 +127,38 @@ test("FRZ10: dimensions are preserved exactly across reads", () => {
   );
   assert.equal(f.manifest.model.provider, m.model.provider);
   assert.equal(f.manifest.model.model_id, m.model.model_id);
-  assert.deepEqual(
+  // Configuration is a null-prototype snapshot (D-M10);
+  // assert.deepEqual compares prototypes strictly. Compare
+  // structurally instead — recursively across nested
+  // null-prototype records.
+  function assertStructurallyEqual(
+    a: unknown,
+    b: unknown,
+    path: string = "$",
+  ): void {
+    if (
+      typeof a !== "object" ||
+      a === null ||
+      typeof b !== "object" ||
+      b === null
+    ) {
+      assert.deepEqual(a, b);
+      return;
+    }
+    if (Array.isArray(a) || Array.isArray(b)) {
+      assert.deepEqual(a, b);
+      return;
+    }
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const aKeys = Object.keys(ao).sort();
+    const bKeys = Object.keys(bo).sort();
+    assert.deepEqual(aKeys, bKeys, `keys mismatch at ${path}`);
+    for (const k of aKeys) {
+      assertStructurallyEqual(ao[k], bo[k], `${path}.${k}`);
+    }
+  }
+  assertStructurallyEqual(
     f.manifest.model.configuration,
     m.model.configuration,
   );

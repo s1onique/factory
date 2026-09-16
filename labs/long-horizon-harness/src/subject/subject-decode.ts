@@ -38,7 +38,7 @@
  */
 
 import { computeSubjectId } from "./subject-id.js";
-import { snapshotJsonValue, type JsonValue } from "./subject-json.js";
+import { snapshotJsonValue, type JsonObject } from "./subject-json.js";
 import {
   SUBJECT_SCHEMA_VERSION,
   makeExperimentId,
@@ -279,7 +279,13 @@ function decodeSubjectManifestInner(input: unknown): SubjectDecodeResult {
     };
   }
   // OWNED inert JsonValue. Never alias back to `input`.
-  const configuration: JsonValue = configSnap.value;
+  //
+  // D-M11: validateSubjectManifest() verified
+  // `model.configuration` is a plain object before we
+  // reached this point, so the snapshot value IS a
+  // JsonObject (it cannot be a primitive or array — the
+  // structural validator already rejected those shapes).
+  const configuration = configSnap.value as JsonObject;
 
   // (4) Compose the typed SubjectManifest.
   const root = input as Record<string, unknown>;

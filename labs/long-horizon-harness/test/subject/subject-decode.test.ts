@@ -489,10 +489,25 @@ test("SNAP08: caller mutation isolation — decoded subject unaffected by later 
 
   // (b) r1's manifest contents are structurally identical
   //     to the snapshot we took at T1 — they are NOT a
-  //     live alias of the caller's input.
-  assert.deepEqual(cfg1, { temperature: 0.5, seed: "abc", nested: { x: 1 } });
+  //     live alias of the caller's input. Snapshot is
+  //     null-prototype (D-M10), so build the expected
+  //     structurally with the same shape.
+  const expected = Object.create(null) as Record<string, unknown>;
+  expected.temperature = 0.5;
+  expected.seed = "abc";
+  const expectedNested = Object.create(null) as Record<string, unknown>;
+  expectedNested.x = 1;
+  expected.nested = expectedNested;
+  assert.deepEqual(cfg1, expected);
 
-  // (c) A FRESH decode at T2 sees the mutated input, so it
+  // (c) Snapshot is frozen; attempts to mutate it throw.
+  assert.equal(Object.isFrozen(cfg1), true);
+  assert.throws(
+    () => { (cfg1 as Record<string, unknown>).temperature = 1; },
+    TypeError,
+  );
+
+  // (d) A FRESH decode at T2 sees the mutated input, so it
   //     produces a different SubjectId — proving the
   //     decoder is reading what the caller now provides,
   //     not a cached snapshot. This is a control test that
@@ -520,7 +535,10 @@ test("SNAP10: snapshot hash equals the frozen manifest content hash", () => {
   // The frozen manifest's configuration must be a CLONE.
   const frozen = (r1.value.manifest.model as { configuration: unknown })
     .configuration;
-  assert.deepEqual(frozen, { temperature: 0.5 });
+  // Snapshot is null-prototype (D-M10).
+  const expected = Object.create(null) as Record<string, unknown>;
+  expected.temperature = 0.5;
+  assert.deepEqual(frozen, expected);
   // Re-encoding the same content yields the same SubjectId.
   const m2 = makeValidManifest();
   (m2.model as { configuration: unknown }).configuration = {

@@ -37,6 +37,7 @@ export {
 export {
   validateJsonValue,
   snapshotJsonValue,
+  type JsonObject,
   type JsonPrimitive,
   type JsonValue,
   type JsonValidation,
