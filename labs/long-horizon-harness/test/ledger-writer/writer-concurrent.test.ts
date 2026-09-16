@@ -375,45 +375,117 @@ live("SEQ05 1000 concurrent appends → sequences exactly 1..1000", async () => 
   // Verify on disk: every committed line is
   // parseable and contains commit_id and
   // sequence.
+  //
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX01)
+  //
+  // MICROFIX01 durable-cardinality correction: the
+  // previous revision asserted `lines.length >= N`,
+  // which is a floor — it accepts unrelated
+  // pre-existing ledger lines from SEQ01 or earlier
+  // tests. That weakens the property the reburn
+  // §8 contract actually requires: "exactly N
+  // seq05-* records on disk, each present exactly
+  // once, with disk sequences matching the response
+  // sequences".
+  //
+  // We now parse the ledger, select the SEQ05 record
+  // set by commit_id prefix, and assert:
+  //
+  //   seq05DiskRecords.length === N
+  //   unique seq05 commitIds   === N
+  //   each seq05-0..seq05-(N-1) appears exactly once
+  //   on-disk seq05 sequence set === response seq set
+  //
+  // This is order-independent of any prior test and
+  // is strictly stronger than the previous floor.
   const ledgerRaw = await fs.readFile(
     path.join(tmpDir!, LEDGER_FILENAME),
     "utf8",
   );
   const lines = ledgerRaw.split("\n").filter((l) => l.length > 0);
-  // On-disk line count = N (this test alone) when
-  // SEQ05 runs in isolation; = N + 2 in the
-  // canonical sequence where SEQ01 (2 appends)
-  // runs first. The 1000-logical-operation
-  // property under test is independent of any
-  // prior test's state, so we verify only that
-  // lines.length >= N and that ALL 1000
-  // appends landed on disk (count = lines
-  // belonging to SEQ05). The latter is exactly
-  // N because each canonical invocation writes
-  // exactly one JSONL line.
-  assert.ok(lines.length >= N,
-    `ledger on-disk MUST hold ≥ N lines for SEQ05; got ${lines.length}`);
-  // The committed count we record here is the
-  // canonical operation count (N), independent
-  // of any prior test's contributions.
+  // Parse-everything pass; collect parse errors so
+  // we report them and still surface the SEQ05
+  // record-set result for diagnostics.
   let parseErrors = 0;
+  const parsedLines: Array<Record<string, unknown>> = [];
   for (const line of lines) {
     try {
-      const parsed = JSON.parse(line);
-      if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        typeof (parsed as { commit_id?: unknown }).commit_id !== "string" ||
-        typeof (parsed as { sequence?: unknown }).sequence !== "number"
-      ) {
-        parseErrors++;
-      }
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      parsedLines.push(parsed);
     } catch {
       parseErrors++;
     }
   }
   assert.equal(parseErrors, 0,
     `SEQ05: parse errors on disk; got ${parseErrors}`);
+  // Select SEQ05 records by commit_id prefix.
+  // Mechanical anchor: this prefix MUST equal the
+  // literal used by the burst construction above
+  // (``commitId: `seq05-${i}```). If it drifts, the
+  // record-set selection breaks silently — so we
+  // pin it with a constant plus a typed assertion.
+  const SEQ05_COMMIT_PREFIX = "seq05-";
+  const seq05DiskRecords = parsedLines.filter((r) => {
+    const cid = r["commit_id"];
+    return typeof cid === "string" && cid.startsWith(SEQ05_COMMIT_PREFIX);
+  });
+  assert.equal(
+    seq05DiskRecords.length, N,
+    `SEQ05: on-disk seq05-* record count MUST equal N (${N}); ` +
+      `got ${seq05DiskRecords.length} of ${lines.length} total lines`,
+  );
+  // Uniqueness: each seq05 commitId appears at most
+  // once on disk. If the canonical writer were to
+  // double-write (or the test were to retry a
+  // canonical invocation), this would catch it.
+  const seq05CommitIds = new Set<string>();
+  let dupCount = 0;
+  for (const r of seq05DiskRecords) {
+    const cid = r["commit_id"] as string;
+    if (seq05CommitIds.has(cid)) dupCount++;
+    else seq05CommitIds.add(cid);
+  }
+  assert.equal(
+    seq05CommitIds.size, N,
+    `SEQ05: unique seq05-* commitIds on disk MUST equal N (${N}); ` +
+      `got ${seq05CommitIds.size} unique, ${dupCount} duplicate(s)`,
+  );
+  assert.equal(dupCount, 0,
+    `SEQ05: duplicate seq05-* commitIds on disk; got ${dupCount}`);
+  // Completeness: every expected seq05-0..seq05-(N-1)
+  // must appear at least once on disk.
+  const missing: number[] = [];
+  for (let i = 0; i < N; i++) {
+    if (!seq05CommitIds.has(`${SEQ05_COMMIT_PREFIX}${i}`)) missing.push(i);
+  }
+  assert.equal(
+    missing.length, 0,
+    `SEQ05: missing seq05-* commitIds on disk; first 5 missing = ` +
+      JSON.stringify(missing.slice(0, 5)),
+  );
+  // Cross-check: the set of on-disk seq05 sequences
+  // MUST equal the set of returned response sequences.
+  // This proves that what the test reported as
+  // committed is exactly what the writer wrote —
+  // independent of any prior test's state.
+  const diskSeqSet = new Set<number>();
+  for (const r of seq05DiskRecords) {
+    const s = r["sequence"];
+    if (typeof s === "number") diskSeqSet.add(s);
+  }
+  const responseSeqSet = new Set<number>(seqs);
+  assert.equal(
+    diskSeqSet.size, responseSeqSet.size,
+    `SEQ05: on-disk seq05 sequence set size MUST match ` +
+      `response sequence set size; disk=${diskSeqSet.size} ` +
+      `response=${responseSeqSet.size}`,
+  );
+  for (const s of responseSeqSet) {
+    assert.ok(
+      diskSeqSet.has(s),
+      `SEQ05: response sequence ${s} missing from on-disk seq05 records`,
+    );
+  }
 
   // ─────────────────────────────────────────────
   // Acceptance output (reburn §8 contract).

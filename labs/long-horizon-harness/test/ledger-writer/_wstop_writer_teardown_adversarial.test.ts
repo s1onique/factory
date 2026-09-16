@@ -750,55 +750,86 @@ test("WSTOP11: registry reset discipline — clear empties, record → clear →
   );
 });
 
-test("WSTOP12: real host accepted SIGKILL → actual close boundary is valid", async () => {
-  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01)
+test("WSTOP12: real host accepted SIGKILL → actual close boundary is valid", async (t) => {
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX01)
   //
-  // Positive control for the reburn's observed
-  // behaviour: on this host the kernel DELIVERS
-  // SIGKILL and the child terminates via `'close'`
-  // with `signal:"SIGKILL"`. That is a valid real-host
-  // lifecycle outcome — NOT a production defect, NOT a
-  // test failure. The WSTOP02 / WSTOP03 oracles cannot
-  // be satisfied on this host, but this oracle proves
-  // the same primitive correctly settles
-  // `{kind:"closed", signal:"SIGKILL"}` when the host
-  // actually accepts the kill.
+  // MICROFIX01 positive-control fidelity
+  // correction: the previous revision accepted
+  // ANY typed outcome (`closed`, `signal_permission_denied`,
+  // `close_timeout`) as PASS. That made the test a
+  // false-green — it could print PASS while never
+  // observing the positive condition its name
+  // claims to prove.
   //
-  // This test ONLY exercises the real-host close path.
-  // It MUST NOT be conflated with WSTOP02 or WSTOP03
-  // (whose EPERM premise is fake-driven).
+  // Corrected semantics:
   //
-  // Skip semantics:
-  //   - if the host denies SIGKILL, the primitive
-  //     times out (close_timeout) or settles
-  //     signal_permission_denied; we surface that
-  //     honestly rather than fake the close.
+  //   PASS         — primitive settled with
+  //                  {kind:"closed", signal:"SIGKILL"}
+  //                  (the positive condition this
+  //                  oracle is named for)
+  //
+  //   HONEST SKIP  — primitive settled with
+  //                  {kind:"signal_permission_denied"}
+  //                  or {kind:"close_timeout"} (host
+  //                  cannot satisfy the positive
+  //                  condition under current sandbox
+  //                  configuration). We surface a
+  //                  BLOCKED_BY_ENVIRONMENT marker;
+  //                  we do NOT claim PASS.
+  //
+  //   FAIL         — primitive settled with an
+  //                  unexpected typed outcome (the
+  //                  implementation regressed).
+  //
+  // We always emit a typed outcome line so the
+  // operator can tell SKIP from PASS at a glance.
   await withTmpDir(async () => {
     const c = spawnLongLived();
     c.on("error", () => { /* trap */ });
     const outcome = await teardown.terminateHelperAndAwaitTyped(c, 1500);
     try { c.unref(); } catch { /* */ }
+    process.stdout.write(
+      "WSTOP12_OUTCOME=" + JSON.stringify(outcome) + "\n",
+    );
     if (outcome.kind === "closed") {
       assert.equal(
         outcome.signal, "SIGKILL",
         `WSTOP12: real-host close must report SIGKILL; got ${JSON.stringify(outcome)}`,
       );
+      process.stdout.write("WSTOP12_DISPOSITION=PASS\n");
       return;
     }
-    // Host refused SIGKILL. That is honest residue,
-    // not a regression of THIS oracle (this oracle
-    // only proves the positive case). We pass on a
-    // typed outcome so the test does not flake; the
-    // structural invariant — "the primitive did
-    // something typed" — is still proven.
     if (outcome.kind === "signal_permission_denied") {
+      // Honest skip: the host refused SIGKILL. The
+      // positive condition is not observable here.
+      // We surface BLOCKED_BY_ENVIRONMENT rather
+      // than PASS so the operator is not misled.
+      process.stdout.write(
+        "WSTOP12_DISPOSITION=BLOCKED_BY_ENVIRONMENT:host_denied_sigkill\n",
+      );
+      // Mechanical anchor: the outcome is also
+      // signal_permission_denied specifically
+      // (not a regression of the implementation).
       assert.equal(outcome.errno, "EPERM",
-        `WSTOP12: host denial surface; got ${JSON.stringify(outcome)}`);
+        "WSTOP12 SKIP surface: signal_permission_denied must carry errno=EPERM");
+      t.skip(
+        "BLOCKED_BY_ENVIRONMENT: WSTOP12 cannot observe positive SIGKILL close on this host (kernel denied kill); primitive returned signal_permission_denied as documented",
+      );
       return;
     }
     if (outcome.kind === "close_timeout") {
+      process.stdout.write(
+        "WSTOP12_DISPOSITION=BLOCKED_BY_ENVIRONMENT:close_timeout\n",
+      );
+      t.skip(
+        "BLOCKED_BY_ENVIRONMENT: WSTOP12 cannot observe positive SIGKILL close on this host (kernel accepted kill but close did not arrive within bounded deadline)",
+      );
       return;
     }
+    // Unexpected typed outcome — implementation
+    // regressed. The oracle name promised the
+    // positive case; this is neither the positive
+    // case nor a documented skip path.
     assert.fail(
       `WSTOP12: unexpected outcome for real-host SIGKILL; got ${JSON.stringify(outcome)}`,
     );
