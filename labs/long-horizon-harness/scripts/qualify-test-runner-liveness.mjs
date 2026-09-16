@@ -1,5 +1,5 @@
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01-CORRECTION01-MICROFIX09)
+//  LIVENESS01-CORRECTION01-MICROFIX13)
 //
 // External qualifier for the canonical-main test
 // runner liveness.
@@ -228,9 +228,12 @@ const TRACE = process.env.LIVENESS_QUALIFIER_TRACE === "1";
 //
 //   signalAttempt:
 //     NOT_ATTEMPTED       — helper short-circuited
-//     ACCEPTED            — kill returned true
-//                            (or sync `'error'`
-//                             confirmed delivery)
+//     ACCEPTED            — kill() returned true and
+//                            no higher-authority
+//                            failure evidence was
+//                            observed before the
+//                            observation envelope
+//                            closed
 //     PERMISSION_DENIED   — sync/async `'error'`
 //                            with err.code=EPERM
 //     FAILED              — kill returned false,
@@ -638,7 +641,7 @@ export const runDeadlineCleanup = async (args) => {
     // by ITS OWN flag. Listener removal is
     // scoped to the dimension it serves.
     //
-    // MF12 — finalizeSignal ONLY settles
+    // MF12/13 — finalizeSignal ONLY settles
     // the SIGNAL dimension. It does NOT
     // touch termination or close the helper.
     // MF11 had a "synchronous completion
@@ -653,6 +656,34 @@ export const runDeadlineCleanup = async (args) => {
     // until either `'close'` arrives or
     // finalizeTimeout() runs at the real
     // observation deadline.
+    //
+    // MF13 — ERROR-CHANNEL PRESERVATION.
+    // Node documents that `'error'` MAY be
+    // emitted after `kill()` returns false
+    // (the signal could not be delivered).
+    // MF12's own priority law —
+    //   `observed.error > threw > killResult` —
+    // demands that a later typed `'error'`
+    // be able to UPGRADE the signal value
+    // (e.g. FAILED → PERMISSION_DENIED).
+    // The MF12 `finalizeSignal` removed the
+    // `'error'` listener on EVERY reason,
+    // including `killResult` and `throw`,
+    // destroying that upgrade channel.
+    //
+    // MF13 gates `listenerRemoved.error`
+    // on `reason === "error"`. The `'error'`
+    // listener stays armed through
+    // kill=false / throw paths so a later
+    // typed `'error'` can still upgrade
+    // signalAttempt before the observation
+    // envelope closes (via `'close'` or the
+    // real timer). The listener is removed
+    // either by `onError` itself (when the
+    // event actually fires) or by
+    // `finishOperation` (when the
+    // observation envelope closes). LIV22
+    // cells AB/AC/AD/AE pin this.
     //
     // The `upgrading` guard preserves
     // MF11's per-source priority: an
@@ -671,7 +702,15 @@ export const runDeadlineCleanup = async (args) => {
         (reason === "throw" && signalAttempt !== "FAILED");
       if (!upgrading) return;
       signalSettled = true;
-      if (!listenerRemoved.error) {
+      // MF13 — the `'error'` listener is
+      // consumed ONLY when the event itself
+      // has provided terminal signal evidence
+      // (reason === "error"). For
+      // kill=false / throw paths, the
+      // listener STAYS armed until either
+      // `onError` fires or `finishOperation`
+      // closes the observation envelope.
+      if (reason === "error" && !listenerRemoved.error) {
         child.removeListener("error", onError);
         listenerRemoved.error = true;
       }
@@ -1313,7 +1352,7 @@ if (boundary === "DEADLINE") {
 const elapsed_ms = Date.now() - start;
 
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
-//  LIVENESS01-CORRECTION01-MICROFIX09)
+//  LIVENESS01-CORRECTION01-MICROFIX13)
 //
 // Classify liveness and test disposition INDEPENDENTLY.
 //

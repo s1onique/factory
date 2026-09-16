@@ -3552,6 +3552,283 @@ test("LIV21: synchronous-failure-then-lifecycle fidelity — termination waits e
   );
 });
 
+// MICROFIX13 — LIV22 ERROR-CHANNEL-PRESERVATION ACROSS
+// KILL-RESULT / THROW.
+//
+// The MF12 priority law is:
+//   observed.error > threw > killResult
+// That law REQUIRES a typed `'error'` event delivered
+// AFTER a synchronous kill=false / kill throw to be
+// able to UPGRADE the signalAttempt value (e.g.
+// FAILED → PERMISSION_DENIED via async EPERM).
+//
+// MF12's `finalizeSignal` removed the `'error'`
+// listener on EVERY reason — including killResult and
+// throw — destroying the upgrade channel. The MF12
+// helper would resolve signalAttempt as FAILED
+// (kill=false) before the later typed EPERM `'error'`
+// could upgrade it.
+//
+// MF13 gates `listenerRemoved.error` on
+// `reason === "error"`. The `'error'` listener
+// stays armed through kill=false / throw paths
+// and is removed only when (a) the event itself
+// fires (`onError`), or (b) `finishOperation`
+// closes the observation envelope.
+//
+// LIV22 cells:
+//
+//   AB: kill=false → async EPERM 'error'
+//          → async 'close'
+//          => signalAttempt=PERMISSION_DENIED
+//             (UPGRADE from FAILED via late
+//              typed EPERM)
+//             termination=CLOSE_OBSERVED
+//             closedByTimeout=false
+//
+//   AC: kill=false → async ESRCH 'error'
+//          → 'close'
+//          => signalAttempt=FAILED
+//             (kill=false + non-EPERM error
+//              classifies as FAILED)
+//             termination=CLOSE_OBSERVED
+//             closedByTimeout=false
+//
+//   AD: kill=false → no error → 'close'
+//          => signalAttempt=FAILED
+//             (kill returned false, no late
+//              evidence)
+//             termination=CLOSE_OBSERVED
+//             closedByTimeout=false
+//
+//   AE: throw ESRCH → async EPERM 'error'
+//          → 'close'
+//          => signalAttempt=PERMISSION_DENIED
+//             (UPGRADE from FAILED via late
+//              typed EPERM — the throw already
+//              settled signal to FAILED via
+//              ESRCH, then the async EPERM
+//              event overrides it)
+//             termination=CLOSE_OBSERVED
+//             closedByTimeout=false
+//
+// AB is the EXACT scenario the reviewer flagged:
+// kill=false MUST NOT silently disarm the error
+// channel. Under MF12, AB would report FAILED
+// because the `'error'` listener was removed
+// synchronously when finalizeSignal("killResult")
+// ran. Under MF13, AB upgrades to
+// PERMISSION_DENIED.
+test("LIV22: error-channel preservation across killResult / throw — typed 'error' can still UPGRADE signalAttempt (MF13)", async () => {
+  const { runDeadlineCleanup } = (await import(
+    "../scripts/qualify-test-runner-liveness.mjs"
+  )) as { runDeadlineCleanup: (args: any) => Promise<any> };
+
+  const classifyCleanupError = (err: any): "PERMISSION_DENIED" | "FAILED" =>
+    err && err.code === "EPERM" ? "PERMISSION_DENIED" : "FAILED";
+
+  const makeFakeChild = () => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {
+      error: [], exit: [], close: [],
+    };
+    const child: any = {
+      kill() { return true; },
+      on(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) handlers[ev].push(fn);
+        return this;
+      },
+      removeListener(ev: string, fn: (...args: any[]) => void) {
+        if (handlers[ev]) {
+          const i = handlers[ev].indexOf(fn);
+          if (i >= 0) handlers[ev].splice(i, 1);
+        }
+        return this;
+      },
+      _emit(ev: string, ...args: any[]) {
+        for (const fn of (handlers[ev] ?? []).slice()) fn(...args);
+      },
+      _listeners(ev: string) { return handlers[ev]?.length ?? 0; },
+    };
+    return child;
+  };
+
+  // ---- AB: kill=false → async EPERM 'error'
+  //         → async 'close'.
+  // Signal MUST UPGRADE to PERMISSION_DENIED
+  // via the late typed EPERM. Under MF12 the
+  // 'error' listener was disarmed at
+  // killResult time and the helper resolved
+  // as FAILED. ----
+  {
+    const child = makeFakeChild();
+    child.kill = () => false;
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    setTimeout(() => child._emit("error", eperm), 10);
+    setTimeout(() => child._emit("close", null, null), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV22 [AB: kill=false then async EPERM 'error' + close]: signalAttempt MUST UPGRADE to PERMISSION_DENIED via the late typed EPERM 'error' (MF13 preserved the error channel across killResult=false); got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV22 [AB]: terminationObservation MUST be CLOSE_OBSERVED, got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV22 [AB]: closedByTimeout MUST be false — 'close' arrived naturally before the observation deadline.",
+    );
+  }
+
+  // ---- AC: kill=false → async ESRCH 'error'
+  //         → 'close'.
+  // Signal MUST classify as FAILED (kill=false
+  // + non-EPERM error). ----
+  {
+    const child = makeFakeChild();
+    child.kill = () => false;
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const esrch = Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    setTimeout(() => child._emit("error", esrch), 10);
+    setTimeout(() => child._emit("close", null, null), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV22 [AC: kill=false then async ESRCH 'error' + close]: signalAttempt MUST be FAILED (non-EPERM classifies as FAILED), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV22 [AC]: terminationObservation MUST be CLOSE_OBSERVED, got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV22 [AC]: closedByTimeout MUST be false.",
+    );
+  }
+
+  // ---- AD: kill=false → no 'error' → 'close'.
+  // No late evidence → FAILED. The 'error'
+  // listener stayed armed (no-op) until
+  // finishOperation removed it. ----
+  {
+    const child = makeFakeChild();
+    child.kill = () => false;
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    setTimeout(() => child._emit("close", null, null), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "FAILED",
+      `LIV22 [AD: kill=false then close no error]: signalAttempt MUST be FAILED (kill returned false, no late evidence), got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV22 [AD]: terminationObservation MUST be CLOSE_OBSERVED, got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV22 [AD]: closedByTimeout MUST be false.",
+    );
+  }
+
+  // ---- AE: throw ESRCH → async EPERM 'error'
+  //         → 'close'.
+  // Signal MUST UPGRADE from FAILED (ESRCH
+  // throw) to PERMISSION_DENIED via the late
+  // typed EPERM 'error'. ----
+  {
+    const child = makeFakeChild();
+    const esrch = Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    child.kill = () => { throw esrch; };
+    const state: any = { cleanupOutcome: "NOT_ATTEMPTED" };
+    const eperm = Object.assign(new Error("EPERM"), { code: "EPERM" });
+    setTimeout(() => child._emit("error", eperm), 10);
+    setTimeout(() => child._emit("close", null, null), 25);
+    const r = await runDeadlineCleanup({
+      child,
+      observationWindowMs: 200,
+      classifyCleanupError,
+      state,
+    });
+    assert.equal(
+      (r as any).signalAttempt, "PERMISSION_DENIED",
+      `LIV22 [AE: throw ESRCH then async EPERM 'error' + close]: signalAttempt MUST UPGRADE to PERMISSION_DENIED via late typed EPERM (MF13 preserved the error channel across throw); got ${(r as any).signalAttempt}`,
+    );
+    assert.equal(
+      r.terminationObservation, "CLOSE_OBSERVED",
+      `LIV22 [AE]: terminationObservation MUST be CLOSE_OBSERVED, got ${r.terminationObservation}`,
+    );
+    assert.equal(
+      r.closedByTimeout, false,
+      "LIV22 [AE]: closedByTimeout MUST be false.",
+    );
+  }
+
+  // ---- SOURCE-LEVEL INVARIANT.
+  // In `finalizeSignal`, the
+  // `listenerRemoved.error = true` assignment
+  // (and its preceding
+  // `child.removeListener("error", onError)`)
+  // MUST be guarded by `reason === "error"`.
+  // Otherwise MF12's error-channel
+  // destruction bug is back. ----
+  const helperBody = await readHelperBody();
+  const helperBodyNoComments = helperBody
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const finalizeSignalBlockMatch = helperBodyNoComments.match(
+    /const\s+finalizeSignal\s*=\s*\(\s*reason\s*,\s*syncErr\s*\)\s*=>\s*\{/,
+  );
+  assert.ok(
+    finalizeSignalBlockMatch,
+    "LIV22 INVARIANT: helper MUST define `finalizeSignal(reason, syncErr)`.",
+  );
+  const openIdx = finalizeSignalBlockMatch.index! +
+    finalizeSignalBlockMatch[0].length - 1;
+  let depth = 0;
+  let endIdx = openIdx;
+  for (let i = openIdx; i < helperBodyNoComments.length; i++) {
+    if (helperBodyNoComments[i] === "{") depth++;
+    else if (helperBodyNoComments[i] === "}") {
+      depth--;
+      if (depth === 0) { endIdx = i; break; }
+    }
+  }
+  const finalizeSignalBody = helperBodyNoComments.slice(openIdx, endIdx + 1);
+  assert.ok(
+    /if\s*\(\s*reason\s*===\s*"error"\s*&&\s*!listenerRemoved\.error\s*\)/.test(
+      finalizeSignalBody,
+    ),
+    "LIV22 INVARIANT: finalizeSignal MUST guard `listenerRemoved.error = true` with `reason === \"error\"` (MF13 error-channel preservation).",
+  );
+  const guardedBlock =
+    /if\s*\(\s*reason\s*===\s*"error"\s*&&\s*!listenerRemoved\.error\s*\)\s*\{[\s\S]*?\}/;
+  const withoutGuarded = finalizeSignalBody.replace(guardedBlock, "");
+  assert.ok(
+    !/removeListener\s*\(\s*"error"\s*,\s*onError\s*\)/.test(withoutGuarded),
+    "LIV22 INVARIANT: finalizeSignal MUST NOT call removeListener(\"error\", onError) outside the reason === \"error\" guard.",
+  );
+  assert.ok(
+    !/listenerRemoved\.error\s*=\s*true/.test(withoutGuarded),
+    "LIV22 INVARIANT: finalizeSignal MUST NOT assign `listenerRemoved.error = true` outside the reason === \"error\" guard.",
+  );
+});
+
 // (FOUNDATION04 PHASE A — LONG-HORIZON-LAB-FULL-SUITE-
 //  LIVENESS01-CORRECTION01) The LIV oracle itself
 // spawns orphan children for the LIV07/LIV08/LIV09

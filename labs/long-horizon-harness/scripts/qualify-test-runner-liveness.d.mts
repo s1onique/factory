@@ -1,9 +1,9 @@
-// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX12)
+// (FOUNDATION04 PHASE A — LIVENESS01-CORRECTION01-MICROFIX13)
 //
 // Ambient type declarations for the qualifier's
 // exported `runDeadlineCleanup` helper. LIV16,
-// LIV17, LIV18, LIV19, LIV20, and LIV21 import
-// this helper for behavioral adversarial
+// LIV17, LIV18, LIV19, LIV20, LIV21, and LIV22
+// import this helper for behavioral adversarial
 // testing against an injected fake ChildProcess.
 //
 // MICROFIX07: removed `pendingCleanupReclassification`
@@ -69,6 +69,31 @@
 // set ONLY inside `finalizeTimeout()` — the
 // timer is the sole authority. LIV21 cells
 // X/Y/Z/AA pin this invariant.
+//
+// MICROFIX13: PRESERVE ERROR CHANNEL AFTER
+// KILL-RESULT / THROW. MF12 correctly stopped
+// closing the termination dimension on
+// synchronous signal failure, but it still
+// removed the `'error'` listener on
+// `finalizeSignal("killResult", ...)` and
+// `finalizeSignal("throw", ...)`. Node
+// documents that `'error'` MAY be emitted
+// after `kill()` returns false (the signal
+// couldn't be delivered). MF12's own
+// priority law —
+//   `observed.error > threw > killResult` —
+// demands that a later typed `'error'` be
+// able to UPGRADE the signal value
+// (e.g. FAILED → PERMISSION_DENIED). The
+// listener-removal was destroying that
+// upgrade channel. MF13 gates
+// `listenerRemoved.error` on `reason ===
+// "error"` so the `'error'` listener stays
+// armed through kill=false / throw paths and
+// can still deliver typed evidence before
+// the observation envelope closes.
+// LIV22 cells AB/AC/AD/AE pin the
+// preservation property.
 
 export type CleanupOutcome =
   | "SIGNAL_ACCEPTED"
@@ -80,6 +105,14 @@ export type CleanupOutcome =
 export type Reclassification = "PERMISSION_DENIED" | "FAILED";
 
 // MICROFIX09 — orthogonal dimensions.
+//
+// `ACCEPTED` means: kill() returned true and
+// no higher-authority failure evidence was
+// observed before the observation envelope
+// closed. An `'error'` event does NOT confirm
+// delivery — in the helper's classifier it
+// indicates failure (PERMISSION_DENIED via
+// EPERM, or FAILED via any other code).
 export type SignalAttempt =
   | "NOT_ATTEMPTED"
   | "ACCEPTED"
