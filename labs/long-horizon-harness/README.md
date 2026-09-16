@@ -563,7 +563,6 @@ See:
 - `test/witness/pure.test.ts` — pure protocol/state tests
   (`npm run test:witness`)
 - `test/witness/witness-live.test.ts` — live qualification lane
-- `test/witness/witness-live.test.ts` — live qualification lane
   (`npm run qualify:witness-live`)
 
 ## FOUNDATION04 — Phase D — Experiment Subject Contract
@@ -640,32 +639,58 @@ Properties:
 ### Decoder (the runtime authority)
 
 ```ts
-import { decodeSubjectManifest, freezeSubject } from
-  "./src/subject/index.js";
+import {
+  decodeSubjectManifest,
+  freezeSubject,
+} from "./src/subject/index.js";
 
 const r = decodeSubjectManifest(input);
 if (!r.ok) {
   // r.failure.kind is one of:
-  //   "not_an_object"      — input was not a JSON object
-  //   "schema_validation"  — unknown key, bad type, bad enum,
-  //                          bad SHA, etc. (closed-world)
-  //   "id_construction"    — defense in depth; unreachable
-  //                          given the validator
+  //   "not_an_object"       — input was not a JSON object
+  //   "schema_validation"   — unknown key, bad type, bad enum,
+  //                           bad SHA, etc. (closed-world)
+  //   "configuration_value" — model.configuration is an object
+  //                           but contains an unsupported value
+  //                           (undefined, NaN, BigInt, Date,
+  //                           Map, Set, Promise, cycle, ...)
+  //   "id_construction"     — defense in depth; unreachable
+  //                           given the validator
   return;
 }
 
-const subject: FrozenSubject =
-  freezeSubject(r.value.manifest, r.value.subjectId);
+const f = freezeSubject(r.value);
+if (!f.ok) {
+  // r.failure.kind is "manifest_id_mismatch" — caller
+  // supplied a SubjectId that does not match the manifest.
+  // This is impossible through the decoder; it guards
+  // against hand-rolled DecodedSubject values.
+  return;
+}
+
+const subject: FrozenSubject = f.value;
 ```
 
 Unknown top-level keys fail closed. The decoder NEVER throws.
+
+### Mutation doctrine parity
+
+Phase D does NOT define a custom typed mutation error.
+Mutation is rejected by JavaScript's runtime freeze
+semantics: in strict mode (which all .ts files in this lab
+use), writing to a frozen object throws `TypeError`. A
+custom error class would add machinery without changing the
+experiment invariant. Tests assert `TypeError` directly
+(FRZ04–FRZ08, FRZ12–FRZ13).
 
 ### Acceptance targets
 
 ```text
 SUBJECT_SCHEMA_VERSIONING       = PASS
-SUBJECT_DECODER_FAIL_CLOSED     = PASS
+SUBJECT_DECODER_FAIL_CLOSED     = PASS  (DEC02, DEC07)
 UNKNOWN_FIELDS_POLICY           = EXPLICIT (fail-closed)
+NESTED_CLOSED_WORLD             = PASS  (CLOSED01–03)
+CONFIGURATION_JSON_BOUNDARY     = PASS  (JSON01–06)
 CANONICAL_HASH_DETERMINISTIC    = PASS
 SUBJECT_ID_CONTENT_BOUND        = PASS
 REPO_REVISION_BOUND             = PASS
@@ -674,7 +699,11 @@ HARNESS_VERSION_BOUND           = PASS
 MODEL_CONFIGURATION_BOUND       = PASS
 BUDGET_BOUND                    = PASS
 CAPABILITY_SET_BOUND            = PASS
-MUTATION_AFTER_CREATION         = REJECTED
+DEEP_IMMUTABILITY               = PASS  (FRZ11–13)
+MANIFEST_ID_BINDING             = PASS  (BIND01–02)
+DOMAIN_SEPARATION_ORACLE        = PASS  (HASH01–02)
+MUTATION_AFTER_CREATION         = REJECTED (TypeError)
+PHASE_D_SOURCE_SIZE_DISCIPLINE  = PASS  (LOC01)
 REPLAY_SAME_MANIFEST_SAME_ID    = PASS
 ONE_FIELD_CHANGE_DIFFERENT_ID   = PASS
 ```
@@ -685,9 +714,9 @@ or convergence metrics. Those arrive in Phase E.
 ### See
 
 - `src/subject/` — `subject-canonicalize`, `subject-id`,
-  `subject-types`, `subject-decode`, `subject-frozen`,
-  `index`
+  `subject-types`, `subject-validate`, `subject-json`,
+  `subject-decode`, `subject-frozen`, `index`
 - `test/subject/` — unit tests for canonicalization,
-  decoder, and freeze (`npm run test:subject`)
+  decoder, freeze, JsonValue boundary, and source-size
+  discipline (`npm run test:subject`)
 
-  (`npm run qualify:witness-live`)

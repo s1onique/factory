@@ -5,7 +5,7 @@
  * RUNTIME AUTHORITY for manifest validity; JSON Schema is
  * treated as an interchange artifact only.
  *
- * Doctrine:
+ * Doctrine (D-C01 — decoder totality):
  *
  *   `decodeSubjectManifest` NEVER throws. It returns a
  *   discriminated union: either a fully-validated
@@ -14,22 +14,35 @@
  *   {@link SubjectDecodeFailure} that names the failure mode
  *   and a machine-readable reason.
  *
- *   The failure shape is small and closed-world. Callers can
- *   safely pattern-match on `failure.kind` to decide what
- *   to do (reject the input, log it, etc.) without try/catch.
- *
- *   Trust boundary: `decodeSubjectManifest` accepts
- *   `unknown`. It is the ONE place in the Phase D surface
+ *   The decoder is the ONE place in the Phase D surface
  *   where the boundary between "arbitrary bytes" and
- *   "validated manifest" is crossed.
+ *   "validated manifest" is crossed. To keep its promise to
+ *   never throw, it must:
+ *
+ *     1. Run the structural validator (subject-validate.ts)
+ *        FIRST. If the input has the wrong shape, return a
+ *        `schema_validation` failure immediately.
+ *     2. Run the JsonValue validator (subject-json.ts) on
+ *        model.configuration BEFORE handing it to
+ *        computeSubjectId. This prevents exotic JavaScript
+ *        values (undefined, NaN, BigInt, Symbol, Date, Map,
+ *        Set, Promise, cycles, ...) from reaching
+ *        canonicalize() and triggering a throw.
+ *     3. Compose the typed SubjectManifest by reading only
+ *        the field types it has just structurally and
+ *        JsonValue-validated.
+ *
+ *   Failure kinds are closed-world. Callers can pattern-
+ *   match on `failure.kind` to decide what to do without
+ *   try/catch.
  */
 
 import { computeSubjectId } from "./subject-id.js";
+import { validateJsonValue } from "./subject-json.js";
 import {
   SUBJECT_SCHEMA_VERSION,
   makeExperimentId,
   makeSubjectIdHint,
-  validateSubjectManifest,
   type ExperimentId,
   type SubjectCapabilities,
   type SubjectBudget,
@@ -44,6 +57,7 @@ import {
   type SubjectSchemaVersion,
   type SubjectTask,
 } from "./subject-types.js";
+import { validateSubjectManifest } from "./subject-validate.js";
 
 /**
  * The full validated subject: parsed manifest plus the
@@ -57,15 +71,21 @@ export type DecodedSubject = {
 /**
  * Closed-world failure shape. Callers can match on `kind`.
  *
- *   "not_an_object"     : input was not a JSON object
- *   "schema_validation" : validateSubjectManifest returned
- *                         ok:false (structural violation,
- *                         unknown key, etc.)
- *   "id_construction"   : a branded-identifier constructor
- *                         rejected an otherwise-structurally
- *                         valid string. Included defensively;
- *                         should be unreachable given the
- *                         validator.
+ *   "not_an_object"      : input was not a JSON object
+ *   "schema_validation"  : validateSubjectManifest returned
+ *                          ok:false (structural violation,
+ *                          unknown key, bad type, bad enum,
+ *                          bad SHA, etc.)
+ *   "configuration_value": model.configuration passed the
+ *                          "is it an object?" check but
+ *                          failed the recursive JsonValue
+ *                          check (undefined, NaN, BigInt,
+ *                          cycle, Date, ...).
+ *   "id_construction"    : a branded-identifier constructor
+ *                          rejected an otherwise-structurally
+ *                          valid string. Included defensively;
+ *                          should be unreachable given the
+ *                          validator.
  */
 export type SubjectDecodeFailure =
   | {
@@ -74,6 +94,10 @@ export type SubjectDecodeFailure =
   }
   | {
     readonly kind: "schema_validation";
+    readonly reason: string;
+  }
+  | {
+    readonly kind: "configuration_value";
     readonly reason: string;
   }
   | {
@@ -113,54 +137,66 @@ function brandOrFail<T extends string>(
  * Decode and validate a SubjectManifest. NEVER throws.
  *
  * On success returns the parsed manifest and its canonical
- * SubjectId. On failure returns a typed failure with a
- * machine-readable reason.
+ * SubjectId. On failure returns a typed
+ * SubjectDecodeFailure with a closed-world `kind`.
+ *
+ * Trust boundary: this is the ONE place where arbitrary
+ * input becomes a SubjectManifest. Every error path is a
+ * typed failure; there is no `throw` site reachable from
+ * caller input.
  */
-export function decodeSubjectManifest(value: unknown): SubjectDecodeResult {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+export function decodeSubjectManifest(input: unknown): SubjectDecodeResult {
+  // (1) Top-level type guard.
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    Array.isArray(input)
+  ) {
     return {
       ok: false,
       failure: {
         kind: "not_an_object",
-        reason: "input must be a JSON object",
+        reason:
+          "manifest root must be a plain object (not array, null, " +
+          "or primitive)",
       },
     };
   }
 
-  const v = validateSubjectManifest(value);
+  // (2) Structural validation.
+  const v = validateSubjectManifest(input);
   if (!v.ok) {
     return {
       ok: false,
-      failure: { kind: "schema_validation", reason: v.reason },
+      failure: {
+        kind: "schema_validation",
+        reason: v.reason,
+      },
     };
   }
 
-  // Re-shape the validated plain object into the branded
-  // SubjectManifest. The validator has already verified every
-  // field's type and grammar; we narrow + brand here.
-  const reasons: SubjectDecodeFailure[] = [];
-
-  const experimentId = brandOrFail<ExperimentId>(
-    "experiment_id",
-    String((value as Record<string, unknown>).experiment_id),
-    makeExperimentId,
-    reasons,
+  // (3) Recursive JsonValue validation of model.configuration.
+  //    `validateSubjectManifest` returned ok:true, so we have
+  //    mechanically verified that input is a plain object —
+  //    narrow it once here for the rest of the function.
+  const root0 = input as Record<string, unknown>;
+  const model0 = root0.model as Record<string, unknown>;
+  const configCheck = validateJsonValue(
+    model0.configuration,
+    "model.configuration",
   );
-  const subjectIdHint = brandOrFail<SubjectIdHint>(
-    "subject_id_hint",
-    String((value as Record<string, unknown>).subject_id_hint),
-    makeSubjectIdHint,
-    reasons,
-  );
-
-  if (reasons.length > 0) {
-    const first = reasons[0];
-    if (first !== undefined) {
-      return { ok: false, failure: first };
-    }
+  if (!configCheck.ok) {
+    return {
+      ok: false,
+      failure: {
+        kind: "configuration_value",
+        reason: configCheck.reason,
+      },
+    };
   }
 
-  const root = value as Record<string, unknown>;
+  // (4) Compose the typed SubjectManifest.
+  const root = input as Record<string, unknown>;
   const harnessIn = root.harness as Record<string, unknown>;
   const modelIn = root.model as Record<string, unknown>;
   const promptIn = root.prompt as Record<string, unknown>;
@@ -169,6 +205,33 @@ export function decodeSubjectManifest(value: unknown): SubjectDecodeResult {
   const budgetIn = root.budget as Record<string, unknown>;
   const capsIn = root.capabilities as Record<string, unknown>;
   const repIn = root.repetition as Record<string, unknown>;
+
+  const reasons: SubjectDecodeFailure[] = [];
+  const experimentId = brandOrFail<ExperimentId>(
+    "experiment_id",
+    String(root.experiment_id),
+    makeExperimentId,
+    reasons,
+  );
+  const subjectIdHint = brandOrFail<SubjectIdHint>(
+    "subject_id_hint",
+    String(root.subject_id_hint),
+    makeSubjectIdHint,
+    reasons,
+  );
+  if (reasons.length > 0) {
+    const first = reasons[0];
+    if (first !== undefined) {
+      return { ok: false, failure: first };
+    }
+  }
+
+  // Note on configuration freezing: the decoder does NOT
+  // freeze here. freezeSubject (subject-frozen.ts) is the
+  // single chokepoint for deep-freeze.
+  const configuration = modelIn.configuration as Readonly<
+    Record<string, unknown>
+  >;
 
   const harness: SubjectHarness = {
     id: String(harnessIn.id),
@@ -179,9 +242,7 @@ export function decodeSubjectManifest(value: unknown): SubjectDecodeResult {
   const model: SubjectModel = {
     provider: String(modelIn.provider),
     model_id: String(modelIn.model_id),
-    configuration: Object.freeze({
-      ...(modelIn.configuration as Record<string, unknown>),
-    }),
+    configuration,
   };
 
   const prompt: SubjectPrompt = {
@@ -196,7 +257,7 @@ export function decodeSubjectManifest(value: unknown): SubjectDecodeResult {
 
   const repository: SubjectRepository = {
     commit: String(repoIn.commit),
-    dirty_policy: repoIn.dirty_policy as "reject" | "allow-record",
+    dirty_policy: repoIn.dirty_policy as SubjectRepository["dirty_policy"],
   };
 
   const budget: SubjectBudget = {
@@ -209,13 +270,13 @@ export function decodeSubjectManifest(value: unknown): SubjectDecodeResult {
   };
 
   const capabilities: SubjectCapabilities = {
-    tools: Object.freeze([
-      ...(capsIn.tools as ReadonlyArray<unknown>).map(String),
-    ]) as ReadonlyArray<string>,
+    tools: Object.freeze(
+      (capsIn.tools as ReadonlyArray<unknown>).map((s) => String(s)),
+    ) as ReadonlyArray<string>,
     network: capsIn.network as boolean,
     filesystem: capsIn.filesystem as boolean,
     execution_policy: capsIn.execution_policy as
-      "sandbox" | "host" | "container",
+      SubjectCapabilities["execution_policy"],
   };
 
   const repetition: SubjectRepetition = {
@@ -237,6 +298,9 @@ export function decodeSubjectManifest(value: unknown): SubjectDecodeResult {
     repetition,
   };
 
+  // (5) Derive the canonical SubjectId. By this point the
+  // manifest is structurally and JsonValue-valid, so
+  // computeSubjectId cannot throw.
   const subjectId = computeSubjectId(manifest);
 
   return {

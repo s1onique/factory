@@ -5,17 +5,22 @@
  *
  * The published surface is intentionally small. The runtime
  * authority for manifest validity is `decodeSubjectManifest`.
- * Everything else is either a type, a brand, or a pure
- * helper.
+ * Everything else is either a type, a brand, a constant, or
+ * a pure helper.
  *
  *   - decodeSubjectManifest       : trust-boundary decoder
+ *                                   (NEVER throws)
  *   - validateSubjectManifest     : pure structural validator
+ *   - validateJsonValue           : recursive JsonValue check
+ *                                   (used at the trust boundary)
  *   - computeSubjectId            : canonical content hash
- *   - freezeSubject               : deep-freeze + mutation reject
- *   - SubjectMutationRejected     : typed mutation error
+ *   - freezeSubject               : manifest ↔ id binding +
+ *                                   deep-freeze (typed result)
  *   - canonicalize                : pure canonical-bytes helper
  *   - types                       : manifest + dimensions + ids
- *   - constants                   : schema_version, grammars
+ *   - constants                   : schema_version, grammars,
+ *                                   closed-world key sets,
+ *                                   closed-world enums
  *
  * Phase D does NOT yet wire into the run evidence (Phase E).
  * Callers store the DecodedSubject / FrozenSubject alongside
@@ -30,6 +35,12 @@ export {
   computeSubjectId,
 } from "./subject-id.js";
 export {
+  validateJsonValue,
+  type JsonPrimitive,
+  type JsonValue,
+  type JsonValidation,
+} from "./subject-json.js";
+export {
   decodeSubjectManifest,
   type DecodedSubject,
   type SubjectDecodeFailure,
@@ -37,19 +48,38 @@ export {
 } from "./subject-decode.js";
 export {
   freezeSubject,
-  SubjectMutationRejected,
   type FrozenSubject,
+  type SubjectFreezeFailure,
+  type SubjectFreezeResult,
 } from "./subject-frozen.js";
 export {
+  validateSubjectManifest,
+  type SubjectValidation,
+} from "./subject-validate.js";
+export {
+  // constants
+  BUDGET_KEYS,
+  CAPABILITIES_EXECUTION_POLICY_VALUES,
+  CAPABILITIES_KEYS,
+  HARNESS_KEYS,
+  IDENTIFIER_GRAMMAR,
+  MODEL_KEYS,
+  PROMPT_KEYS,
+  REPETITION_KEYS,
+  REPOSITORY_DIRTY_POLICY_VALUES,
+  REPOSITORY_KEYS,
+  SUBJECT_ID_GRAMMAR,
+  SUBJECT_MANIFEST_KEYS,
+  SUBJECT_SCHEMA_VERSION,
+  TASK_KEYS,
+  // factories
   makeExperimentId,
   makeSubjectId,
   makeSubjectIdHint,
-  validateSubjectManifest,
-  SUBJECT_MANIFEST_KEYS,
-  SUBJECT_SCHEMA_VERSION,
-  SUBJECT_ID_GRAMMAR,
-  IDENTIFIER_GRAMMAR,
+  // types
+  type CapabilitiesExecutionPolicy,
   type ExperimentId,
+  type RepositoryDirtyPolicy,
   type SubjectBudget,
   type SubjectCapabilities,
   type SubjectHarness,
@@ -63,5 +93,4 @@ export {
   type SubjectRepository,
   type SubjectSchemaVersion,
   type SubjectTask,
-  type SubjectValidation,
 } from "./subject-types.js";

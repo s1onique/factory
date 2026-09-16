@@ -2,117 +2,167 @@
  * FOUNDATION04 — PHASE D — Experiment Subject Contract.
  *
  * `freezeSubject`: produce a deeply-frozen wrapper around a
- * SubjectManifest such that ANY attempt to mutate either
- * properties or arrays (via push/pop/splice/etc.) is rejected
- * by throwing a typed {@link SubjectMutationRejected}.
+ * DecodedSubject such that ANY attempt to mutate either
+ * properties or arrays is rejected by JavaScript runtime
+ * immutability (TypeError in strict mode).
  *
  * Phase D doctrine (MUTATION_AFTER_CREATION):
  *
  *   A SubjectManifest is immutable. Once frozen, any attempt
- *   to alter its content throws SubjectMutationRejected.
- *   The frozen wrapper exposes only the readonly fields; no
- *   setter, no wither, no replace method exists.
+ *   to alter its content is rejected by JavaScript's
+ *   runtime freeze semantics — adding, removing, writing,
+ *   reconfiguring, or array-pushing all throw TypeError in
+ *   strict mode.
  *
- * Implementation note (defense in depth):
+ *   Doctrine parity: this module does NOT introduce a custom
+ *   typed error. The contract is: mutation IS rejected by
+ *   JavaScript object immutability; strict-mode writes
+ *   throw TypeError. This is the simple, honest contract;
+ *   no Proxy machinery, no error-class wrappers, no
+ *   try/catch dance at every call site. (See D-C07.)
  *
- *   We rely on three properties:
+ * Design:
  *
- *     1. Object.freeze() on the manifest and on every nested
- *        object (already done by the decoder for `model
- *        .configuration` and `capabilities.tools`).
- *     2. The declared TypeScript types are `readonly` on
- *        every field, which is a compile-time barrier.
- *     3. At runtime, freeze() makes the runtime barrier
- *        strict: setting a property, adding a property,
- *        deleting a property, or re-configuring an array all
- *        either silently fail in non-strict mode or throw in
- *        strict mode. We add a `freezeSubject` factory that
- *        re-freezes the manifest as a whole and exposes a
- *        getter so callers cannot accidentally re-shape the
- *        wrapper.
+ *   `freezeSubject` accepts a {@link DecodedSubject} (a
+ *   fully-validated manifest + the SubjectId the decoder
+ *   derived from it). It then:
  *
- *   This module also re-exports the SubjectMutationRejected
- *   class so callers can match on `instanceof`.
+ *     1. RE-DERIVES the SubjectId via computeSubjectId and
+ *        verifies that it is byte-identical to the one the
+ *        caller passed. This is the manifest ↔ SubjectId
+ *        binding guarantee (D-C03): it is impossible to
+ *        construct a FrozenSubject whose identity names
+ *        different content. On mismatch, returns a typed
+ *        SubjectFreezeFailure rather than throwing.
+ *     2. DEEP-FREEZES the manifest in place, recursing into
+ *        every nested object/array. The recursion does NOT
+ *        stop at already-frozen nodes (D-C02): the freeze
+ *        property is per-object, so a frozen parent does not
+ *        freeze children. A WeakSet guards against cycles
+ *        (defense in depth, since the manifest is acyclic
+ *        by construction).
+ *     3. Freezes the wrapper itself so callers cannot
+ *        reassign `subject.manifest = ...`.
+ *
+ *   This module is pure: no I/O.
  */
 
-import type { SubjectManifest, SubjectId } from "./subject-types.js";
+import { computeSubjectId } from "./subject-id.js";
+import type { DecodedSubject } from "./subject-decode.js";
+import type { SubjectManifest } from "./subject-types.js";
 
 /**
- * Typed error thrown when an attempt is made to mutate a
- * frozen subject. The `target` field names the property
- * path the caller tried to write.
- */
-export class SubjectMutationRejected extends Error {
-  public readonly target: string;
-  constructor(target: string, reason: string) {
-    super(`SubjectMutationRejected at ${target}: ${reason}`);
-    this.name = "SubjectMutationRejected";
-    this.target = target;
-  }
-}
-
-/**
- * A frozen, read-only view of a SubjectManifest.
+ * Frozen, read-only view of a DecodedSubject.
  *
- * The wrapper itself is frozen, the inner manifest is
- * frozen, and nested objects/arrays passed in (model
- * .configuration, capabilities.tools) MUST already be frozen
- * by the decoder; we re-freeze here as defense in depth.
+ * Both fields are readonly types and runtime-frozen. Any
+ * attempt to mutate throws TypeError (strict mode) per
+ * JavaScript's Object.freeze semantics.
  */
 export type FrozenSubject = {
   readonly manifest: Readonly<SubjectManifest>;
-  readonly subjectId: SubjectId;
+  readonly subjectId: DecodedSubject["subjectId"];
 };
 
 /**
- * Freeze a manifest + its derived SubjectId into a
- * {@link FrozenSubject}.
+ * Closed-world failure shape for freezeSubject.
  *
- * - Re-freezes the manifest root (idempotent).
- * - Re-freezes nested objects/arrays (idempotent).
- * - Returns a wrapper whose own properties are frozen.
+ *   "manifest_id_mismatch" : the caller-supplied SubjectId
+ *                            does not match what
+ *                            computeSubjectId derives from
+ *                            the supplied manifest. This
+ *                            indicates either a programming
+ *                            error (manifest constructed by
+ *                            hand) or an attempt to bind an
+ *                            identity to different content.
+ *                            Either way it is rejected; we
+ *                            never produce a FrozenSubject
+ *                            whose identity lies.
+ */
+export type SubjectFreezeFailure =
+  | {
+    readonly kind: "manifest_id_mismatch";
+    readonly expected: string;
+    readonly actual: string;
+  };
+
+export type SubjectFreezeResult =
+  | { readonly ok: true; readonly value: FrozenSubject }
+  | { readonly ok: false; readonly failure: SubjectFreezeFailure };
+
+/**
+ * The error class previously defined here (SubjectMutation-
+ * Rejected) has been REMOVED (D-C07). Mutation rejection is
+ * JavaScript's TypeError — see the module header.
+ */
+/**
+ * Freeze a DecodedSubject into a {@link FrozenSubject}.
  *
- * The wrapper provides NO mutation methods. Calling code
- * that needs a different subject MUST construct a new
- * SubjectManifest and call freezeSubject again. There is no
- * "patch the budget" path. That is the doctrine.
+ *   - RE-DERIVES the SubjectId and verifies the manifest ↔
+ *     id binding. Mismatch returns a typed failure
+ *     (SubjectFreezeFailure). NEVER throws on mismatch.
+ *   - Deep-freezes the manifest. Recursion does NOT stop at
+ *     already-frozen nodes (D-C02). A WeakSet cycle guard
+ *     is defense in depth.
+ *   - Freezes the wrapper itself.
  */
 export function freezeSubject(
-  manifest: SubjectManifest,
-  subjectId: SubjectId,
-): FrozenSubject {
-  // Re-freeze the manifest root and every nested object/array
-  // in place. Object.freeze is idempotent: freezing an
-  // already-frozen object returns the same object and does
-  // not throw.
-  deepFreeze(manifest);
+  decoded: DecodedSubject,
+): SubjectFreezeResult {
+  const expected = computeSubjectId(decoded.manifest);
+  if (expected !== decoded.subjectId) {
+    return {
+      ok: false,
+      failure: {
+        kind: "manifest_id_mismatch",
+        expected,
+        actual: decoded.subjectId,
+      },
+    };
+  }
+
+  // Re-freeze the manifest root and every nested object/
+  // array in place. The recursion does NOT skip already-
+  // frozen children: a frozen parent does not imply frozen
+  // children, and the contract is that EVERY nested node is
+  // immutable. The WeakSet is cycle defense.
+  deepFreeze(decoded.manifest);
 
   const wrapper: FrozenSubject = {
-    manifest,
-    subjectId,
+    manifest: decoded.manifest,
+    subjectId: decoded.subjectId,
   };
   Object.freeze(wrapper);
-  return wrapper;
+  return { ok: true, value: wrapper };
 }
 
 /**
- * Recursively freeze a value in place. Freezes plain objects
- * and arrays; leaves primitives, branded strings, frozen
- * objects, and frozen arrays untouched.
+ * Recursively freeze a value in place.
+ *
+ *   - Primitives are returned untouched.
+ *   - null is returned untouched.
+ *   - For any object, we freeze it FIRST and then recurse
+ *     into its enumerable own properties. Crucially, we do
+ *     NOT early-return on already-frozen nodes — that was
+ *     the Phase D-original bug (D-C02). Freezing is per-
+ *     object; freezing the parent does not freeze the
+ *     children.
+ *   - A WeakSet guards against cycles.
  */
-function deepFreeze<T>(value: T): T {
+function deepFreeze(value: unknown, seen: WeakSet<object> = new WeakSet()): void {
   if (value === null || typeof value !== "object") {
-    return value;
+    return;
   }
-  if (Object.isFrozen(value)) {
-    return value;
+  if (seen.has(value as object)) {
+    return;
   }
+  seen.add(value as object);
+
   Object.freeze(value);
-  for (const k of Object.keys(value as Record<string, unknown>)) {
-    const v = (value as Record<string, unknown>)[k];
-    if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-      deepFreeze(v);
+
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    if (v !== null && typeof v === "object") {
+      deepFreeze(v, seen);
     }
   }
-  return value;
 }
+

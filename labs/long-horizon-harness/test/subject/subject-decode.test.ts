@@ -12,6 +12,8 @@
  *   MODEL_CONFIGURATION_BOUND       = PASS
  *   BUDGET_BOUND                    = PASS
  *   CAPABILITY_SET_BOUND            = PASS
+ *   NESTED_CLOSED_WORLD             = PASS  (CLOSED01-03)
+ *   CONFIGURATION_JSON_BOUNDARY     = PASS  (JSON01-06)
  *
  * And: the decoder NEVER throws. Every failure is a typed
  * SubjectDecodeFailure.
@@ -23,8 +25,9 @@ import assert from "node:assert/strict";
 import { decodeSubjectManifest } from "../../src/subject/subject-decode.js";
 import {
   SUBJECT_SCHEMA_VERSION,
-  validateSubjectManifest,
 } from "../../src/subject/subject-types.js";
+import { validateSubjectManifest } from "../../src/subject/subject-validate.js";
+import { makeValidManifest } from "./_subject_helpers.js";
 
 test("DEC01: valid manifest decodes ok:true with a SubjectId", () => {
   const m = makeValidManifest();
@@ -55,8 +58,7 @@ test("DEC03: unknown top-level key fails closed", () => {
   assert.equal(r.ok, false);
   if (!r.ok) {
     assert.equal(r.failure.kind, "schema_validation");
-    assert.match(r.failure.reason, /unknown top-level key/);
-    assert.match(r.failure.reason, /secret_admin_field/);
+    assert.match(r.failure.reason, /unknown key "secret_admin_field"/);
   }
 });
 
@@ -79,6 +81,7 @@ test("DEC05: missing required top-level key fails closed", () => {
     assert.equal(r.failure.kind, "schema_validation");
     assert.match(r.failure.reason, /prompt/);
   }
+});
 
 test("REPO01: repository.commit must be 64-char lowercase hex", () => {
   const m = makeValidManifest({
@@ -95,7 +98,8 @@ test("REPO01: repository.commit must be 64-char lowercase hex", () => {
 test("REPO02: repository.dirty_policy must be reject | allow-record", () => {
   const m = makeValidManifest({
     repository: {
-      commit: "3333333333333333333333333333333333333333333333333333333333333333",
+      commit:
+        "3333333333333333333333333333333333333333333333333333333333333333",
       dirty_policy: "ignore" as never,
     },
   });
@@ -169,11 +173,6 @@ test("CAPS02: capabilities.execution_policy is closed-world", () => {
   });
   const r = decodeSubjectManifest(m);
   assert.equal(r.ok, false);
-});
-
-});
-
-
 test("DEC06: validateSubjectManifest agrees with the decoder on simple cases", () => {
   const m = makeValidManifest();
   const v = validateSubjectManifest(m);
@@ -184,6 +183,14 @@ test("DEC06: validateSubjectManifest agrees with the decoder on simple cases", (
   assert.equal(r.ok, false);
 });
 
+/**
+ * D-C01: decoder totality on garbage input.
+ *
+ * The decoder MUST NEVER throw on any of these values. Each
+ * one is a valid `unknown` value that a hostile caller could
+ * supply. The expected outcome for every entry is `ok:false`
+ * with a typed failure kind.
+ */
 test("DEC07: decoder is total — never throws, even on garbage input", () => {
   const garbage: ReadonlyArray<unknown> = [
     undefined,
@@ -196,6 +203,12 @@ test("DEC07: decoder is total — never throws, even on garbage input", () => {
     new Map(),
     new Set(),
     Promise.resolve(1),
+    function () {},
+    () => {},
+    BigInt(0),
+    new ArrayBuffer(8),
+    new Uint8Array([1, 2, 3]),
+    /regex/,
   ];
   for (const g of garbage) {
     let r: ReturnType<typeof decodeSubjectManifest> | undefined;
@@ -211,4 +224,144 @@ test("DEC07: decoder is total — never throws, even on garbage input", () => {
   }
 });
 
-import { makeValidManifest } from "./_subject_helpers.js";
+/**
+ * D-C04: nested closed-world. Every required dimension
+ * rejects unknown keys.
+ */
+test("CLOSED01: unknown harness key fails closed", () => {
+  const m = makeValidManifest({
+    harness: {
+      id: "cline",
+      version: "0.1.0",
+      source_revision:
+        "1111111111111111111111111111111111111111111111111111111111111111",
+      surprise: "silently ignored",
+    } as never,
+  });
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "schema_validation");
+    assert.match(r.failure.reason, /harness: unknown key "surprise"/);
+  }
+});
+
+test("CLOSED02: unknown budget key fails closed", () => {
+  const m = makeValidManifest({
+    budget: {
+      wall_clock_ms: 1,
+      turns: 1,
+      tool_calls: 1,
+      oops: true,
+    } as never,
+  });
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "schema_validation");
+    assert.match(r.failure.reason, /budget: unknown key "oops"/);
+  }
+});
+
+test("CLOSED03: unknown prompt key fails closed", () => {
+  const m = makeValidManifest({
+    prompt: {
+      prompt_id: "prompt-A",
+      content_hash:
+        "2222222222222222222222222222222222222222222222222222222222222222",
+      extra_field: "x",
+    } as never,
+  });
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, false);
+});
+
+/**
+ * D-C01: model.configuration must be a recursive JsonValue.
+ *
+ * Every adversarial entry below passed the OLD structural
+ * check (the OLD `isPlainObject` was
+ * `typeof === "object" && !== null && !Array.isArray`).
+ * Under the new JsonValue validator, they all fail closed.
+ *
+ * JSON06 verifies that deeply-nested VALID JsonValue
+ * still decodes ok:true. This is the positive case that
+ * proves the validator isn't a stuck-procedure rejector.
+ */
+test("JSON01: configuration nested undefined -> typed failure", () => {
+  const m = makeValidManifest();
+  (m.model as Record<string, unknown>).configuration = {
+    temperature: 0.0,
+    nested: undefined,
+  };
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "configuration_value");
+    assert.match(r.failure.reason, /model\.configuration\.nested/);
+  }
+});
+
+test("JSON02: configuration NaN/Infinity -> typed failure", () => {
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    const m = makeValidManifest();
+    (m.model as Record<string, unknown>).configuration = { x: bad };
+    const r = decodeSubjectManifest(m);
+    assert.equal(r.ok, false, "expected failure for " + String(bad));
+    if (!r.ok) {
+      assert.equal(r.failure.kind, "configuration_value");
+    }
+  }
+});
+
+test("JSON03: configuration BigInt -> typed failure", () => {
+  const m = makeValidManifest();
+  (m.model as Record<string, unknown>).configuration = { x: BigInt(1) };
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "configuration_value");
+  }
+});
+
+test("JSON04: configuration Date/Map/Set -> typed failure", () => {
+  for (const bad of [new Date(), new Map([["k", 1]]), new Set([1])]) {
+    const m = makeValidManifest();
+    (m.model as Record<string, unknown>).configuration = { x: bad };
+    const r = decodeSubjectManifest(m);
+    assert.equal(r.ok, false, "expected failure for " + String(bad));
+    if (!r.ok) {
+      assert.equal(r.failure.kind, "configuration_value");
+    }
+  }
+});
+
+test("JSON05: configuration cycle -> typed failure", () => {
+  const m = makeValidManifest();
+  const cfg: Record<string, unknown> = { a: 1 };
+  cfg["self"] = cfg;
+  (m.model as Record<string, unknown>).configuration = cfg;
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "configuration_value");
+    assert.match(r.failure.reason, /cyclic/);
+  }
+});
+
+test("JSON06: deeply-nested valid JSON -> success", () => {
+  const m = makeValidManifest();
+  (m.model as Record<string, unknown>).configuration = {
+    temperature: 0.0,
+    max_tokens: 4096,
+    nested: {
+      optimizer: { learningRate: 0.1, beta: [0.9, 0.999] },
+      flags: { stop: ["###"], early_terminate: true },
+    },
+    extra_string: "ok",
+  };
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, true, JSON.stringify(r.ok ? null : r.failure));
+});
+
+});

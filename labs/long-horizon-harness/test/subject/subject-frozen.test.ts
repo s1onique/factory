@@ -1,32 +1,39 @@
 /**
  * FOUNDATION04 — PHASE D — Experiment Subject Contract.
  *
- * Acceptance target covered here:
+ * Acceptance targets covered here:
  *
- *   MUTATION_AFTER_CREATION        = REJECTED
+ *   MUTATION_AFTER_CREATION         = REJECTED (TypeError)
+ *   DEEP_IMMUTABILITY               = PASS  (FRZ11-12)
+ *   MANIFEST_ID_BINDING             = PASS  (BIND01)
  *
- * And the orthogonal property: a frozen subject preserves
- * every declared dimension across any number of read
- * accesses (proves the deep-freeze did not silently drop
- * nested structure).
+ * Doctrine (D-C07): mutation is rejected by JavaScript's
+ * runtime freeze semantics (TypeError in strict mode). There
+ * is NO custom typed-error class — see subject-frozen.ts
+ * for the rationale.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { decodeSubjectManifest } from "../../src/subject/subject-decode.js";
 import {
   freezeSubject,
-  SubjectMutationRejected,
+  type FrozenSubject,
 } from "../../src/subject/subject-frozen.js";
-import { decodeSubjectManifest } from "../../src/subject/subject-decode.js";
 import { makeValidManifest } from "./_subject_helpers.js";
 
-function freeze(): ReturnType<typeof freezeSubject> {
+function freeze(): FrozenSubject {
   const r = decodeSubjectManifest(makeValidManifest());
   if (!r.ok) {
     throw new Error("setup failure: decode should succeed");
   }
-  return freezeSubject(r.value.manifest, r.value.subjectId);
+  const f = freezeSubject(r.value);
+  if (!f.ok) {
+    throw new Error("setup failure: freeze should succeed: " +
+      JSON.stringify(f.failure));
+  }
+  return f.value;
 }
 
 test("FRZ01: wrapper itself is frozen (Object.isFrozen)", () => {
@@ -52,8 +59,6 @@ test("FRZ04: assigning a top-level property throws in strict mode", () => {
   const f = freeze();
   assert.throws(
     () => {
-      // TS would reject this at compile time; we cast to bypass
-      // the readonly type so we can exercise the runtime freeze.
       (f.manifest as unknown as Record<string, unknown>)["experiment_id"] =
         "exp-999";
     },
@@ -109,17 +114,9 @@ test("FRZ08: mutating a frozen array is rejected", () => {
   );
 });
 
-test("FRZ09: SubjectMutationRejected is exported and constructable", () => {
-  const e = new SubjectMutationRejected("foo.bar", "test reason");
-  assert.equal(e.name, "SubjectMutationRejected");
-  assert.equal(e.target, "foo.bar");
-  assert.match(e.message, /foo\.bar/);
-});
-
 test("FRZ10: dimensions are preserved exactly across reads", () => {
   const f = freeze();
   const m = makeValidManifest();
-  // Spot-check every required dimension round-trips intact.
   assert.equal(f.manifest.experiment_id, m.experiment_id);
   assert.equal(f.manifest.subject_id_hint, m.subject_id_hint);
   assert.equal(f.manifest.harness.id, m.harness.id);
@@ -174,4 +171,91 @@ test("FRZ10: dimensions are preserved exactly across reads", () => {
     m.repetition.repetition_index,
   );
   assert.equal(f.manifest.repetition.seed, m.repetition.seed);
+});
+
+/**
+ * D-C02: deep immutability. The original freezeSubject
+ * stopped recursing when it saw an already-frozen node,
+ * which left nested objects mutable. The fixed deepFreeze
+ * freezes the current node first, then ALWAYS recurses
+ * into children regardless of frozen status, so every
+ * nested node is immutable.
+ */
+test("FRZ11: deeply-nested configuration object is frozen", () => {
+  const f = freeze();
+  const cfg = f.manifest.model.configuration as unknown as Record<
+    string,
+    unknown
+  >;
+  const nested = cfg["nested"] as Record<string, unknown>;
+  const optimizer = nested["optimizer"] as Record<string, unknown>;
+  assert.equal(Object.isFrozen(optimizer), true);
+});
+
+test("FRZ12: deeply-nested configuration mutation is rejected", () => {
+  const f = freeze();
+  const cfg = f.manifest.model.configuration as unknown as Record<
+    string,
+    unknown
+  >;
+  const nested = cfg["nested"] as Record<string, unknown>;
+  const optimizer = nested["optimizer"] as Record<string, unknown>;
+  assert.throws(
+    () => {
+      optimizer["learningRate"] = 999;
+    },
+    TypeError,
+  );
+});
+
+test("FRZ13: deeply-nested configuration array mutation is rejected", () => {
+  const f = freeze();
+  const cfg = f.manifest.model.configuration as unknown as Record<
+    string,
+    unknown
+  >;
+  const nested = cfg["nested"] as Record<string, unknown>;
+  const optimizer = nested["optimizer"] as Record<string, unknown>;
+  const beta = optimizer["beta"] as Array<number>;
+  assert.throws(
+    () => {
+      beta.push(1.0);
+    },
+    TypeError,
+  );
+});
+
+/**
+ * D-C03: manifest ↔ SubjectId binding.
+ */
+test("BIND01: manifest A + SubjectId B is rejected", () => {
+  const r1 = decodeSubjectManifest(makeValidManifest());
+  const r2 = decodeSubjectManifest(
+    makeValidManifest({ experiment_id: "exp-002" as never }),
+  );
+  if (!r1.ok || !r2.ok) {
+    throw new Error("setup failure: both decodes should succeed");
+  }
+
+  const bad = {
+    manifest: r1.value.manifest,
+    subjectId: r2.value.subjectId,
+  };
+  const f = freezeSubject(bad);
+  assert.equal(f.ok, false);
+  if (!f.ok) {
+    assert.equal(f.failure.kind, "manifest_id_mismatch");
+    assert.equal(f.failure.expected, r1.value.subjectId);
+    assert.equal(f.failure.actual, r2.value.subjectId);
+  }
+});
+
+test("BIND02: manifest A + its own SubjectId succeeds", () => {
+  const r = decodeSubjectManifest(makeValidManifest());
+  if (!r.ok) throw new Error("setup failure");
+  const f = freezeSubject(r.value);
+  assert.equal(f.ok, true);
+  if (f.ok) {
+    assert.equal(f.value.subjectId, r.value.subjectId);
+  }
 });

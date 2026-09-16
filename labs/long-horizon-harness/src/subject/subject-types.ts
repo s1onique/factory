@@ -1,7 +1,8 @@
 /**
  * FOUNDATION04 — PHASE D — Experiment Subject Contract.
  *
- * Types for the immutable experiment subject manifest.
+ * Pure types, enums, branded identifiers, and public
+ * constants for the immutable experiment subject manifest.
  *
  * Phase D doctrine:
  *
@@ -24,6 +25,21 @@
  *
  *   Phase D does NOT carry run evidence, gate transitions,
  *   or convergence metrics. Those arrive in Phase E.
+ *
+ * Layout:
+ *
+ *   This module holds ONLY:
+ *     - schema-version constants + types
+ *     - branded identifier types + factories + grammars
+ *     - closed-world key constants
+ *     - the dimension interfaces (Harness, Model, ...,
+ *       SubjectManifest itself)
+ *
+ *   It does NOT hold the structural validator (see
+ *   subject-validate.ts) or the JsonValue validator (see
+ *   subject-json.ts). Splitting these keeps every Phase D
+ *   source file under the SOURCE_SIZE_DISCIPLINE 400-LOC
+ *   ceiling.
  *
  * All identifier-bearing strings MUST satisfy
  * IDENTIFIER_GRAMMAR (defined in ../domain/ids.ts).
@@ -51,6 +67,102 @@ export { IDENTIFIER_GRAMMAR };
  */
 export const SUBJECT_SCHEMA_VERSION = "phase-d.subject.v1" as const;
 export type SubjectSchemaVersion = typeof SUBJECT_SCHEMA_VERSION;
+
+/**
+ * Closed-world list of the top-level keys a SubjectManifest
+ * MUST contain. Unknown top-level keys fail closed at the
+ * decoder (SUBJECT_MANIFEST_KEYS_POLICY = EXPLICIT_REJECT).
+ */
+export const SUBJECT_MANIFEST_KEYS = [
+  "schema_version",
+  "experiment_id",
+  "subject_id_hint",
+  "harness",
+  "model",
+  "prompt",
+  "task",
+  "repository",
+  "budget",
+  "capabilities",
+  "repetition",
+] as const;
+export type SubjectManifestKey = typeof SUBJECT_MANIFEST_KEYS[number];
+
+/**
+ * Closed-world list of keys each required dimension MUST
+ * contain. The decoder rejects unknown keys per dimension
+ * (NESTED_CLOSED_WORLD).
+ *
+ * Exception: `model.configuration` is intentionally
+ * OPEN-WORLD. Its contents are recursively validated as
+ * JsonValue (see subject-json.ts). This split is doctrine:
+ * the structure of the manifest is closed; model-
+ * configuration contents are an explicitly extensible JSON
+ * namespace.
+ */
+export const HARNESS_KEYS = [
+  "id",
+  "version",
+  "source_revision",
+] as const;
+export const MODEL_KEYS = [
+  "provider",
+  "model_id",
+  "configuration",
+] as const;
+export const PROMPT_KEYS = [
+  "prompt_id",
+  "content_hash",
+] as const;
+export const TASK_KEYS = [
+  "task_id",
+  "fixture_revision",
+] as const;
+export const REPOSITORY_KEYS = [
+  "commit",
+  "dirty_policy",
+] as const;
+export const BUDGET_KEYS = [
+  "wall_clock_ms",
+  "turns",
+  "tool_calls",
+  "token_limit",
+] as const;
+export const CAPABILITIES_KEYS = [
+  "tools",
+  "network",
+  "filesystem",
+  "execution_policy",
+] as const;
+export const REPETITION_KEYS = [
+  "repetition_index",
+  "seed",
+] as const;
+
+/**
+ * Closed-world enum for repository.dirty_policy. "ignore" is
+ * NOT allowed — the subject MUST be bound to a known
+ * repository state. Bumping this enum is a wire-breaking
+ * change.
+ */
+export const REPOSITORY_DIRTY_POLICY_VALUES = [
+  "reject",
+  "allow-record",
+] as const;
+export type RepositoryDirtyPolicy =
+  typeof REPOSITORY_DIRTY_POLICY_VALUES[number];
+
+/**
+ * Closed-world enum for capabilities.execution_policy.
+ * Bumping this enum is a wire-breaking change.
+ */
+export const CAPABILITIES_EXECUTION_POLICY_VALUES = [
+  "sandbox",
+  "host",
+  "container",
+] as const;
+export type CapabilitiesExecutionPolicy =
+  typeof CAPABILITIES_EXECUTION_POLICY_VALUES[number];
 
 /**
  * Branded identifier for an experiment.
@@ -95,15 +207,9 @@ export function makeSubjectIdHint(value: string): SubjectIdHint {
   return makeHarnessHandle(value);
 }
 
-// Re-exported so consumers of subject-types can pull the
-// grammar alongside their subject types without a second
-// import edge.
-
-/** ---------------------------------------------------------------------------
- * Required-dimension types.
- * ------------------------------------------------------------------------- */
-
 /**
+ * Required-dimension types.
+ *
  * The candidate harness executing the experiment. `id` is a
  * stable machine identifier (e.g. "cline"); `version` is the
  * declared harness version; `source_revision` is the git SHA
@@ -117,9 +223,9 @@ export type SubjectHarness = {
 
 /**
  * Model identity and configuration. Configuration is treated
- * as an opaque string-keyed record so future knobs do not
- * require schema bumps; the decoder still requires the field
- * to be present and an object.
+ * as an OPEN JSON namespace (the only one in the manifest)
+ * so future knobs do not require schema bumps; the decoder
+ * recursively validates its contents as JsonValue.
  */
 export type SubjectModel = {
   readonly provider: string;
@@ -152,14 +258,11 @@ export type SubjectTask = {
 /**
  * Repository binding. `commit` is the git SHA of the
  * repository state the subject was defined against;
- * `dirty_policy` is the declared policy on a dirty tree
- * ("reject" | "allow-record"). Phase D rejects "ignore" as
- * a safety default — the subject MUST be bound to a known
- * repository state.
+ * `dirty_policy` is the declared policy on a dirty tree.
  */
 export type SubjectRepository = {
   readonly commit: string;
-  readonly dirty_policy: "reject" | "allow-record";
+  readonly dirty_policy: RepositoryDirtyPolicy;
 };
 
 /**
@@ -176,17 +279,12 @@ export type SubjectBudget = {
 
 /**
  * Capability set declared by the experimenter.
- * `execution_policy` enum is closed-world:
- *
- *   "sandbox"    : the harness runs in a hermetic sandbox
- *   "host"       : the harness runs with full host access
- *   "container"  : the harness runs in a container
  */
 export type SubjectCapabilities = {
   readonly tools: ReadonlyArray<string>;
   readonly network: boolean;
   readonly filesystem: boolean;
-  readonly execution_policy: "sandbox" | "host" | "container";
+  readonly execution_policy: CapabilitiesExecutionPolicy;
 };
 
 /**
@@ -199,33 +297,20 @@ export type SubjectRepetition = {
   readonly seed?: string;
 };
 
-/** ---------------------------------------------------------------------------
- * SubjectManifest — the closed-world root type.
- * ------------------------------------------------------------------------- */
-
 /**
  * The complete, versioned, immutable experiment subject.
  *
- * Required top-level keys (no extras permitted; unknown keys
- * fail closed at decode time):
- *
- *   schema_version
- *   experiment_id
- *   subject_id_hint
- *   harness
- *   model
- *   prompt
- *   task
- *   repository
- *   budget
- *   capabilities
- *   repetition
+ * One manifest describes ONE subject (i.e. one experimental
+ * unit). To compare two runs against the same subject, both
+ * runs must produce a SubjectId equal to
+ * `computeSubjectId(this manifest)`. To compare against
+ * DIFFERENT subjects, the manifests must differ in at least
+ * one required dimension.
  */
 export type SubjectManifest = {
   readonly schema_version: SubjectSchemaVersion;
   readonly experiment_id: ExperimentId;
   readonly subject_id_hint: SubjectIdHint;
-
   readonly harness: SubjectHarness;
   readonly model: SubjectModel;
   readonly prompt: SubjectPrompt;
@@ -235,254 +320,3 @@ export type SubjectManifest = {
   readonly capabilities: SubjectCapabilities;
   readonly repetition: SubjectRepetition;
 };
-
-/**
- * Canonical list of permitted top-level keys, in declaration
- * order. The decoder uses this set to enforce the
- * "unknown fields fail closed" doctrine.
- */
-export const SUBJECT_MANIFEST_KEYS = [
-  "schema_version",
-  "experiment_id",
-  "subject_id_hint",
-  "harness",
-  "model",
-  "prompt",
-  "task",
-  "repository",
-  "budget",
-  "capabilities",
-  "repetition",
-] as const;
-
-/** ---------------------------------------------------------------------------
- * Structural validator.
- *
- * Pure and TOTAL: returns a discriminated union and NEVER
- * throws. The decoder (subject-decode.ts) composes this with
- * the trust-boundary parse step.
- * ------------------------------------------------------------------------- */
-
-export type SubjectValidation =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly reason: string };
-
-function ok(): SubjectValidation {
-  return { ok: true };
-}
-function fail(reason: string): SubjectValidation {
-  return { ok: false, reason };
-}
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function requireString(
-  o: Record<string, unknown>,
-  key: string,
-  reasons: string[],
-): void {
-  const v = o[key];
-  if (typeof v !== "string" || v.length === 0) {
-    reasons.push(`${key} must be a non-empty string`);
-    return;
-  }
-  if (!IDENTIFIER_GRAMMAR.test(v)) {
-    reasons.push(`${key} must match IDENTIFIER_GRAMMAR`);
-  }
-}
-
-function requireNonEmptyString(
-  o: Record<string, unknown>,
-  key: string,
-  reasons: string[],
-): void {
-  const v = o[key];
-  if (typeof v !== "string" || v.length === 0) {
-    reasons.push(`${key} must be a non-empty string`);
-  }
-}
-
-function requireNonNegativeInteger(
-  o: Record<string, unknown>,
-  key: string,
-  reasons: string[],
-): void {
-  const v = o[key];
-  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
-    reasons.push(`${key} must be a non-negative integer`);
-  }
-}
-
-function requireSha256Hex(
-  o: Record<string, unknown>,
-  key: string,
-  reasons: string[],
-): void {
-  const v = o[key];
-  if (typeof v !== "string" || !/^[0-9a-f]{64}$/.test(v)) {
-    reasons.push(`${key} must be a 64-char lowercase hex SHA-256`);
-  }
-}
-
-function requireStringArrayOfGrammar(
-  o: Record<string, unknown>,
-  key: string,
-  reasons: string[],
-): void {
-  const v = o[key];
-  if (!Array.isArray(v)) {
-    reasons.push(`${key} must be an array of strings`);
-    return;
-  }
-  for (let i = 0; i < v.length; i++) {
-    const e = v[i];
-    if (typeof e !== "string" || !IDENTIFIER_GRAMMAR.test(e)) {
-      reasons.push(`${key}[${i}] must match IDENTIFIER_GRAMMAR`);
-      return;
-    }
-  }
-}
-
-
-/**
- * Validate the full manifest structurally. Pure; never throws.
- *
- * On failure returns `{ ok: false, reason: "<all reasons joined>" }`
- * so a caller can show every problem at once.
- */
-export function validateSubjectManifest(value: unknown): SubjectValidation {
-  const reasons: string[] = [];
-
-  if (!isPlainObject(value)) {
-    return fail("manifest root must be a plain object");
-  }
-
-  // Unknown top-level keys: closed-world doctrine.
-  for (const k of Object.keys(value)) {
-    if (!(SUBJECT_MANIFEST_KEYS as ReadonlyArray<string>).includes(k)) {
-      reasons.push(`unknown top-level key: ${JSON.stringify(k)}`);
-    }
-  }
-
-  // schema_version
-  if (value.schema_version !== SUBJECT_SCHEMA_VERSION) {
-    reasons.push(
-      `schema_version must be the literal ${JSON.stringify(SUBJECT_SCHEMA_VERSION)}`,
-    );
-  }
-
-  // experiment_id, subject_id_hint
-  requireString(value, "experiment_id", reasons);
-  requireString(value, "subject_id_hint", reasons);
-
-  // harness
-  if (!isPlainObject(value.harness)) {
-    reasons.push("harness must be an object");
-  } else {
-    requireNonEmptyString(value.harness, "id", reasons);
-    requireNonEmptyString(value.harness, "version", reasons);
-    requireSha256Hex(value.harness, "source_revision", reasons);
-  }
-
-  // model
-  if (!isPlainObject(value.model)) {
-    reasons.push("model must be an object");
-  } else {
-    requireNonEmptyString(value.model, "provider", reasons);
-    requireNonEmptyString(value.model, "model_id", reasons);
-    if (!isPlainObject(value.model.configuration)) {
-      reasons.push("model.configuration must be an object");
-    }
-  }
-
-  // prompt
-  if (!isPlainObject(value.prompt)) {
-    reasons.push("prompt must be an object");
-  } else {
-    requireString(value.prompt, "prompt_id", reasons);
-    requireSha256Hex(value.prompt, "content_hash", reasons);
-  }
-
-  // task
-  if (!isPlainObject(value.task)) {
-    reasons.push("task must be an object");
-  } else {
-    requireString(value.task, "task_id", reasons);
-    requireNonEmptyString(value.task, "fixture_revision", reasons);
-  }
-
-  // repository
-  if (!isPlainObject(value.repository)) {
-    reasons.push("repository must be an object");
-  } else {
-    requireSha256Hex(value.repository, "commit", reasons);
-    const dp = value.repository.dirty_policy;
-    if (dp !== "reject" && dp !== "allow-record") {
-      reasons.push(
-        `repository.dirty_policy must be "reject" or "allow-record" (got ${JSON.stringify(dp)})`,
-      );
-    }
-  }
-
-
-  // budget
-  if (!isPlainObject(value.budget)) {
-    reasons.push("budget must be an object");
-  } else {
-    requireNonNegativeInteger(value.budget, "wall_clock_ms", reasons);
-    requireNonNegativeInteger(value.budget, "turns", reasons);
-    requireNonNegativeInteger(value.budget, "tool_calls", reasons);
-    if (
-      "token_limit" in value.budget &&
-      value.budget.token_limit !== undefined
-    ) {
-      requireNonNegativeInteger(value.budget, "token_limit", reasons);
-    }
-  }
-
-  // capabilities
-  if (!isPlainObject(value.capabilities)) {
-    reasons.push("capabilities must be an object");
-  } else {
-    requireStringArrayOfGrammar(value.capabilities, "tools", reasons);
-    if (typeof value.capabilities.network !== "boolean") {
-      reasons.push("capabilities.network must be a boolean");
-    }
-    if (typeof value.capabilities.filesystem !== "boolean") {
-      reasons.push("capabilities.filesystem must be a boolean");
-    }
-    const ep = value.capabilities.execution_policy;
-    if (ep !== "sandbox" && ep !== "host" && ep !== "container") {
-      reasons.push(
-        `capabilities.execution_policy must be one of "sandbox"|"host"|"container" (got ${JSON.stringify(ep)})`,
-      );
-    }
-  }
-
-  // repetition
-  if (!isPlainObject(value.repetition)) {
-    reasons.push("repetition must be an object");
-  } else {
-    requireNonNegativeInteger(
-      value.repetition,
-      "repetition_index",
-      reasons,
-    );
-    if (
-      "seed" in value.repetition &&
-      value.repetition.seed !== undefined &&
-      typeof value.repetition.seed !== "string"
-    ) {
-      reasons.push("repetition.seed must be a string when present");
-    }
-  }
-
-  if (reasons.length > 0) {
-    return fail(reasons.join("; "));
-  }
-  return ok();
-}
-
-export type SubjectManifestKey = typeof SUBJECT_MANIFEST_KEYS[number];

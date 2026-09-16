@@ -53,10 +53,11 @@ export function makeValidManifest(
     model: {
       provider: "factory-lab",
       model_id: "fake-model-v1",
-      configuration: Object.freeze({
+      configuration: {
         temperature: 0.0,
         max_tokens: 4096,
-      }),
+        nested: { optimizer: { learningRate: 0.1 } },
+      },
     },
 
     prompt: {
@@ -82,7 +83,7 @@ export function makeValidManifest(
     },
 
     capabilities: {
-      tools: Object.freeze(["read_file", "write_file", "bash"]) as ReadonlyArray<string>,
+      tools: ["read_file", "write_file", "bash"],
       network: false,
       filesystem: true,
       execution_policy: "sandbox",

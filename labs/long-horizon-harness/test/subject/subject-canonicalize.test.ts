@@ -18,6 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import {
   SUBJECT_ID_V1_TAG,
@@ -69,9 +70,6 @@ test("SID01: SubjectId matches SUBJECT_ID_GRAMMAR and length <= 72", () => {
 });
 
 test("SID02: same manifest yields the same SubjectId (replay)", () => {
-  // Two structurally-identical manifests constructed with
-  // independent object identities and possibly different
-  // key insertion orders MUST yield the same SubjectId.
   const m1 = makeValidManifest();
   const m2 = makeValidManifest();
   assert.equal(computeSubjectId(m1), computeSubjectId(m2));
@@ -88,7 +86,12 @@ test("SID03: one-field change -> different SubjectId (content-bound)", () => {
 
   // change harness.id
   const b = makeValidManifest({
-    harness: { id: "qwen-code", version: "0.1.0", source_revision: "1111111111111111111111111111111111111111111111111111111111111111" },
+    harness: {
+      id: "qwen-code",
+      version: "0.1.0",
+      source_revision:
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    },
   });
   assert.notEqual(computeSubjectId(b), baseline);
 
@@ -106,7 +109,8 @@ test("SID03: one-field change -> different SubjectId (content-bound)", () => {
   const d = makeValidManifest({
     prompt: {
       prompt_id: "prompt-A",
-      content_hash: "4444444444444444444444444444444444444444444444444444444444444444",
+      content_hash:
+        "4444444444444444444444444444444444444444444444444444444444444444",
     },
   });
   assert.notEqual(computeSubjectId(d), baseline);
@@ -114,7 +118,8 @@ test("SID03: one-field change -> different SubjectId (content-bound)", () => {
   // change repository.commit
   const e = makeValidManifest({
     repository: {
-      commit: "5555555555555555555555555555555555555555555555555555555555555555",
+      commit:
+        "5555555555555555555555555555555555555555555555555555555555555555",
       dirty_policy: "reject",
     },
   });
@@ -142,25 +147,62 @@ test("SID03: one-field change -> different SubjectId (content-bound)", () => {
     repetition: { repetition_index: 7, seed: "seed-A" },
   });
   assert.notEqual(computeSubjectId(h), baseline);
+
+  // change model.configuration.temperature
+  const i = makeValidManifest({
+    model: {
+      provider: "factory-lab",
+      model_id: "fake-model-v1",
+      configuration: { temperature: 0.7, max_tokens: 4096 },
+    },
+  });
+  assert.notEqual(computeSubjectId(i), baseline);
 });
 
-test("SID04: SubjectId is domain-tag separated (cannot collide with raw SHA of payload)", () => {
+/**
+ * D-C05: real domain-separation oracle.
+ *
+ * Computes the expected SHA-256 over (tag || NUL || canonical)
+ * directly with node:crypto and asserts:
+ *
+ *   1. computeSubjectId(manifest) equals "subject:" + that hex.
+ *   2. A wrong domain tag would produce a DIFFERENT hex.
+ *
+ * This replaces the earlier false-green `slice(0, 0)` smoke.
+ */
+test("HASH01: computeSubjectId matches the canonical SHA-256 construction", () => {
   const m = makeValidManifest();
-  const id = computeSubjectId(m);
+  const canonical = canonicalize(m);
 
-  // Sanity: the v1 tag is part of the hash input. We do not
-  // re-hash here, but we assert that changing the tag would
-  // change the id (we exercise this by comparing the
-  // computed id to a deliberately-wrong tag hash).
-  const c = canonicalize(m);
-  assert.notEqual(id, "subject:" + c);
-  assert.ok(id.startsWith("subject:"));
-  assert.ok(id.includes(SUBJECT_ID_V1_TAG.slice(0, 0))); // structural smoke
+  const expectedHex = createHash("sha256")
+    .update(SUBJECT_ID_V1_TAG + "\u0000", "utf8")
+    .update(canonical, "utf8")
+    .digest("hex");
+
+  assert.equal(computeSubjectId(m), "subject:" + expectedHex);
 });
 
-test("SID05: SubjectId derivation uses SUBJECT_ID_V1_TAG", () => {
-  // The domain tag is the only Factory-controlled input that
-  // distinguishes this SubjectId from any other content hash.
-  // Two callers MUST agree on the tag value.
+test("HASH02: a wrong domain tag would yield a different digest", () => {
+  const m = makeValidManifest();
+  const canonical = canonicalize(m);
+
+  const wrongTagHex = createHash("sha256")
+    .update("factory:wrong-domain" + "\u0000", "utf8")
+    .update(canonical, "utf8")
+    .digest("hex");
+
+  const goodHex = createHash("sha256")
+    .update(SUBJECT_ID_V1_TAG + "\u0000", "utf8")
+    .update(canonical, "utf8")
+    .digest("hex");
+
+  assert.notEqual(wrongTagHex, goodHex);
+  assert.equal(computeSubjectId(m), "subject:" + goodHex);
+});
+
+test("SID05: SubjectId tag is the literal v1 tag", () => {
+  // Pin the tag value to keep the domain-separation
+  // discipline honest. If anyone bumps the tag, every
+  // persisted SubjectId is invalidated.
   assert.equal(SUBJECT_ID_V1_TAG, "factory:phase-d:subject:id:v1");
 });
