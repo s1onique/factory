@@ -65,15 +65,18 @@ function makeFakeHandle(opts: {
   port: DiagnosticPort;
   fireExit: (code: number | null, signal: NodeJS.Signals | null) => void;
   fireError: (err: Error) => void;
+  killCallCount: () => number;
 } {
   const exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
   const errorListeners: Array<(err: Error) => void> = [];
   let exited = false;
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
+  let killCalls = 0;
   const port: DiagnosticPort = {
     pid: opts.pid,
     kill: (_sig) => {
+      killCalls++;
       // Mirror production: returns the configured
       // value (default true), or throws when caller
       // wants to simulate EPERM throwing.
@@ -110,6 +113,7 @@ function makeFakeHandle(opts: {
     fireError: (err) => {
       for (const l of errorListeners) l(err);
     },
+    killCallCount: () => killCalls,
   };
 }
 // ----------------------------------------------------------------------
@@ -323,8 +327,38 @@ test("WDIAG06: kill() returns false → signalRequestOutcome={kind:'returned_fal
 // {kind:'exit'} even though the kill request arrives
 // after the child is already gone. exitInfo stays
 // authoritative via the owned handle's exitInfo().
+//
+// STRENGTHENED (MICROFIX04): in addition to the
+// classification, this oracle now mechanically pins
+// two further invariants:
+//
+//   (a) killCallCount === 0
+//       The helper MUST NOT call kill() on a
+//       PID-bearing handle that has already declared
+//       its child gone. Sending a signal to a
+//       recycled PID is a kernel-level signal hazard
+//       (Node's ChildProcess API explicitly documents
+//       that a kill() after `exit` may target an
+//       unrelated process).
+//
+//   (b) signalRequestOutcome.kind ===
+//       "not_attempted_already_exited"
+//       The new ADT variant must be selected when
+//       T0's exitInfo.exited === true. The previous
+//       code seeded `signalRequestOutcome =
+//       {kind:"accepted"}` and then unconditionally
+//       called port.kill("SIGTERM") — the silent
+//       fall-through case that surfaced the
+//       PID-reuse signal hazard.
+//
+// Verified as a true falsifier: with the helper
+// temporarily restored to call kill() on a
+// pre-exited child, WDIAG07 fails with
+// `killCallCount === 1 (expected 0)` AND with
+// `signalRequestOutcome.kind === "accepted"
+// (expected "not_attempted_already_exited")`.
 // ----------------------------------------------------------------------
-test("WDIAG07: pre-exited child → processExitObservation={kind:'exit'} with T0 sample already exited", async () => {
+test("WDIAG07: pre-exited child → processExitObservation={kind:'exit'}, killCallCount=0, signalRequestOutcome=not_attempted_already_exited", async () => {
   const fake = makeFakeHandle({ pid: 900_007 });
   fake.fireExit(137, "SIGKILL");
   const r = await observeLifecycle(fake.port, {
@@ -341,6 +375,14 @@ test("WDIAG07: pre-exited child → processExitObservation={kind:'exit'} with T0
     assert.equal(r.processExitObservation.signal, "SIGKILL",
       "WDIAG07: signal preserved as SIGKILL");
   }
+  // PID-REUSE SIGNAL HAZARD GUARD:
+  assert.equal(fake.killCallCount(), 0,
+    "WDIAG07: kill() MUST NOT be called on a pre-exited child (PID-reuse signal hazard); got " +
+      `${fake.killCallCount()} call(s)`);
+  assert.equal(r.signalRequestOutcome.kind,
+    "not_attempted_already_exited",
+    "WDIAG07: pre-exited child MUST record signalRequestOutcome={kind:\"not_attempted_already_exited\"}; got " +
+      `${JSON.stringify(r.signalRequestOutcome)}`);
 });
 
 // ----------------------------------------------------------------------

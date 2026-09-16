@@ -63,9 +63,17 @@
  *     microtask window was unsound. The error
  *     listener and the exit listener remain armed
  *     throughout the window; the helper does NOT
- *     remove them. Listener disarming is the port
- *     adapter's responsibility (callers can drop the
- *     whole port reference to drop the listeners).
+ *     own an unsubscribe capability. Listeners may
+ *     remain registered for the remaining lifetime
+ *     of the underlying child handle. (Note: in the
+ *     real production adapter, `WitnessSpawnHandle.on`
+ *     forwards to `child.on(...)` on a Node
+ *     `ChildProcess` EventEmitter; the emitter owns
+ *     the registration and dropping the wrapper
+ *     reference does NOT itself unregister the
+ *     listener. Listener removal is therefore the
+ *     port adapter's responsibility — NOT a property
+ *     the helper can rely on.)
  *
  *   - Process observation races ONLY the exit
  *     listener against the bounded deadline. The
@@ -97,7 +105,8 @@ export type BootstrapOutputBoundary =
 export type SignalRequestOutcome =
   | { readonly kind: "accepted" }
   | { readonly kind: "returned_false" }
-  | { readonly kind: "threw"; readonly code?: string };
+  | { readonly kind: "threw"; readonly code?: string }
+  | { readonly kind: "not_attempted_already_exited" };
 
 export type ErrorEventObserved =
   | { readonly seen: false }
@@ -225,8 +234,12 @@ async function raceWithDeadline<T>(
  *
  * The error listener is NOT removed at one microtask;
  * it stays armed until process observation settles.
- * `removeListener` is intentionally NOT used because
- * the `WitnessSpawnHandle` surface does not expose it.
+ * The helper does NOT own an unsubscribe capability;
+ * `removeListener` is not exposed by the
+ * `WitnessSpawnHandle` surface, so it is intentionally
+ * NOT used here. Listeners may remain registered for
+ * the remaining lifetime of the underlying child
+ * handle.
  */
 export async function observeLifecycle(
   port: DiagnosticPort,
@@ -240,23 +253,37 @@ export async function observeLifecycle(
     kind: "unavailable",
   };
 
-  const exitResolveRef: { value: (() => void) | null } = { value: null };
-  const exitSettled = new Promise<void>((res) => { exitResolveRef.value = res; });
-
-  // Arm process observation channels BEFORE the kill.
-  //
   // PRE-EXITED HANDLE: if the owned handle's exitInfo
-  // already reports `exited: true` at arming time,
-  // the process exited BEFORE we got a chance to
-  // register a listener. Production wrapChild mutates
-  // exitInfo on the 'exit' event; we cannot observe
-  // an event that already fired. Seed the observation
-  // from the handle's authoritative exitInfo() so
-  // a pre-exited child is still classified correctly.
-  if (
+  // already reports `exited: true` at T0, the process
+  // exited BEFORE we got a chance to register a
+  // listener. Production wrapChild mutates exitInfo on
+  // the 'exit' event; we cannot observe an event that
+  // already fired. Two consequences:
+  //
+  //   (a) Seed `processExitObservation` from the
+  //       handle's authoritative exitInfo() so a
+  //       pre-exited child is still classified
+  //       correctly.
+  //   (b) DO NOT call `port.kill()`. Sending a signal
+  //       to a handle that has already exited is a
+  //       PID-reuse signal hazard: Node's ChildProcess
+  //       API explicitly documents that a subsequent
+  //       `kill()` may signal an unrelated process if
+  //       the PID has been recycled by the kernel. The
+  //       identity-bound handle has already declared
+  //       its child gone; the only correct response
+  //       is to NOT perform a new bare-PID-effecting
+  //       operation. This is recorded as the new
+  //       `not_attempted_already_exited` outcome.
+  //
+  // Listener arming still happens below so any
+  // additional exit/error event from a late or
+  // duplicated EventEmitter is captured harmlessly.
+  const preExited =
     exitInfoBeforeTermination !== null &&
-    exitInfoBeforeTermination.exited === true
-  ) {
+    exitInfoBeforeTermination.exited === true;
+
+  if (preExited) {
     processExitObservation = {
       kind: "exit",
       code:
@@ -268,6 +295,13 @@ export async function observeLifecycle(
           ? (exitInfoBeforeTermination.signal as NodeJS.Signals)
           : null,
     };
+    signalRequestOutcome = { kind: "not_attempted_already_exited" };
+  }
+
+  const exitResolveRef: { value: (() => void) | null } = { value: null };
+  const exitSettled = new Promise<void>((res) => { exitResolveRef.value = res; });
+
+  if (preExited) {
     exitResolveRef.value?.();
   }
   if (typeof port.on === "function") {
@@ -304,8 +338,23 @@ export async function observeLifecycle(
     }
   }
 
-  // Send the signal AFTER both listeners are armed.
-  if (typeof port.kill === "function") {
+  // Send the signal AFTER both listeners are armed —
+  // BUT ONLY IF the owned child is not already gone.
+  //
+  // When `preExited` is true, the handle has already
+  // declared its child gone (see PRE-EXITED HANDLE
+  // block above). Sending `kill("SIGTERM")` to that
+  // PID-bearing handle is a PID-reuse signal hazard —
+  // Node's ChildProcess API explicitly documents that
+  // a `kill()` after `exit` may target an unrelated
+  // process if the PID has been recycled. The
+  // identity-bound handle has AUTHORITATIVELY said the
+  // original child is gone; the only correct response
+  // is to NOT perform a new bare-PID-effecting
+  // operation. `signalRequestOutcome` was already
+  // seeded to `not_attempted_already_exited` in the
+  // pre-exit branch.
+  if (!preExited && typeof port.kill === "function") {
     try {
       const r = port.kill("SIGTERM");
       if (r === false) {
@@ -318,7 +367,7 @@ export async function observeLifecycle(
         ...(typeof err?.code === "string" ? { code: err.code } : {}),
       };
     }
-  } else {
+  } else if (!preExited) {
     signalRequestOutcome = { kind: "returned_false" };
   }
 
@@ -330,7 +379,7 @@ export async function observeLifecycle(
   // for `ProcessExitObservation`: `exit | timeout |
   // unavailable`, never `error`.
   await raceWithDeadline<void>(
-    async () => { await Promise.race([exitSettled]); },
+    async () => { await exitSettled; },
     opts.processDeadlineMs,
     () => undefined,
   );

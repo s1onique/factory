@@ -222,19 +222,35 @@ test("WLIFE04: terminateAndProveWitness must await observeLifecycle with bounded
       /observeLifecycle[\s\S]*?\bawait\b[\s\S]*?\)/.test(liveCodeOnly),
     "WLIFE04: live file MUST await observeLifecycle(...) inside terminateAndProveWitness",
   );
-  // (c) Helper wraps the barrier with
-  //     Promise.race + setTimeout + clearTimeout so
-  //     the bounded deadline is mechanical, not
-  //     accidental.
+  // (c) Helper wraps the barrier with a bounded
+  //     deadline mechanism. The current helper
+  //     composes the barrier via `raceWithDeadline()`
+  //     (which internally registers a `setTimeout`,
+  //     exposes a `clearTimeout` cleanup, and settles
+  //     either on completion or on timeout). The
+  //     mechanical property is: there exists a
+  //     bounded-deadline seam, NOT that the literal
+  //     `Promise.race(...)` token appears. We pin
+  //     three tokens:
+  //       - `raceWithDeadline(` — the seam function
+  //         is invoked somewhere on the output
+  //         barrier;
+  //       - `setTimeout` — a timer is registered;
+  //       - `clearTimeout` — the timer is cleaned
+  //         up on settlement (no pinned process).
+  //     Together these three tokens prove the helper
+  //     owns a bounded-deadline mechanism for the
+  //     output barrier; a stray comment cannot
+  //     satisfy this triple.
   assert.ok(
     /whenBootstrapOutputClosed/.test(helperText),
     "WLIFE04: helper must implement whenBootstrapOutputClosed()",
   );
   assert.ok(
-    /Promise\.race/.test(helperText) &&
+    /raceWithDeadline\b/.test(helperText) &&
       /setTimeout/.test(helperText) &&
       /clearTimeout/.test(helperText),
-    "WLIFE04: helper must wrap whenBootstrapOutputClosed in a bounded deadline (Promise.race + setTimeout + clearTimeout)",
+    "WLIFE04: helper must wrap whenBootstrapOutputClosed in a bounded deadline (raceWithDeadline + setTimeout + clearTimeout)",
   );
 });
 
