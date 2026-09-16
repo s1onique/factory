@@ -38,14 +38,40 @@
  *   - `bootstrapOutputBoundary` is recorded as an
  *     orthogonal fact about stdio accounting.
  *
- *   - The error-channel window starts at arming-time
- *     (BEFORE the kill request) and stays armed through
- *     the bounded process-observation deadline. It is
- *     not gated by a single-microtask `await
- *     Promise.resolve()` fence — Node does not give
- *     such a guarantee and the `WitnessSpawnHandle`
- *     exposes `on` without `removeListener`, so an
- *     artificial one-microtask window was unsound.
+ *   - The error channel (`errorEventObserved`) is
+ *     INDEPENDENT of `processExitObservation`.
+ *     `processExitObservation` answers exactly one
+ *     question: did the process emit `exit`? The
+ *     possibilities are: `exit`, `timeout`,
+ *     `unavailable`. An `'error'` event is a separate
+ *     fact, recorded in `errorEventObserved`, that
+ *     does NOT terminate the process-exit observation
+ *     window — Node explicitly documents that after
+ *     a `'error'`, an `'exit'` may still fire (and
+ *     conversely may never fire). Treating `'error'`
+ *     as a process-completion signal was a category
+ *     mistake.
+ *
+ *   - The error listener is armed BEFORE the kill
+ *     request and is guaranteed to be observable
+ *     during the bounded process-observation window.
+ *     It is NOT gated by a single-microtask
+ *     `await Promise.resolve()` fence — Node does
+ *     not give such a guarantee and
+ *     `WitnessSpawnHandle` exposes `on` without
+ *     `removeListener`, so the artificial one-
+ *     microtask window was unsound. The error
+ *     listener and the exit listener remain armed
+ *     throughout the window; the helper does NOT
+ *     remove them. Listener disarming is the port
+ *     adapter's responsibility (callers can drop the
+ *     whole port reference to drop the listeners).
+ *
+ *   - Process observation races ONLY the exit
+ *     listener against the bounded deadline. The
+ *     error listener is not on the race — its
+ *     presence updates `errorEventObserved` but does
+ *     not settle the process channel.
  */
 
 export type ProcessExitObservation =
@@ -53,11 +79,6 @@ export type ProcessExitObservation =
       readonly kind: "exit";
       readonly code: number | null;
       readonly signal: NodeJS.Signals | null;
-    }
-  | {
-      readonly kind: "error";
-      readonly code?: string;
-      readonly message?: string;
     }
   | {
       readonly kind: "timeout";
@@ -220,9 +241,7 @@ export async function observeLifecycle(
   };
 
   const exitResolveRef: { value: (() => void) | null } = { value: null };
-  const errorResolveRef: { value: (() => void) | null } = { value: null };
   const exitSettled = new Promise<void>((res) => { exitResolveRef.value = res; });
-  const errorSettled = new Promise<void>((res) => { errorResolveRef.value = res; });
 
   // Arm process observation channels BEFORE the kill.
   //
@@ -266,21 +285,19 @@ export async function observeLifecycle(
     try {
       port.onError("error", (err) => {
         const e = err as NodeJS.ErrnoException;
+        // The `error` event is its OWN observation
+        // channel. It does NOT terminate the
+        // process-exit observation window — Node
+        // explicitly documents that after `'error'`
+        // an `'exit'` may still fire. We record the
+        // error evidence and let the exit listener
+        // (and the deadline) continue to author
+        // `processExitObservation`.
         errorEventObserved = {
           seen: true,
           ...(typeof e?.code === "string" ? { code: e.code } : {}),
           ...(typeof e?.message === "string" ? { message: e.message } : {}),
         };
-        // An `error` event without an `exit` event is
-        // its own observation channel.
-        if (processExitObservation.kind !== "exit") {
-          processExitObservation = {
-            kind: "error",
-            ...(typeof e?.code === "string" ? { code: e.code } : {}),
-            ...(typeof e?.message === "string" ? { message: e.message } : {}),
-          };
-        }
-        if (errorResolveRef.value) errorResolveRef.value();
       });
     } catch {
       /* adapter didn't accept error listener */
@@ -305,9 +322,15 @@ export async function observeLifecycle(
     signalRequestOutcome = { kind: "returned_false" };
   }
 
-  // Wait for process observation OR the bounded deadline.
+  // Wait for the process-exit event OR the bounded
+  // deadline. Note: errorSettled is NOT in this race.
+  // `errorEventObserved` is recorded independently;
+  // `processExitObservation` is settled ONLY by `exit`
+  // or by the deadline. This is the corrected algebra
+  // for `ProcessExitObservation`: `exit | timeout |
+  // unavailable`, never `error`.
   await raceWithDeadline<void>(
-    async () => { await Promise.race([exitSettled, errorSettled]); },
+    async () => { await Promise.race([exitSettled]); },
     opts.processDeadlineMs,
     () => undefined,
   );

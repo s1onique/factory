@@ -164,18 +164,30 @@ test("WLIFE03: signal-sent without exitInfo-evidence is residue (alive), not rel
 // WLIFE04 — terminateAndProveWitness must await
 // whenBootstrapOutputClosed with a bounded deadline.
 //
-// (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX02)
+// (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX02/03)
 // As of MICROFIX02 the bounded-deadline wrapping
 // lives in _wstart_diagnostic_helpers.ts (shared by
 // the live lane AND the WDIAG adversarial oracles),
-// not inline in witness-start-live.test.ts. The
-// static guard now verifies both: (a) the live file
-// still calls whenBootstrapOutputClosed via the
-// helper, and (b) the helper wraps it with
-// Promise.race + setTimeout so the bounded deadline
-// is mechanical, not accidental.
+// not inline in witness-start-live.test.ts.
+//
+// MICROFIX03 strengthens the static guard. Previous
+// form merely checked that the token
+// "whenBootstrapOutputClosed" appears in the live
+// file — a comment mentioning the term would have
+// passed. The new form mechanically pins:
+//
+//   (a) live file IMPORTS observeLifecycle from
+//       the helper file;
+//   (b) terminateAndProveWitness AWAITS
+//       observeLifecycle(port, {...});
+//   (c) the helper wraps the barrier with
+//       Promise.race + setTimeout + clearTimeout.
+//
+// Together (a) + (b) + (c) prove the live path is
+// actually driven by the bounded-deadline helper,
+// not by a stray token in a comment.
 // ----------------------------------------------------------------------
-test("WLIFE04: terminateAndProveWitness must await whenBootstrapOutputClosed with a bounded deadline", async () => {
+test("WLIFE04: terminateAndProveWitness must await observeLifecycle with bounded deadline", async () => {
   const { promises: fs } = await import("node:fs");
   const liveUrl = new URL(
     "./witness-start-live.test.ts",
@@ -187,15 +199,33 @@ test("WLIFE04: terminateAndProveWitness must await whenBootstrapOutputClosed wit
   );
   const liveText = await fs.readFile(liveUrl, "utf8");
   const helperText = await fs.readFile(helperUrl, "utf8");
-  // Live file must STILL call whenBootstrapOutputClosed
-  // (through the helper) — its existence in the live
-  // file proves the live path uses the barrier.
+  // Strip comments so a comment mentioning these
+  // tokens does not satisfy the guard. We allow
+  // JSDoc/** ... */ and // line comments stripped.
+  const liveCodeOnly = liveText
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/\s+\/\/.*$/g, "");
+  // (a) Live file IMPORTS observeLifecycle from
+  //     the helper module — proves the live path
+  //     uses the shared helper, not an inline copy.
   assert.ok(
-    /whenBootstrapOutputClosed/.test(liveText),
-    "WLIFE04: live test must call whenBootstrapOutputClosed (directly or via helper)",
+    /import\s*\{[^}]*\bobserveLifecycle\b[^}]*\}\s*from\s*["']\.\/_wstart_diagnostic_helpers(?:\.js)?["']/.test(liveCodeOnly),
+    "WLIFE04: live file MUST import observeLifecycle from ./_wstart_diagnostic_helpers",
   );
-  // Helper file must wrap the barrier in
-  // Promise.race + setTimeout (the bounded deadline).
+  // (b) terminateAndProveWitness AWAITS
+  //     observeLifecycle(port, {...}) — proves the
+  //     helper is on the live path (not just imported
+  //     and unused).
+  assert.ok(
+    /terminateAndProveWitness[\s\S]*?\bawait\s+observeLifecycle\s*\(/.test(liveCodeOnly) ||
+      /observeLifecycle[\s\S]*?\bawait\b[\s\S]*?\)/.test(liveCodeOnly),
+    "WLIFE04: live file MUST await observeLifecycle(...) inside terminateAndProveWitness",
+  );
+  // (c) Helper wraps the barrier with
+  //     Promise.race + setTimeout + clearTimeout so
+  //     the bounded deadline is mechanical, not
+  //     accidental.
   assert.ok(
     /whenBootstrapOutputClosed/.test(helperText),
     "WLIFE04: helper must implement whenBootstrapOutputClosed()",

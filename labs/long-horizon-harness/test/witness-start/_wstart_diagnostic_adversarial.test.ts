@@ -1,34 +1,43 @@
 /**
- * FOUNDATION04 — PHASE A — REBURN-CORRECTION01-MICROFIX02
+ * FOUNDATION04 — PHASE A — REBURN-CORRECTION01-MICROFIX03
  *
  * Adversarial oracles for the WSTART diagnostic
  * packet. These oracles pin the orthogonal-channel
- * law:
+ * law AND the corrected process/error algebra:
  *
  *   process-lifecycle evidence     ≡  processExitObservation
- *                                    ∪ errorEventObserved
+ *                                    (exit | timeout | unavailable)
+ *   error channel                  ≡  errorEventObserved
+ *                                    (independent of processExitObservation)
  *   stdio-output accounting        ≡  bootstrapOutputBoundary
  *
- * The two channels are NEVER collapsed. An output
- * boundary that resolves while the process is still
- * alive MUST NOT be promoted to lifecycle authority;
- * a process that exits while the output barrier is
- * still pending MUST NOT be hidden behind an
- * unresolved boundary.
+ * The three channels are NEVER collapsed.
+ *
+ * Critical laws pinned by these oracles:
+ *
+ *   1. An output boundary that resolves while the
+ *      process is still alive MUST NOT be promoted
+ *      to lifecycle authority (WDIAG04).
+ *
+ *   2. An 'error' event does NOT terminate the
+ *      process-exit observation window. Node
+ *      explicitly documents that after 'error' an
+ *      'exit' may still fire. The error evidence
+ *      is recorded in errorEventObserved; the
+ *      process channel keeps waiting for 'exit' or
+ *      for the bounded deadline (WDIAG02, WDIAG09).
+ *
+ *   3. The T2 (post-proof) sample is taken AFTER
+ *      proveChildAbsent resolves. Sampling before
+ *      the oracle (MICROFIX02 bug) would emit a
+ *      stale snapshot whose name is dishonest
+ *      (WDIAG08).
  *
  * These oracles are deterministic — they use fake
  * handles and synthetic emission timing so they
  * execute even on hosts where the live witness
  * cannot be spawned (UDS path too long, kernel
  * denying SIGKILL, etc.).
- *
- * The crucial regression oracle is WDIAG04: an
- * output boundary that resolves while the process
- * remains alive MUST be classified as
- * `processExitObservation.kind !== "exit"`. The
- * previous conceptual model (which labeled the
- * post-boundary exitInfo as authoritative process
- * evidence) would have classified it incorrectly.
  */
 
 import { test } from "node:test";
@@ -37,7 +46,6 @@ import assert from "node:assert/strict";
 import {
   observeLifecycle,
   type DiagnosticPort,
-  type ProcessExitObservation,
 } from "./_wstart_diagnostic_helpers.js";
 
 /**
@@ -145,15 +153,21 @@ test("WDIAG01: exit synchronously during kill → processExitObservation={kind:'
 });
 
 // ----------------------------------------------------------------------
-// WDIAG02 — error event asynchronously after the kill is
-// observed as `errorEventObserved.seen === true` AND
-// `processExitObservation.kind === "error"`. The fake
-// fires the error on a `setImmediate`-after-microtask
-// delay to PROVE the previous one-microtask window was
-// unsound — the new code MUST keep the listener armed
-// past microtask boundaries.
+// WDIAG02 — error event asynchronously after the kill,
+// NO subsequent exit. The error is recorded in
+// `errorEventObserved.seen === true`. The
+// `processExitObservation` channel does NOT settle
+// on the error — it MUST wait for `exit` or for the
+// bounded deadline. Since no exit fires in this
+// scenario, the process observation settles as
+// `{kind:'timeout'}`.
+// (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX03)
+// Previous version of this oracle pinned the
+// WRONG algebra: processExitObservation={kind:'error'}
+// on async error. That was the category mistake.
+// The error listener is NOT on the process race.
 // ----------------------------------------------------------------------
-test("WDIAG02: error asynchronously after kill → errorEventObserved.seen=true, processExitObservation={kind:'error'}", async () => {
+test("WDIAG02: error asynchronously after kill (no exit) → errorEventObserved.seen=true, processExitObservation={kind:'timeout'}", async () => {
   const fake = makeFakeHandle({ pid: 900_002 });
   setImmediate(() => {
     const err = Object.assign(new Error("EPERM: cannot kill"), {
@@ -162,7 +176,7 @@ test("WDIAG02: error asynchronously after kill → errorEventObserved.seen=true,
     fake.fireError(err);
   });
   const r = await observeLifecycle(fake.port, {
-    processDeadlineMs: 500,
+    processDeadlineMs: 80,
     outputDeadlineMs: 500,
   });
   assert.equal(r.errorEventObserved.seen, true,
@@ -172,8 +186,12 @@ test("WDIAG02: error asynchronously after kill → errorEventObserved.seen=true,
     assert.equal(r.errorEventObserved.code, "EPERM",
       "WDIAG02: error code must be EPERM");
   }
-  assert.equal(r.processExitObservation.kind, "error",
-    "WDIAG02: processExitObservation MUST be {kind:'error'} when error fires without exit; got " +
+  // The error did NOT terminate the process-exit
+  // observation window. The process observation
+  // waited for `exit` (never fired) and settled as
+  // `timeout` after the bounded deadline.
+  assert.equal(r.processExitObservation.kind, "timeout",
+    "WDIAG02: processExitObservation MUST be {kind:'timeout'} when error fires WITHOUT exit; got " +
       JSON.stringify(r.processExitObservation));
 });
 
@@ -273,12 +291,16 @@ test("WDIAG05: output boundary error is orthogonal to process exit", async () =>
 // ----------------------------------------------------------------------
 // WDIAG06 — kill returns false is recorded as
 // `signalRequestOutcome={kind:'returned_false'}` and is
-// NOT promoted to a kernel-rejection claim.
+// NOT promoted to a kernel-rejection claim. The
+// process-observation window keeps waiting for `exit`
+// or for the bounded deadline. Since no `exit` fires
+// in this scenario, the process observation settles
+// as `{kind:'timeout'}` (NOT as an error classification).
 // ----------------------------------------------------------------------
-test("WDIAG06: kill() returns false → signalRequestOutcome={kind:'returned_false'}, no EPERM claim", async () => {
+test("WDIAG06: kill() returns false → signalRequestOutcome={kind:'returned_false'}, process settles as timeout (not error)", async () => {
   const fake = makeFakeHandle({ pid: 900_006, killReturns: false });
   const r = await observeLifecycle(fake.port, {
-    processDeadlineMs: 100,
+    processDeadlineMs: 80,
     outputDeadlineMs: 200,
   });
   assert.equal(r.signalRequestOutcome.kind, "returned_false",
@@ -286,12 +308,13 @@ test("WDIAG06: kill() returns false → signalRequestOutcome={kind:'returned_fal
       JSON.stringify(r.signalRequestOutcome));
   assert.equal(r.errorEventObserved.seen, false,
     "WDIAG06: a kill that returned false alone MUST NOT mint an error event");
-  assert.notEqual(
-    (r.processExitObservation as ProcessExitObservation).kind,
-    "error",
-    "WDIAG06: returned_false is not an error classification; got " +
-      JSON.stringify(r.processExitObservation),
-  );
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX03)
+  // Under the corrected algebra, the process channel
+  // has NO 'error' kind. A returned_false kill that
+  // never sees 'exit' settles as {kind:'timeout'}.
+  assert.equal(r.processExitObservation.kind, "timeout",
+    "WDIAG06: returned_false kill with no exit MUST settle as {kind:'timeout'}; got " +
+      JSON.stringify(r.processExitObservation));
 });
 
 // ----------------------------------------------------------------------
@@ -317,5 +340,167 @@ test("WDIAG07: pre-exited child → processExitObservation={kind:'exit'} with T0
       "WDIAG07: code preserved as 137");
     assert.equal(r.processExitObservation.signal, "SIGKILL",
       "WDIAG07: signal preserved as SIGKILL");
+  }
+});
+
+// ----------------------------------------------------------------------
+// WDIAG08 — T2 ordering: the post-proof exitInfo
+// sample MUST be taken AFTER the proof oracle
+// resolves, not before. This is the regression
+// oracle for the T2 typo the reviewer caught in
+// MICROFIX02's live code: `exitInfoAfterProof =
+// readExitInfo()` was sampled BEFORE
+// `proveChildAbsent(child)` resolved.
+//
+// This oracle has TWO parts:
+//
+//   (1) Behavioral part — drives a fake port
+//       through a hand-rolled "proof-equivalent":
+//       exitInfo.exited flips from false to true
+//       on a deferred tick. After the
+//       proof-equivalent, a T2 sample MUST observe
+//       exited=true. Before the proof-equivalent,
+//       it would observe exited=false.
+//
+//   (2) Static-guard part — reads the LIVE test
+//       file's source and mechanically verifies
+//       that the `exitInfoAfterProof = readExitInfo()`
+//       assignment appears AFTER the
+//       `await proveChildAbsent(child)` call. If a
+//       future regression reorders them, WDIAG08
+//       fails.
+//
+// The MICROFIX02 bug had the assignment BEFORE the
+// await — that ordering would have produced a stale
+// T2 sample whose name was dishonest.
+// ----------------------------------------------------------------------
+test("WDIAG08: T2 (post-proof) exitInfo sample MUST be taken AFTER the proof oracle resolves", async () => {
+  const { promises: fs } = await import("node:fs");
+  const liveUrl = new URL(
+    "../witness-start/witness-start-live.test.ts",
+    import.meta.url,
+  );
+  const liveText = await fs.readFile(liveUrl, "utf8");
+  // Strip comments so comment text can't satisfy
+  // the static guard.
+  const liveCodeOnly = liveText
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/\s+\/\/.*$/g, "");
+
+  // (1) BEHAVIORAL: a T2 sample taken after a
+  //     proof-equivalent that flips state MUST
+  //     observe the new state.
+  const fake = makeFakeHandle({ pid: 900_008 });
+  assert.equal(fake.port.exitInfo?.().exited, false,
+    "WDIAG08: T0 starts with exited=false");
+  // Hand-rolled "proof oracle": flip exitInfo.exited
+  // to true on a deferred tick.
+  await new Promise<void>((res) => {
+    setImmediate(() => {
+      fake.fireExit(0, "SIGTERM");
+      res();
+    });
+  });
+  const exitInfoAfterProof = fake.port.exitInfo?.();
+  assert.equal(exitInfoAfterProof?.exited, true,
+    "WDIAG08: T2 sample taken AFTER the proof-equivalent MUST observe exited=true; got " +
+      JSON.stringify(exitInfoAfterProof));
+
+  // (2) STATIC-GUARD: in the live test file, the
+  //     `exitInfoAfterProof = readExitInfo()` line
+  //     MUST appear AFTER `await proveChildAbsent`.
+  //     If it appears BEFORE, the field's name is
+  //     dishonest (stale snapshot).
+  const proveMatch = /await\s+proveChildAbsent\s*\(\s*child\s*\)/.exec(liveCodeOnly);
+  const t2Match = /exitInfoAfterProof\s*=\s*readExitInfo\s*\(/.exec(liveCodeOnly);
+  assert.ok(proveMatch !== null,
+    "WDIAG08: live file must contain `await proveChildAbsent(child)`");
+  assert.ok(t2Match !== null,
+    "WDIAG08: live file must contain `exitInfoAfterProof = readExitInfo()`");
+  assert.ok(
+    (t2Match?.index ?? 0) > (proveMatch?.index ?? 0),
+    "WDIAG08: `exitInfoAfterProof = readExitInfo()` MUST appear AFTER " +
+      "`await proveChildAbsent(child)` (regression: T2 ordering typo in MICROFIX02). " +
+      "The T2 sample's NAME requires that the read happens post-proof.",
+  );
+});
+
+// ----------------------------------------------------------------------
+// WDIAG09 — error first, then later exit. This is
+// the DECISIVE FALSIFIER for the MICROFIX02 algebra
+// (where 'error' terminated the process-exit window
+// and pinned processExitObservation={kind:'error'}).
+//
+// Under the corrected algebra:
+//   - The error event is recorded in
+//     errorEventObserved.seen=true.
+//   - The process-exit observation window does NOT
+//     terminate on the error; it keeps waiting for
+//     `exit` or the bounded deadline.
+//   - When `exit` finally fires (after the error,
+//     Node-permitted), processExitObservation settles
+//     as {kind:'exit'}.
+//
+// Under the previous algebra, the `error` listener
+// resolved the helper's race on `errorSettled`. The
+// helper then proceeded to the bootstrap output wait.
+// Because we make the output barrier resolve
+// IMMEDIATELY (no_barrier / 0ms) under this oracle,
+// the helper returned BEFORE the late `exit` fired,
+// and the packet would have settled
+// processExitObservation={kind:'error'}.
+//
+// This oracle is constructed so that, under the OLD
+// code (where 'error' is on the race), the helper
+// returns BEFORE the late exit — making
+// processExitObservation={kind:'error'} observable.
+// Under the NEW code (where 'error' is NOT on the
+// race), the helper waits for the late exit and
+// returns processExitObservation={kind:'exit'}.
+// ----------------------------------------------------------------------
+test("WDIAG09: error first, then later exit → errorEventObserved.seen=true, processExitObservation={kind:'exit'}", async () => {
+  const fake = makeFakeHandle({ pid: 900_009 });
+  // Drop the bootstrap output barrier entirely so
+  // the helper's bootstrap wait is a no-op (returns
+  // immediately as no_barrier). Under the OLD code,
+  // this means the helper returns IMMEDIATELY after
+  // the error fires — BEFORE the late `exit`.
+  const port: DiagnosticPort = {
+    ...fake.port,
+    whenBootstrapOutputClosed: undefined,
+  };
+  // Fire `error` first (5ms), then `exit` much
+  // later (well past what the OLD code would need
+  // to return). Both are within processDeadlineMs
+  // so the NEW code's race can still see the exit.
+  setTimeout(() => {
+    const err = Object.assign(new Error("EPERM: cannot kill"), {
+      code: "EPERM",
+    });
+    fake.fireError(err);
+  }, 5);
+  setTimeout(() => fake.fireExit(0, "SIGTERM"), 150);
+  const r = await observeLifecycle(port, {
+    processDeadlineMs: 500,
+    outputDeadlineMs: 1, // almost-immediate output barrier
+  });
+  assert.equal(r.errorEventObserved.seen, true,
+    "WDIAG09: error evidence MUST be preserved even when exit fires later; got " +
+      JSON.stringify(r.errorEventObserved));
+  if (r.errorEventObserved.seen) {
+    assert.equal(r.errorEventObserved.code, "EPERM",
+      "WDIAG09: error code is EPERM");
+  }
+  // The process channel kept waiting past the
+  // error and observed the later exit.
+  assert.equal(r.processExitObservation.kind, "exit",
+    "WDIAG09: late `exit` MUST still be observed as {kind:'exit'}; the error MUST NOT have terminated the window. Got " +
+      JSON.stringify(r.processExitObservation));
+  if (r.processExitObservation.kind === "exit") {
+    assert.equal(r.processExitObservation.code, 0,
+      "WDIAG09: exit code 0");
+    assert.equal(r.processExitObservation.signal, "SIGTERM",
+      "WDIAG09: exit signal SIGTERM");
   }
 });

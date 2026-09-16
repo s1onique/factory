@@ -108,13 +108,19 @@ async function terminateAndProveWitness(
   // shared helper. The helper exposes two orthogonal
   // channels:
   //   processExitObservation   — process lifecycle
+  //                              (settled only by
+  //                               'exit' or by the
+  //                               bounded deadline)
   //   bootstrapOutputBoundary  — stdio accounting
   // The live packet below records BOTH as
   // independent facts and derives its lifecycle
   // classification exclusively from
   // processExitObservation (and from
   // errorEventObserved). It NEVER promotes the
-  // output boundary to lifecycle authority.
+  // output boundary to lifecycle authority, and
+  // it NEVER treats an 'error' event as a process-
+  // completion signal. WDIAG02 and WDIAG09 pin the
+  // error/process algebra.
   // ─────────────────────────────────────────────
   const tBefore = Date.now();
   const onAdapter = ((child as unknown) as {
@@ -141,6 +147,10 @@ async function terminateAndProveWitness(
           }
         }
       : undefined,
+    // The error listener routes ONLY into the
+    // helper's `errorEventObserved` channel. It
+    // does NOT feed `processExitObservation` — that
+    // would be the MICROFIX02 category mistake.
     onError: typeof onAdapter === "function"
       ? (event, listener) => {
           if (event === "error") {
@@ -190,8 +200,6 @@ async function terminateAndProveWitness(
       return null;
     }
   }
-  const exitInfoAfterProof = readExitInfo();
-
   // ─────────────────────────────────────────────
   // ORACLE call. Observation-only — performs NO
   // kill. The previous kill is owned by this test
@@ -200,12 +208,42 @@ async function terminateAndProveWitness(
   const tProveBefore = Date.now();
   const r = await proveChildAbsent(child);
   const tProveAfter = Date.now();
-  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX02)
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX03)
+  // T2 sample MUST be taken AFTER the oracle resolves.
+  // Sampling before the oracle (the MICROFIX02 bug)
+  // would emit a stale snapshot whose name — "After
+  // Proof" — is dishonest. The oracle may itself
+  // cause the handle's exitInfo to flip (signal-
+  // driven reaping, in-kernel ESRCH after signal),
+  // so the post-proof sample is the only one that
+  // can honestly bear that name. WDIAG08 mechanically
+  // pins this ordering against any future regression.
+  const exitInfoAfterProof = readExitInfo();
+  // (FOUNDATION04 PHASE A — REBURN-CORRECTION01-MICROFIX03)
   // Build and emit the typed
   // WSTART_LIVE01_ABSENCE_DIAGNOSTIC packet. The
   // schema is the one pinned by
   // _wstart_diagnostic_helpers.ts; this packet is
   // observation-only evidence at every stage.
+  //
+  // MICROFIX03 packet shape (vs MICROFIX02):
+  //
+  //   FIXED   — exitInfoAfterProof is now sampled
+  //             AFTER proveChildAbsent() resolves
+  //             (was BEFORE — MICROFIX02 bug). The
+  //             T2 sample's NAME is now honest.
+  //             WDIAG08 mechanically pins this
+  //             ordering.
+  //
+  //   CHANGED — processExitObservation.kind is
+  //             now one of {exit, timeout,
+  //             unavailable} — NEVER 'error'.
+  //             'error' was wrongly terminating
+  //             the process-observation window.
+  //             Error evidence lives in the
+  //             independent errorEventObserved
+  //             channel. WDIAG09 mechanically
+  //             proves the corrected algebra.
   //
   // MICROFIX02 packet shape (vs MICROFIX01):
   //
@@ -221,8 +259,8 @@ async function terminateAndProveWitness(
   //             honestly named)
   //   ADDED   — processExitObservation
   //             (NEW orthogonal dimension, driven
-  //             by the handle's 'exit' and 'error'
-  //             events, armed BEFORE kill)
+  //             by the handle's 'exit' event,
+  //             armed BEFORE kill)
   //   ADDED   — exitInfoAfterProcessObservation
   //             (NEW T1a sample, taken after
   //             process observation settles, NOT
