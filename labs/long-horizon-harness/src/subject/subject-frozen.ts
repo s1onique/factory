@@ -152,14 +152,13 @@ export function freezeSubject(
     };
     Object.freeze(wrapper);
     return { ok: true, value: wrapper };
-  } catch (e: unknown) {
+  } catch {
     return {
       ok: false,
       failure: {
         kind: "boundary_exception",
         reason:
-          "boundary_exception during freeze: " +
-          (e instanceof Error ? e.message : String(e)),
+          "boundary_exception during freeze: opaque thrown value",
       },
     };
   }

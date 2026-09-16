@@ -36,6 +36,7 @@ export {
 } from "./subject-id.js";
 export {
   validateJsonValue,
+  snapshotJsonValue,
   type JsonPrimitive,
   type JsonValue,
   type JsonValidation,

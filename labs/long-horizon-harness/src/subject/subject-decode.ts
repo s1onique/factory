@@ -38,7 +38,7 @@
  */
 
 import { computeSubjectId } from "./subject-id.js";
-import { validateJsonValue } from "./subject-json.js";
+import { snapshotJsonValue, type JsonValue } from "./subject-json.js";
 import {
   SUBJECT_SCHEMA_VERSION,
   makeExperimentId,
@@ -122,6 +122,13 @@ export type SubjectDecodeResult =
 /**
  * Construct a typed branded id, surfacing failures as
  * SubjectDecodeFailure rather than throwing.
+ *
+ * D-M04: the catch NEVER inspects the caught value via
+ * `instanceof Error` or `String(e)`. Both can themselves
+ * throw on hostile thrown Proxies whose `getPrototypeOf`
+ * or `toString` traps escape during introspection. We
+ * route every catch through the same opaque reason; the
+ * `kind` carries the diagnostic value.
  */
 function brandOrFail<T extends string>(
   field: string,
@@ -131,12 +138,11 @@ function brandOrFail<T extends string>(
 ): T {
   try {
     return construct(value);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+  } catch {
     reasons.push({
       kind: "id_construction",
       field,
-      reason: msg,
+      reason: "id_construction threw an opaque error",
     });
     return "" as T;
   }
@@ -154,10 +160,10 @@ function brandOrFail<T extends string>(
  * typed failure; there is no `throw` site reachable from
  * caller input.
  *
- * Proxy / hostile-input semantics (D-M01):
+ * Proxy / hostile-input semantics (D-M01, D-M04):
  *
  *   Although the inner validators (validateSubjectManifest,
- *   validateJsonValue) wrap their own bodies in try/catch
+ *   snapshotJsonValue) wrap their own bodies in try/catch
  *   for Proxy-trap defense, the decoder itself performs
  *   `String(...)`, `Number(...)`, and object-property reads
  *   directly on caller-controlled values to compose the
@@ -167,19 +173,21 @@ function brandOrFail<T extends string>(
  *   the public contract: `decodeSubjectManifest(unknown)`
  *   NEVER throws.
  *
- *   On escape, returns a typed `boundary_exception` failure.
+ *   On escape, returns a typed `boundary_exception` failure
+ *   with an OPAQUE reason — we never introspect the caught
+ *   value because that introspection can itself throw on
+ *   a hostile thrown Proxy (D-M04).
  */
 export function decodeSubjectManifest(input: unknown): SubjectDecodeResult {
   try {
     return decodeSubjectManifestInner(input);
-  } catch (e: unknown) {
+  } catch {
     return {
       ok: false,
       failure: {
         kind: "boundary_exception",
         reason:
-          "boundary_exception during manifest decoding: " +
-          (e instanceof Error ? e.message : String(e)),
+          "boundary_exception during manifest decoding: opaque thrown value",
       },
     };
   }
@@ -229,25 +237,36 @@ function decodeSubjectManifestInner(input: unknown): SubjectDecodeResult {
     };
   }
 
-  // (3) Recursive JsonValue validation of model.configuration.
-  //    `validateSubjectManifest` returned ok:true, so we have
-  //    mechanically verified that input is a plain object —
-  //    narrow it once here for the rest of the function.
+  // (3) Recursive JsonValue snapshot of model.configuration.
+  //
+  //    D-M05: this is where the trust boundary CLOSES for
+  //    open-world substructure. After `snapshotJsonValue`
+  //    returns ok:true, `configuration` is an INERT OWNED
+  //    tree containing only fresh primitives, dense Arrays,
+  //    and plain Records. There are no references back into
+  //    the caller's object graph; mutating the input after
+  //    this point cannot affect the SubjectId.
+  //
+  //    `validateSubjectManifest` returned ok:true, so we
+  //    have mechanically verified that input is a plain
+  //    object — narrow it once here for the rest of the
+  //    function.
   const root0 = input as Record<string, unknown>;
   const model0 = root0.model as Record<string, unknown>;
-  const configCheck = validateJsonValue(
+  const configSnap = snapshotJsonValue(
     model0.configuration,
     "model.configuration",
   );
-  if (!configCheck.ok) {
-    // Same plumbing as (2): boundary_exception reasons
-    // are surfaced as their own kind.
-    if (configCheck.reason.includes("boundary_exception")) {
+  if (!configSnap.ok) {
+    // The snapshotter reports `boundary_exception` for
+    // Proxy-trap escapes; surface that as the same typed
+    // kind as (2) so callers pattern-match uniformly.
+    if (configSnap.reason.includes("boundary_exception")) {
       return {
         ok: false,
         failure: {
           kind: "boundary_exception",
-          reason: configCheck.reason,
+          reason: configSnap.reason,
         },
       };
     }
@@ -255,10 +274,12 @@ function decodeSubjectManifestInner(input: unknown): SubjectDecodeResult {
       ok: false,
       failure: {
         kind: "configuration_value",
-        reason: configCheck.reason,
+        reason: configSnap.reason,
       },
     };
   }
+  // OWNED inert JsonValue. Never alias back to `input`.
+  const configuration: JsonValue = configSnap.value;
 
   // (4) Compose the typed SubjectManifest.
   const root = input as Record<string, unknown>;
@@ -293,10 +314,8 @@ function decodeSubjectManifestInner(input: unknown): SubjectDecodeResult {
 
   // Note on configuration freezing: the decoder does NOT
   // freeze here. freezeSubject (subject-frozen.ts) is the
-  // single chokepoint for deep-freeze.
-  const configuration = modelIn.configuration as Readonly<
-    Record<string, unknown>
-  >;
+  // single chokepoint for deep-freeze. `configuration` is
+  // already an INERT OWNED JsonValue from step (3).
 
   const harness: SubjectHarness = {
     id: String(harnessIn.id),

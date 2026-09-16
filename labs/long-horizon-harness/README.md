@@ -695,10 +695,24 @@ SUBJECT_SCHEMA_VERSIONING       = PASS
 SUBJECT_DECODER_FAIL_CLOSED     = PASS  (DEC02, DEC07, JSON07–09)
 UNKNOWN_FIELDS_POLICY           = EXPLICIT (fail-closed)
 NESTED_CLOSED_WORLD             = PASS  (CLOSED01–03)
-CONFIGURATION_JSON_BOUNDARY     = PASS  (JSON01–06)
-DECODER_BOUNDARY_TOTALITY       = PASS  (D-M01: NEVER throws)
+CONFIGURATION_JSON_BOUNDARY     = PASS  (JSON01–06, JSON11–13)
+DECODER_BOUNDARY_TOTALITY       = PASS  (D-M01 + D-M04: NEVER
+                                            throws; opaque catch)
 JSON_PATH_CYCLE_SEMANTICS       = PASS  (D-M02: shared DAG ok,
                                             true back-edge rejected)
+INERT_OWNED_JSON_SNAPSHOT       = PASS  (D-M05: SubjectId is a
+                                            function of captured
+                                            inert storage, not
+                                            caller live graph)
+SHAPE_CLOSED_WORLD_REJECTION    = PASS  (D-M06: accessors,
+                                            symbol keys,
+                                            non-enumerable keys,
+                                            sparse arrays all
+                                            rejected — SNAP01–09)
+CALLER_MUTATION_ISOLATION       = PASS  (D-M07: mutating input
+                                            after decode cannot
+                                            affect DecodedSubject
+                                            — SNAP08, SNAP10)
 CANONICAL_HASH_DETERMINISTIC    = PASS
 SUBJECT_ID_CONTENT_BOUND        = PASS
 REPO_REVISION_BOUND             = PASS

@@ -195,12 +195,11 @@ function requireClosedWorldKeys(
 export function validateSubjectManifest(value: unknown): SubjectValidation {
   try {
     return validateSubjectManifestInner(value);
-  } catch (e: unknown) {
+  } catch {
     return {
       ok: false,
       reason:
-        "boundary_exception during structural validation: " +
-        (e instanceof Error ? e.message : String(e)),
+        "boundary_exception during structural validation: opaque thrown value",
     };
   }
 }

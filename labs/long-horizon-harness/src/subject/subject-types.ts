@@ -52,6 +52,7 @@ import {
   makeHarnessHandle,
   type HarnessHandle,
 } from "../domain/ids.js";
+import type { JsonValue } from "./subject-json.js";
 
 // Re-export IDENTIFIER_GRAMMAR so consumers of subject-types
 // can pull the grammar alongside their subject types without
@@ -225,12 +226,15 @@ export type SubjectHarness = {
  * Model identity and configuration. Configuration is treated
  * as an OPEN JSON namespace (the only one in the manifest)
  * so future knobs do not require schema bumps; the decoder
- * recursively validates its contents as JsonValue.
+ * recursively validates and CLONES its contents into an
+ * INERT OWNED JsonValue (D-M05). Callers receive the owned
+ * snapshot; the caller's live object graph never enters
+ * the manifest.
  */
 export type SubjectModel = {
   readonly provider: string;
   readonly model_id: string;
-  readonly configuration: Readonly<Record<string, unknown>>;
+  readonly configuration: JsonValue;
 };
 
 /**

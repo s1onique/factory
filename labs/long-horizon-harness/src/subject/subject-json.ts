@@ -1,5 +1,5 @@
 /**
- * FOUNDATION04 — PHASE D — Experiment Subject Contract.
+ * FOUNDATION04 - PHASE D - Experiment Subject Contract.
  *
  * The JSON-value trust boundary.
  *
@@ -9,52 +9,72 @@
  *
  *   - the JsonValue type (a subset of `unknown` that
  *     canonicalize() can encode without loss or throwing)
- *   - a recursive validator that REJECTS every JavaScript
- *     value that canonicalize() would either throw on or
- *     silently reshape
+ *   - `snapshotJsonValue`, which BOTH validates AND produces
+ *     an INERT OWNED deep-clone - a freshly-allocated
+ *     primitive/array/plain-object tree built from the
+ *     caller-controlled input but containing NO references
+ *     back to it.
  *
- * Why a separate module:
+ * Why "snapshot, don't bless" (D-M05):
  *
- *   The decoder (subject-decode.ts) accepts `unknown`. Per
- *   doctrine it NEVER throws. canonicalize() throws on
- *   unsupported value types and on non-finite numbers. So if
- *   the decoder passes a raw `unknown` containing, say,
- *   `undefined` or `NaN` into computeSubjectId(), the decoder
- *   breaks its own contract.
+ *   A trust boundary that returns the caller's live object
+ *   graph - even after validating it - is still leaking
+ *   storage. The caller can mutate the object after we
+ *   returned it; a getter can change its returned value
+ *   between two reads; a Proxy can rearrange its keys.
+ *   None of those is a "validation bug" in the classical
+ *   sense, but ALL of them violate the Phase D identity
+ *   invariant: the SubjectId must be a function of the
+ *   captured content, not of a particular moment in some
+ *   attacker's mutable graph.
  *
- *   The fix is a recursive JsonValue validator that runs at
- *   the trust boundary, BEFORE computeSubjectId. After it
- *   passes, canonicalize() is mechanically total over the
- *   remaining value.
+ *   The fix: every JsonValue the boundary accepts is
+ *   CONSTRUCTED by this module. The caller never sees a
+ *   reference; the returned tree contains only owned
+ *   primitives, freshly-allocated Arrays, and freshly-
+ *   allocated plain records.
  *
- * Design choices (doctrine):
+ * Rejected shapes (D-M06):
  *
- *   - "JSON value" is defined as: null, boolean, finite number,
- *     string, array of JSON values, plain object of JSON values.
- *   - The validator REJECTS BigInt, Symbol, Function, Date, Map,
- *     Set, Promise, ArrayBuffer, TypedArray, RegExp, and any
- *     other exotic object — even if their `toJSON()` would
- *     round-trip. The reason is that RFC 8785 / JCS only
- *     accepts a closed set of shapes, and silent coercion is
- *     exactly the failure mode Phase D doctrine prohibits.
- *   - Cycles are rejected. Acyclic is enforced.
+ *   The snapshotter REJECTS:
+ *     - symbol own-keys
+ *     - non-enumerable own-keys
+ *     - accessor descriptors (get/set present)
+ *     - sparse-array holes
+ *     - exotic prototypes (anything other than
+ *       Object.prototype or null)
+ *     - non-plain values (Date, Map, Set, Promise, ...)
+ *     - non-finite numbers
+ *     - undefined / bigint / function primitives
+ *     - Proxy traps that throw (boundary_exception)
  *
- *   The validator NEVER throws. It returns a discriminated
- *   union so callers can present every problem at once.
+ * Path-cycle semantics (D-M02):
  *
- * This module is pure: no I/O, no fs, no network.
+ *   The same object reached via two different paths in an
+ *   acyclic DAG is FINE. We CLONE it at each occurrence so
+ *   the resulting snapshot has independent storage; the
+ *   caller can mutate one without affecting the other.
+ *   True recursive back-edges (obj.self = obj) are
+ *   REJECTED with reason `cyclic value is not a JsonValue`.
+ *
+ * Proxy / hostile-input semantics (D-M01, D-M04):
+ *
+ *   Every Reflect/Object operation that can be intercepted
+ *   by a Proxy runs inside an outer try/catch. The catch
+ *   NEVER inspects the thrown value via `instanceof Error`
+ *   or `String(e)` - both of those can themselves throw on
+ *   hostile thrown Proxies whose own getPrototypeOf /
+ *   toString traps escape during the introspection.
+ *
+ *   The catch returns a constant opaque reason:
+ *     `${path}: boundary_exception: opaque thrown value`
+ *
+ *   The kind is the evidence; the message is intentionally
+ *   opaque to the attacker.
  */
 
 /**
  * The closed-world definition of a JSON value.
- *
- *   - JsonPrimitive : null | boolean | finite number | string
- *   - JsonValue     : JsonPrimitive | JsonArray | JsonObject
- *   - JsonArray     : readonly array of JsonValue
- *   - JsonObject    : plain object whose values are JsonValue
- *
- * The "finite number" constraint is enforced at runtime by
- * validateJsonValue; the type expresses the domain.
  */
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue =
@@ -75,90 +95,49 @@ function fail(reason: string): JsonValidation {
 }
 
 /**
- * Recursively validate that `value` is a well-formed JsonValue
- * (i.e. encodeable by canonicalize without throwing or silent
- * reshaping). NEVER throws on hostile JavaScript input.
- *
- * On success returns `{ ok: true, value }` where `value` is the
- * SAME object reference as the input (no defensive copy is
- * made; the decoder is responsible for the closed-world
- * reshape and the deep-freeze step).
- *
- * On failure returns `{ ok: false, reason }` describing the
- * FIRST violation found. The validator short-circuits at the
- * first violation — JsonValue has no notion of "partial
- * validity".
- *
- * Path-cycle semantics (D-M02):
- *
- *   `ancestors` is a RECURSION-STACK set: the object currently
- *   being traversed on the active call path. It is added on
- *   entry and removed on exit (try/finally). Acyclic shared
- *   substructure — `{ left: shared, right: shared }` — is
- *   accepted, because `shared` is on the stack only during
- *   the traversal of one branch and removed before the next.
- *   True recursive back-edges — `obj.self = obj` — are
- *   rejected, because `obj` is still on the stack when
- *   re-encountered.
- *
- * Proxy / hostile-input semantics (D-M01):
- *
- *   JavaScript Proxy traps can throw on `Object.keys`,
- *   `Object.getPrototypeOf`, or property access. To keep the
- *   `validateJsonValue(unknown): JsonValidation` contract
- *   literally true (NEVER throws), the entire body runs
- *   inside an outer try/catch that converts any escape into
- *   a typed `boundary_exception` reason.
+ * Recursively snapshot a caller-controlled unknown into an
+ * INERT OWNED JsonValue. NEVER throws on hostile input.
  */
-export function validateJsonValue(
+export function snapshotJsonValue(
   value: unknown,
   path: string = "$",
-  ancestors: Set<object> = new Set<object>(),
 ): JsonValidation {
+  // The OUTER try/catch converts thrown Proxy traps into a
+  // typed failure. It must NEVER inspect the caught value
+  // (D-M04) - `instanceof Error` and `String(e)` can both
+  // throw on hostile thrown Proxies whose own getPrototypeOf
+  // / toString traps escape during the introspection.
   try {
-    return validateJsonValueInner(value, path, ancestors);
-  } catch (e: unknown) {
+    return snapshotJsonValueInner(value, path, new Set<object>());
+  } catch {
     return {
       ok: false,
       reason:
-        `${path}: boundary_exception during JsonValue validation: ` +
-        (e instanceof Error ? e.message : String(e)),
+        `${path}: boundary_exception: opaque thrown value`,
     };
   }
 }
 
-function validateJsonValueInner(
+function snapshotJsonValueInner(
   value: unknown,
   path: string,
   ancestors: Set<object>,
 ): JsonValidation {
-  // null
   if (value === null) {
     return ok(null);
   }
-
-  // primitive: boolean
   if (typeof value === "boolean") {
     return ok(value);
   }
-
-  // primitive: number — must be finite
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
       return fail(`${path}: non-finite number is not a JsonValue`);
     }
     return ok(value);
   }
-
-  // primitive: string
   if (typeof value === "string") {
     return ok(value);
   }
-
-  // Anything else with `typeof === "object"` must be either
-  // an array or a plain object. Everything else (Date, Map,
-  // Set, Promise, ArrayBuffer, TypedArray, RegExp, custom
-  // class instances, etc.) is rejected.
   if (typeof value !== "object") {
     return fail(
       `${path}: unsupported JSON-value type ${typeof value} ` +
@@ -168,50 +147,108 @@ function validateJsonValueInner(
 
   const obj = value as object;
 
-  // Cycle guard (D-M02): the object is on the CURRENT
-  // recursion path iff ancestors has it. The set is
-  // maintained as a stack — add on entry, delete on exit —
-  // so acyclic shared substructure is accepted and only true
-  // back-edges are rejected.
+  // Cycle guard (D-M02): reject recursive back-edges;
+  // allow acyclic shared substructure (each occurrence is
+  // independently cloned).
   if (ancestors.has(obj)) {
     return fail(`${path}: cyclic value is not a JsonValue`);
   }
   ancestors.add(obj);
   try {
     if (Array.isArray(value)) {
-      for (let i = 0; i < value.length; i++) {
-        const r = validateJsonValueInner(
-          value[i],
-          `${path}[${i}]`,
-          ancestors,
-        );
+      const src = value as ReadonlyArray<unknown>;
+      const len = src.length;
+      const out: JsonValue[] = [];
+      // Build a FRESH dense Array via explicit push. We
+      // never use `new Array(len)` because it produces a
+      // sparse array; instead we push each slot. This
+      // rejects any array with holes (D-M06).
+      for (let i = 0; i < len; i++) {
+        if (!(i in src)) {
+          return fail(`${path}[${i}]: sparse array hole`);
+        }
+        const elem = src[i];
+        if (elem === undefined) {
+          return fail(`${path}[${i}]: undefined is not a JsonValue`);
+        }
+        const r = snapshotJsonValueInner(elem, `${path}[${i}]`, ancestors);
         if (!r.ok) return r;
+        out.push(r.value);
       }
-      return ok(value as ReadonlyArray<JsonValue>);
+      return ok(out as ReadonlyArray<JsonValue>);
     }
 
     // Reject non-plain objects (Date, Map, Set, Promise, ...).
-    // The discriminator is the prototype: only Object.prototype
-    // and null are accepted as "plain object".
-    const proto = Object.getPrototypeOf(obj);
+    const proto = Reflect.getPrototypeOf(obj);
     if (proto !== Object.prototype && proto !== null) {
-      return fail(
-        `${path}: non-plain object (proto=${proto?.constructor?.name ?? "null"}) is not a JsonValue`,
-      );
+      return fail(`${path}: non-plain object is not a JsonValue`);
     }
 
-    // Recurse into each property.
-    const record = obj as Record<string, unknown>;
-    for (const k of Object.keys(record)) {
-      const r = validateJsonValueInner(
-        record[k],
-        `${path}.${k}`,
-        ancestors,
-      );
+    // Walk the OWN keys via Reflect.ownKeys, then classify
+    // each one with Object.getOwnPropertyDescriptor. This
+    // path catches (D-M06):
+    //   - symbol keys
+    //   - non-enumerable string keys
+    //   - accessor descriptors
+    const ownKeys = Reflect.ownKeys(obj);
+    const out: { [k: string]: JsonValue } = {};
+    for (const k of ownKeys) {
+      if (typeof k !== "string") {
+        return fail(`${path}: symbol own-key is not a JsonValue`);
+      }
+      const d = Object.getOwnPropertyDescriptor(obj, k);
+      if (d === undefined) {
+        // A Proxy could return a key from ownKeys that has
+        // no descriptor. Reject - the boundary is hostile.
+        return fail(
+          `${path}.${k}: own-key returned by Reflect.ownKeys has no descriptor`,
+        );
+      }
+      if (!d.enumerable) {
+        return fail(`${path}.${k}: non-enumerable own-key`);
+      }
+      if (d.get !== undefined || d.set !== undefined) {
+        return fail(`${path}.${k}: accessor property`);
+      }
+      // Data descriptor. Note: Node's Proxy handler
+      // normalization (ToPropertyDescriptor) fills in
+      // `{value: undefined, writable: false}` when the trap
+      // returns a malformed descriptor like
+      // `{enumerable:true, configurable:true}` — so we
+      // cannot reliably distinguish "hostile getter" from
+      // "honest undefined property" at this layer. Either
+      // way the snapshotter rejects `value: undefined`,
+      // so the hostile trap cannot smuggle a getter-fired
+      // value past the boundary.
+      const v: unknown = d.value;
+      if (v === undefined) {
+        return fail(`${path}.${k}: undefined is not a JsonValue`);
+      }
+      const r = snapshotJsonValueInner(v, `${path}.${k}`, ancestors);
       if (!r.ok) return r;
+      out[k] = r.value;
     }
-    return ok(obj as { readonly [key: string]: JsonValue });
+    return ok(out as { readonly [k: string]: JsonValue });
   } finally {
     ancestors.delete(obj);
   }
+}
+
+/**
+ * Backwards-compatible validator. Internally calls
+ * snapshotJsonValue and discards the cloned value, returning
+ * only the boolean decision and reason. Existing callers
+ * that only need the "is this a valid JsonValue?" answer
+ * keep working unchanged. NEVER throws on hostile input
+ * (D-M01, D-M04).
+ */
+export function validateJsonValue(
+  value: unknown,
+  path: string = "$",
+): JsonValidation {
+  const r = snapshotJsonValue(value, path);
+  if (r.ok) {
+    return { ok: true, value: null };
+  }
+  return r;
 }

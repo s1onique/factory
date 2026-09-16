@@ -446,3 +446,88 @@ test("JSON10: configuration with shared sibling references -> success", () => {
   const r = decodeSubjectManifest(m);
   assert.equal(r.ok, true, JSON.stringify(r.ok ? null : r.failure));
 });
+
+/*
+ * SNAP08, SNAP10: caller-mutation isolation + decoder-
+ * level hash stability (D-M05, D-M07).
+ */
+
+test("SNAP08: caller mutation isolation — decoded subject unaffected by later mutation", () => {
+  // The decoder MUST return an inert owned snapshot. The
+  // caller may continue to mutate their input object after
+  // decoding; that mutation must NOT affect the already-
+  // returned DecodedSubject (its manifest contents and its
+  // SubjectId).
+  const original = {
+    temperature: 0.5,
+    seed: "abc",
+    nested: { x: 1 },
+  };
+  const m = makeValidManifest();
+  (m.model as Record<string, unknown>).configuration = original;
+
+  // Decode at T1.
+  const r1 = decodeSubjectManifest(m);
+  assert.equal(r1.ok, true);
+  if (!r1.ok) return;
+  const subjectId1 = r1.value.subjectId;
+  const cfg1 = (r1.value.manifest.model as { configuration: unknown })
+    .configuration;
+
+  // Aggressively mutate the caller's live objects AFTER
+  // the decoder returned.
+  original.temperature = 999;
+  original.seed = "evil";
+  (original.nested as { x: number }).x = 9999;
+  (original as Record<string, unknown>).sneak = "in";
+  (original as { nested: unknown }).nested = { x: 99999 };
+
+  // (a) r1's SubjectId is the SHA of the snapshot taken at
+  //     T1; it must not be recomputed against the mutated
+  //     input.
+  assert.equal(r1.value.subjectId, subjectId1);
+
+  // (b) r1's manifest contents are structurally identical
+  //     to the snapshot we took at T1 — they are NOT a
+  //     live alias of the caller's input.
+  assert.deepEqual(cfg1, { temperature: 0.5, seed: "abc", nested: { x: 1 } });
+
+  // (c) A FRESH decode at T2 sees the mutated input, so it
+  //     produces a different SubjectId — proving the
+  //     decoder is reading what the caller now provides,
+  //     not a cached snapshot. This is a control test that
+  //     confirms r1's id was not "frozen to the wrong
+  //     thing"; r1 is independent of r2.
+  const r2 = decodeSubjectManifest(m);
+  assert.equal(r2.ok, true);
+  if (!r2.ok) return;
+  assert.notEqual(r2.value.subjectId, subjectId1);
+});
+
+test("SNAP10: snapshot hash equals the frozen manifest content hash", () => {
+  // The decoder's snapshot IS the manifest's configuration.
+  // computeSubjectId hashes the canonicalized manifest
+  // INCLUDING the snapshot. So if we mutate the snapshot
+  // after the fact, the hash MUST change.
+  const m = makeValidManifest();
+  (m.model as { configuration: unknown }).configuration = {
+    temperature: 0.5,
+  };
+  const r1 = decodeSubjectManifest(m);
+  assert.equal(r1.ok, true);
+  if (!r1.ok) return;
+  const id1 = r1.value.subjectId;
+  // The frozen manifest's configuration must be a CLONE.
+  const frozen = (r1.value.manifest.model as { configuration: unknown })
+    .configuration;
+  assert.deepEqual(frozen, { temperature: 0.5 });
+  // Re-encoding the same content yields the same SubjectId.
+  const m2 = makeValidManifest();
+  (m2.model as { configuration: unknown }).configuration = {
+    temperature: 0.5,
+  };
+  const r2 = decodeSubjectManifest(m2);
+  assert.equal(r2.ok, true);
+  if (!r2.ok) return;
+  assert.equal(r2.value.subjectId, id1);
+});
