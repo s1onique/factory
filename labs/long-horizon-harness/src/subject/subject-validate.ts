@@ -180,8 +180,32 @@ function requireClosedWorldKeys(
  * Note: this validator does NOT recursively inspect
  * model.configuration. That field is intentionally open-
  * world; its content validation lives in subject-json.ts.
+ *
+ * Proxy / hostile-input semantics (D-M01):
+ *
+ *   The validator calls `Object.keys(value)` at the manifest
+ *   root and recursively inside each dimension. JavaScript
+ *   Proxy traps (ownKeys, getPrototypeOf, get) can throw on
+ *   these operations. To keep the
+ *   `validateSubjectManifest(unknown): SubjectValidation`
+ *   contract literally true (NEVER throws), the entire body
+ *   runs inside an outer try/catch that converts any escape
+ *   into a typed `boundary_exception` reason.
  */
 export function validateSubjectManifest(value: unknown): SubjectValidation {
+  try {
+    return validateSubjectManifestInner(value);
+  } catch (e: unknown) {
+    return {
+      ok: false,
+      reason:
+        "boundary_exception during structural validation: " +
+        (e instanceof Error ? e.message : String(e)),
+    };
+  }
+}
+
+function validateSubjectManifestInner(value: unknown): SubjectValidation {
   const reasons: string[] = [];
 
   if (!isPlainObject(value)) {

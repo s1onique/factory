@@ -77,12 +77,19 @@ export type FrozenSubject = {
  *                            Either way it is rejected; we
  *                            never produce a FrozenSubject
  *                            whose identity lies.
+ *   "boundary_exception"    : a Proxy trap or throwing
+ *                            getter escaped during freeze
+ *                            traversal (D-M01).
  */
 export type SubjectFreezeFailure =
   | {
     readonly kind: "manifest_id_mismatch";
     readonly expected: string;
     readonly actual: string;
+  }
+  | {
+    readonly kind: "boundary_exception";
+    readonly reason: string;
   };
 
 export type SubjectFreezeResult =
@@ -104,35 +111,58 @@ export type SubjectFreezeResult =
  *     already-frozen nodes (D-C02). A WeakSet cycle guard
  *     is defense in depth.
  *   - Freezes the wrapper itself.
+ *
+ * Proxy / hostile-input semantics (D-M01):
+ *
+ *   `freezeSubject` accepts a `DecodedSubject` whose
+ *   manifest came from the decoder. Although the decoder
+ *   already vetted the manifest, the freeze operation
+ *   re-derives the SubjectId and traverses every nested
+ *   object via `Object.values`. A defensive try/catch
+ *   keeps the public contract (NEVER throws) literally
+ *   true in the rare case that a Proxy trap on a nested
+ *   object throws during traversal.
  */
 export function freezeSubject(
   decoded: DecodedSubject,
 ): SubjectFreezeResult {
-  const expected = computeSubjectId(decoded.manifest);
-  if (expected !== decoded.subjectId) {
+  try {
+    const expected = computeSubjectId(decoded.manifest);
+    if (expected !== decoded.subjectId) {
+      return {
+        ok: false,
+        failure: {
+          kind: "manifest_id_mismatch",
+          expected,
+          actual: decoded.subjectId,
+        },
+      };
+    }
+
+    // Re-freeze the manifest root and every nested object/
+    // array in place. The recursion does NOT skip already-
+    // frozen children: a frozen parent does not imply frozen
+    // children, and the contract is that EVERY nested node is
+    // immutable. The WeakSet is cycle defense.
+    deepFreeze(decoded.manifest);
+
+    const wrapper: FrozenSubject = {
+      manifest: decoded.manifest,
+      subjectId: decoded.subjectId,
+    };
+    Object.freeze(wrapper);
+    return { ok: true, value: wrapper };
+  } catch (e: unknown) {
     return {
       ok: false,
       failure: {
-        kind: "manifest_id_mismatch",
-        expected,
-        actual: decoded.subjectId,
+        kind: "boundary_exception",
+        reason:
+          "boundary_exception during freeze: " +
+          (e instanceof Error ? e.message : String(e)),
       },
     };
   }
-
-  // Re-freeze the manifest root and every nested object/
-  // array in place. The recursion does NOT skip already-
-  // frozen children: a frozen parent does not imply frozen
-  // children, and the contract is that EVERY nested node is
-  // immutable. The WeakSet is cycle defense.
-  deepFreeze(decoded.manifest);
-
-  const wrapper: FrozenSubject = {
-    manifest: decoded.manifest,
-    subjectId: decoded.subjectId,
-  };
-  Object.freeze(wrapper);
-  return { ok: true, value: wrapper };
 }
 
 /**
@@ -165,4 +195,3 @@ function deepFreeze(value: unknown, seen: WeakSet<object> = new WeakSet()): void
     }
   }
 }
-

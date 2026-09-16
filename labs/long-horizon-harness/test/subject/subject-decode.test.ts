@@ -173,6 +173,8 @@ test("CAPS02: capabilities.execution_policy is closed-world", () => {
   });
   const r = decodeSubjectManifest(m);
   assert.equal(r.ok, false);
+});
+
 test("DEC06: validateSubjectManifest agrees with the decoder on simple cases", () => {
   const m = makeValidManifest();
   const v = validateSubjectManifest(m);
@@ -364,4 +366,83 @@ test("JSON06: deeply-nested valid JSON -> success", () => {
   assert.equal(r.ok, true, JSON.stringify(r.ok ? null : r.failure));
 });
 
+/**
+ * D-M01: decoder totality over hostile JS objects.
+ *
+ * `decodeSubjectManifest` accepts `unknown`. JavaScript
+ * Proxy traps (ownKeys, getPrototypeOf, get) can throw on
+ * the operations the validators and the decoder itself
+ * perform. The contract is that the decoder NEVER throws;
+ * any escape is converted to a typed `boundary_exception`
+ * failure by the outer defensive try/catch.
+ */
+test("JSON07: Proxy ownKeys throws -> typed boundary_exception, no throw", () => {
+  const hostile = new Proxy({}, {
+    ownKeys() {
+      throw new Error("boom-ownKeys");
+    },
+  });
+  let r: ReturnType<typeof decodeSubjectManifest> | undefined;
+  let threw = false;
+  try {
+    r = decodeSubjectManifest(hostile);
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false);
+  assert.equal(r!.ok, false);
+  if (!r!.ok) {
+    assert.equal(r!.failure.kind, "boundary_exception");
+  }
+});
+
+test("JSON08: Proxy getPrototypeOf throws -> typed boundary_exception, no throw", () => {
+  const hostile = new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("boom-proto");
+    },
+  });
+  let r: ReturnType<typeof decodeSubjectManifest> | undefined;
+  let threw = false;
+  try {
+    r = decodeSubjectManifest(hostile);
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false);
+  assert.equal(r!.ok, false);
+});
+
+test("JSON09: throwing getter on a proxy -> typed boundary_exception, no throw", () => {
+  const hostile = new Proxy({}, {
+    get(_t, k) {
+      throw new Error("boom-get-" + String(k));
+    },
+  });
+  let r: ReturnType<typeof decodeSubjectManifest> | undefined;
+  let threw = false;
+  try {
+    r = decodeSubjectManifest(hostile);
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false);
+  assert.equal(r!.ok, false);
+});
+
+/**
+ * D-M02: shared DAG at the decoder level. Two manifest
+ * inputs that differ only in being the same object
+ * reference vs two distinct equal objects must produce
+ * the same SubjectId.
+ */
+test("JSON10: configuration with shared sibling references -> success", () => {
+  const shared = { x: 1 };
+  const m = makeValidManifest();
+  (m.model as Record<string, unknown>).configuration = {
+    left: shared,
+    right: shared,
+  };
+  const r = decodeSubjectManifest(m);
+  assert.equal(r.ok, true, JSON.stringify(r.ok ? null : r.failure));
 });

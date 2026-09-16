@@ -81,6 +81,11 @@ export type DecodedSubject = {
  *                          failed the recursive JsonValue
  *                          check (undefined, NaN, BigInt,
  *                          cycle, Date, ...).
+ *   "boundary_exception" : a Proxy trap or throwing getter
+ *                          escaped the validator's own
+ *                          defensive try/catch (D-M01). The
+ *                          outer defensive boundary in this
+ *                          decoder caught it.
  *   "id_construction"    : a branded-identifier constructor
  *                          rejected an otherwise-structurally
  *                          valid string. Included defensively;
@@ -98,6 +103,10 @@ export type SubjectDecodeFailure =
   }
   | {
     readonly kind: "configuration_value";
+    readonly reason: string;
+  }
+  | {
+    readonly kind: "boundary_exception";
     readonly reason: string;
   }
   | {
@@ -144,8 +153,39 @@ function brandOrFail<T extends string>(
  * input becomes a SubjectManifest. Every error path is a
  * typed failure; there is no `throw` site reachable from
  * caller input.
+ *
+ * Proxy / hostile-input semantics (D-M01):
+ *
+ *   Although the inner validators (validateSubjectManifest,
+ *   validateJsonValue) wrap their own bodies in try/catch
+ *   for Proxy-trap defense, the decoder itself performs
+ *   `String(...)`, `Number(...)`, and object-property reads
+ *   directly on caller-controlled values to compose the
+ *   typed SubjectManifest. A throwing Proxy `get` trap on
+ *   any property read could escape. The outer try/catch
+ *   here is the final defensive boundary that guarantees
+ *   the public contract: `decodeSubjectManifest(unknown)`
+ *   NEVER throws.
+ *
+ *   On escape, returns a typed `boundary_exception` failure.
  */
 export function decodeSubjectManifest(input: unknown): SubjectDecodeResult {
+  try {
+    return decodeSubjectManifestInner(input);
+  } catch (e: unknown) {
+    return {
+      ok: false,
+      failure: {
+        kind: "boundary_exception",
+        reason:
+          "boundary_exception during manifest decoding: " +
+          (e instanceof Error ? e.message : String(e)),
+      },
+    };
+  }
+}
+
+function decodeSubjectManifestInner(input: unknown): SubjectDecodeResult {
   // (1) Top-level type guard.
   if (
     typeof input !== "object" ||
@@ -166,6 +206,20 @@ export function decodeSubjectManifest(input: unknown): SubjectDecodeResult {
   // (2) Structural validation.
   const v = validateSubjectManifest(input);
   if (!v.ok) {
+    // The validator returns `ok:false` for BOTH ordinary
+    // structural violations AND boundary_exception escapes
+    // (Proxy traps). Plumb the boundary kind up so the
+    // decoder surfaces the right typed failure rather than
+    // silently downgrading it to schema_validation.
+    if (v.reason.startsWith("boundary_exception")) {
+      return {
+        ok: false,
+        failure: {
+          kind: "boundary_exception",
+          reason: v.reason,
+        },
+      };
+    }
     return {
       ok: false,
       failure: {
@@ -186,6 +240,17 @@ export function decodeSubjectManifest(input: unknown): SubjectDecodeResult {
     "model.configuration",
   );
   if (!configCheck.ok) {
+    // Same plumbing as (2): boundary_exception reasons
+    // are surfaced as their own kind.
+    if (configCheck.reason.includes("boundary_exception")) {
+      return {
+        ok: false,
+        failure: {
+          kind: "boundary_exception",
+          reason: configCheck.reason,
+        },
+      };
+    }
     return {
       ok: false,
       failure: {

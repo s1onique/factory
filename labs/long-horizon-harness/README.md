@@ -653,7 +653,12 @@ if (!r.ok) {
   //   "configuration_value" — model.configuration is an object
   //                           but contains an unsupported value
   //                           (undefined, NaN, BigInt, Date,
-  //                           Map, Set, Promise, cycle, ...)
+  //                           Map, Set, Promise, true cycle, ...)
+  //   "boundary_exception"  — a Proxy trap or throwing getter
+  //                           escaped the validator's inner
+  //                           defensive boundary (D-M01). The
+  //                           decoder's outer try/catch
+  //                           caught it; never throws.
   //   "id_construction"     — defense in depth; unreachable
   //                           given the validator
   return;
@@ -687,10 +692,13 @@ experiment invariant. Tests assert `TypeError` directly
 
 ```text
 SUBJECT_SCHEMA_VERSIONING       = PASS
-SUBJECT_DECODER_FAIL_CLOSED     = PASS  (DEC02, DEC07)
+SUBJECT_DECODER_FAIL_CLOSED     = PASS  (DEC02, DEC07, JSON07–09)
 UNKNOWN_FIELDS_POLICY           = EXPLICIT (fail-closed)
 NESTED_CLOSED_WORLD             = PASS  (CLOSED01–03)
 CONFIGURATION_JSON_BOUNDARY     = PASS  (JSON01–06)
+DECODER_BOUNDARY_TOTALITY       = PASS  (D-M01: NEVER throws)
+JSON_PATH_CYCLE_SEMANTICS       = PASS  (D-M02: shared DAG ok,
+                                            true back-edge rejected)
 CANONICAL_HASH_DETERMINISTIC    = PASS
 SUBJECT_ID_CONTENT_BOUND        = PASS
 REPO_REVISION_BOUND             = PASS
@@ -719,4 +727,3 @@ or convergence metrics. Those arrive in Phase E.
 - `test/subject/` — unit tests for canonicalization,
   decoder, freeze, JsonValue boundary, and source-size
   discipline (`npm run test:subject`)
-

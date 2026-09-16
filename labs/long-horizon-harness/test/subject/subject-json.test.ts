@@ -133,3 +133,92 @@ test("JSON-BOUND-15: validateJsonValue never throws", () => {
     assert.equal(threw, false, "threw on " + String(v));
   }
 });
+
+/**
+ * D-M02: path-cycle semantics.
+ *
+ * `ancestors` is a recursion-stack set, not a flat
+ * visited-set. Acyclic shared substructure must be
+ * ACCEPTED; only true recursive back-edges must be
+ * rejected.
+ */
+test("JSON-BOUND-16: shared child in sibling branches is accepted (DAG)", () => {
+  const shared = { x: 1 };
+  const cfg = { left: shared, right: shared };
+  const r = validateJsonValue(cfg);
+  assert.equal(r.ok, true, "expected ok, got: " + (r.ok ? "" : r.reason));
+});
+
+test("JSON-BOUND-17: true recursive back-edge is rejected (cycle)", () => {
+  const v: Record<string, unknown> = { a: 1 };
+  v["self"] = v;
+  const r = validateJsonValue(v);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /cyclic/);
+});
+
+test("JSON-BOUND-18: deeply-shared DAG is accepted", () => {
+  const leaf = { value: 42 };
+  const mid = { l1: leaf, l2: leaf };
+  const root = { m1: mid, m2: mid, m3: mid };
+  const r = validateJsonValue(root);
+  assert.equal(r.ok, true, "expected ok, got: " + (r.ok ? "" : r.reason));
+});
+
+test("JSON-BOUND-19: cycle inside a sibling-shared DAG is still rejected", () => {
+  const cyclic: Record<string, unknown> = { a: 1 };
+  cyclic["self"] = cyclic;
+  const root = { left: cyclic, right: cyclic };
+  const r = validateJsonValue(root);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /cyclic/);
+});
+
+/**
+ * D-M01: Proxy / hostile-input defense on
+ * validateJsonValue directly. The outer try/catch in
+ * validateJsonValue converts any Proxy-trap throw into a
+ * typed boundary_exception.
+ */
+test("JSON-BOUND-20: Proxy ownKeys throw -> boundary_exception", () => {
+  const hostile = new Proxy({}, {
+    ownKeys() {
+      throw new Error("boom-ownKeys");
+    },
+  });
+  const r = validateJsonValue(hostile);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /boundary_exception/);
+});
+
+test("JSON-BOUND-21: Proxy getPrototypeOf throw -> boundary_exception", () => {
+  const hostile = new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("boom-proto");
+    },
+  });
+  const r = validateJsonValue(hostile);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /boundary_exception/);
+});
+
+test("JSON-BOUND-22: throwing getter -> boundary_exception", () => {
+  // A proxy whose getPrototypeOf + get + ownKeys all throw
+  // on the operations validateJsonValue performs. We need
+  // at least one property for Object.keys to enumerate, so
+  // ownKeys returns one key and get throws when it's read.
+  const hostile = new Proxy({}, {
+    ownKeys() {
+      return ["prop"];
+    },
+    getOwnPropertyDescriptor() {
+      return { enumerable: true, configurable: true };
+    },
+    get(_t, k) {
+      throw new Error("boom-get-" + String(k));
+    },
+  });
+  const r = validateJsonValue(hostile);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /boundary_exception/);
+});
