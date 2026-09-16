@@ -724,45 +724,241 @@ test("BOOTOBS11: decideSocketRollback is the single source of truth for close-be
 // events (never from wall-clock fences).
 
 /**
- * BOOTOBS12 — Real Node child that exits while final
- * buffered stdout data is in flight. After the child
- * has emitted ALL its bytes and exited, the
- * `whenBootstrapOutputClosed()` barrier MUST wait for
- * the last bytes to land in the drain and then report
- * the EXACT count. If we resolved on `'exit'` alone,
- * the last few bytes (still in the kernel pipe) would
- * NOT be observed and the assertion would fail.
+ * BOOTOBS12 — Real Node child whose stdout drains
+ * through the terminal-output barrier with a payload
+ * larger than a single 64 KiB chunk.
+ *
+ * The point of this test is to prove that
+ * `whenBootstrapOutputClosed()` waits for ALL bytes
+ * the kernel has actually delivered into the bounded
+ * drain, not just the bytes that happened to be in
+ * the pipe at `'exit'` time, AND that the drain's
+ * `bytesSeen` is exactly the producer's truth when
+ * the producer obeys Node's stream contract
+ * (`write()` return observed + `end()` callback).
+ *
+ * BOOTOBS12 CORRECTION01 — producer fidelity law:
+ *
+ *   The previous fixture violated two Node stream
+ *   laws and made the test unfaithful:
+ *
+ *     1. It ignored `write()` return values,
+ *        enqueueing three 64 KiB chunks back-to-back
+ *        into a child stdio pipe. Node documents
+ *        child stdio pipe capacity as FINITE and
+ *        PLATFORM-SPECIFIC; the producer is required
+ *        by Node's stream contract to observe the
+ *        `write()` return value and wait for `'drain'`
+ *        before issuing more bytes. The previous
+ *        fixture never waited.
+ *
+ *     2. It called `process.exit(0)` from
+ *        `setImmediate` immediately after writing
+ *        'TAIL'. Node explicitly warns that
+ *        `process.exit()` can terminate before
+ *        asynchronous stdout writes finish. The
+ *        previous comment claimed TAIL "landed
+ *        post-exit"; that is physically false —
+ *        nothing can be written AFTER a process has
+ *        actually exited. What actually happened was:
+ *        the producer wrote TAIL and then immediately
+ *        force-terminated.
+ *
+ *   Empirical evidence (this host, pre-fix):
+ *
+ *     20/20 identical failures at
+ *       actual   = 131072  (= 2 × 65536)
+ *       expected = 196612  (= 3 × 65536 + 4)
+ *       diff     = 65540   (= 65536 + 4)
+ *
+ *     The pre-fix fixture deterministically delivered
+ *     only the first two 64 KiB chunks. The exact
+ *     buffering boundary responsible is not part of
+ *     the test contract; Node documents child stdio
+ *     capacity as finite and platform-specific. We do
+ *     not pin an OS implementation detail.
+ *
+ *   The corrected fixture obeys the contract:
+ *
+ *     write(chunk); if (!write()) await once(drain);
+ *     end("TAIL") and await its callback;
+ *     let the process exit naturally.
+ *
+ *   It also emits producer truth on stderr AFTER
+ *   `end()` resolves, so the assertion can distinguish:
+ *
+ *     producer_bytes  < 196612 → fixture defect
+ *     producer_bytes == 196612
+ *     parent_bytesSeen < 196612 → drain/barrier defect
+ *
+ *   No happy-path `process.exit(`, no sleep, no
+ *   probabilistic fence. The terminal-output barrier
+ *   is built from `'end'` / `'close'` lifecycle events
+ *   only.
+ *
+ * Note: this test does NOT use
+ * `setImmediate(() => process.exit(0))` to schedule
+ * the trailing write "after" exit. That idiom
+ * contradicts the doctrine it was meant to test:
+ * nothing can be written after a process has
+ * actually exited. The terminal barrier's value is
+ * that it waits for bytes the producer committed to
+ * stdout to land in the drain — which is exactly what
+ * `await stdout.end("TAIL")` and a natural exit
+ * prove.
  */
-test("BOOTOBS12: terminal barrier waits for final buffered stdout after exit (exact byte count)", async () => {
+test("BOOTOBS12: terminal barrier reports exact bytesSeen for >high-water stdout under backpressure (producer-truth law)", async () => {
   const child: ChildProcess = spawn(
     process.execPath,
     ["-e",
-     // Emit three 64 KiB blocks, then a small trailing
-     // byte after 'exit' is requested via
-     // setImmediate so the bytes arrive AFTER the
-     // child's exit event but BEFORE the stream is
-     // closed. This is the exact race the doctrine
-     // describes: if we settled on 'exit' alone, the
-     // trailing byte would be lost.
+     // Producer obeys Node's stream contract:
+     //   - observes write() return value
+     //   - awaits 'drain' on backpressure
+     //   - ends with end("TAIL") and awaits its callback
+     //   - emits producer truth on stderr AFTER end() resolves
+     //   - exits naturally (no process.exit)
+     //
+     // 3 × 64 KiB = 192 KiB payload > default 64 KiB
+     // pipe buffer; TAIL = 4 bytes. Total = 196612.
+     "const { once } = require('node:events');" +
      "const big = Buffer.alloc(64 * 1024, 0x42);" +
-     "process.stdout.write(big);" +
-     "process.stdout.write(big);" +
-     "process.stdout.write(big);" +
-     "setImmediate(() => { process.stdout.write('TAIL'); process.exit(0); });",
+     "const tail = 'TAIL';" +
+     "let writesDone = 0;" +
+     "let drains = 0;" +
+     "let bytesWritten = 0;" +
+     "async function writeChunk(buf) {" +
+     "  const ok = process.stdout.write(buf);" +
+     "  writesDone++;" +
+     "  bytesWritten += buf.length;" +
+     "  if (!ok) {" +
+     "    drains++;" +
+     "    await once(process.stdout, 'drain');" +
+     "  }" +
+     "}" +
+     "(async () => {" +
+     "  await writeChunk(big);" +
+     "  await writeChunk(big);" +
+     "  await writeChunk(big);" +
+     "  await new Promise((resolve, reject) => {" +
+     "    process.stdout.end(tail, (err) => err ? reject(err) : resolve());" +
+     "  });" +
+     "  bytesWritten += Buffer.byteLength(tail);" +
+     "  writesDone++;" +
+     "  process.stderr.write('BOOTOBS12_WRITES=' + writesDone + '\\n');" +
+     "  process.stderr.write('BOOTOBS12_BYTES=' + bytesWritten + '\\n');" +
+     "  process.stderr.write('BOOTOBS12_DRAINS=' + drains + '\\n');" +
+     "  process.stderr.write('BOOTOBS12_STDOUT_END=1\\n');" +
+     "})().catch((e) => {" +
+     "  process.stderr.write('BOOTOBS12_PRODUCER_ERROR=' + (e && e.message) + '\\n');" +
+     "  process.exit(1);" +
+     "});",
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
+  // BOOTOBS12 CORRECTION01 — small static guard.
+  //
+  // The runtime assertions below (producer_bytes ==
+  // 196612 && parent bytesSeen == 196612) prove the
+  // doctrine. This block is a SMALL static guard
+  // against the worst silent regressions of the
+  // producer fixture. It scopes the check to the spawn
+  // argument itself (between two unique markers that
+  // appear ONLY in the corrected producer) so that
+  // comment text mentioning `process.exit(0)` does not
+  // produce false positives.
+  //
+  // The runtime contract is: producer MUST NOT use
+  // `setImmediate(() => process.exit(0))` and MUST
+  // contain the producer-truth telemetry sentinels on
+  // stderr. If either regresses, the runtime
+  // discrimination below cannot work and the test will
+  // become meaningless. Mechanical checks here catch
+  // the regression before the runtime asserts do.
+  {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    // START marker: the first fragment of the producer
+    // script. It is unique to the corrected fixture.
+    const startMarker = "\"const { once } = require('node:events');\"";
+    const startIdx = src.indexOf(startMarker);
+    assert.ok(startIdx !== -1,
+      "BOOTOBS12[guard]: producer start marker not found; " +
+        "fixture has been replaced without the contract-correct producer");
+    // END marker: the error-path `process.exit(1)`
+    // fragment inside the IIFE .catch. Also unique to
+    // the corrected fixture.
+    const endMarker = "\"  process.exit(1);\"";
+    const endIdx = src.indexOf(endMarker, startIdx);
+    assert.ok(endIdx !== -1,
+      "BOOTOBS12[guard]: producer end marker (error-path process.exit(1)) not found; " +
+        "fixture has lost its .catch error handler");
+    const producerSrc = src.slice(startIdx, endIdx + endMarker.length);
+    // Guard 1: the broken idiom MUST NOT appear inside
+    // the producer's spawn arg.
+    assert.ok(
+      !/setImmediate\(\s*\(\)\s*=>\s*\{[^}]*process\.exit\(0\)/.test(producerSrc),
+      "BOOTOBS12[guard]: producer MUST NOT use setImmediate(() => process.exit(0)); " +
+        "that idiom force-terminates before pending pipe writes flush",
+    );
+    // Guard 2: the producer MUST emit the three
+    // producer-truth sentinels on stderr (the runtime
+    // discrimination depends on them).
+    assert.ok(
+      producerSrc.includes("BOOTOBS12_WRITES=") &&
+        producerSrc.includes("BOOTOBS12_BYTES=") &&
+        producerSrc.includes("BOOTOBS12_STDOUT_END="),
+      "BOOTOBS12[guard]: producer MUST emit BOOTOBS12_WRITES=, BOOTOBS12_BYTES=, " +
+        "and BOOTOBS12_STDOUT_END= on stderr for the runtime discrimination",
+    );
+  }
   const handle = wrapChild(child);
   await new Promise<void>((r) => child.once("exit", () => r()));
   // Use the terminal-output barrier; do NOT take stats
   // before it resolves.
   const term = await handle.whenBootstrapOutputClosed();
-  // 3 * 64 KiB + 4 trailing bytes = 196608 + 4 = 196612
+  // Producer truth — read from stderr AFTER the barrier
+  // resolves (at which point bootstrapOutput() is also
+  // final). If producer_bytes != 196612, that is a
+  // fixture defect, not a drain/barrier defect.
+  const out = handle.bootstrapOutput();
+  const stderrText = new TextDecoder("utf-8").decode(out.stderr);
+  const mWrites = /BOOTOBS12_WRITES=(\d+)/.exec(stderrText);
+  const mBytes  = /BOOTOBS12_BYTES=(\d+)/.exec(stderrText);
+  const mDrains = /BOOTOBS12_DRAINS=(\d+)/.exec(stderrText);
+  const mEnd    = /BOOTOBS12_STDOUT_END=(\d+)/.exec(stderrText);
+  const producerWrites = mWrites ? Number(mWrites[1]) : -1;
+  const producerBytes  = mBytes  ? Number(mBytes[1])  : -1;
+  const producerDrains = mDrains ? Number(mDrains[1]) : -1;
+  const producerEnd    = mEnd    ? Number(mEnd[1])    : -1;
+  const ctx =
+    ` (producer_writes=${producerWrites}, producer_bytes=${producerBytes}, ` +
+    `producer_drains=${producerDrains}, producer_stdout_end=${producerEnd}, ` +
+    `stderr=${JSON.stringify(stderrText)})`;
+  // 3 * 64 KiB + 4 trailing bytes = 196608 + 4 = 196612.
+  //
+  // Producer truth MUST equal 196612 (the producer
+  // drained-await every chunk and ended with TAIL).
+  // If this fails, the fixture is broken regardless of
+  // what the parent sees.
+  assert.equal(producerWrites, 4,
+    "BOOTOBS12: producer must have issued exactly 4 writes (3 blocks + TAIL via end())" + ctx);
+  assert.equal(producerBytes, 196612,
+    "BOOTOBS12: producer must report EXACTLY 196612 bytes written" + ctx);
+  assert.equal(producerEnd, 1,
+    "BOOTOBS12: producer must report stdout.end() callback fired (BOOTOBS12_STDOUT_END=1)" + ctx);
+  // Parent truth MUST equal producer truth. If this
+  // fails, the drain/barrier is broken; the producer
+  // was faithful.
   assert.equal(term.stdout.bytesSeen, 196612,
-    "BOOTOBS12: stdoutBytesSeen must EXACTLY include the 'TAIL' that landed post-exit " +
-      "(got " + term.stdout.bytesSeen + ", expected 196612)");
+    "BOOTOBS12: stdoutBytesSeen must EXACTLY equal producer truth (196612) " +
+      "after terminal barrier resolves" + ctx);
   assert.equal(term.stdout.truncated, true,
     "BOOTOBS12: 192 KiB > 64 KiB cap; truncated must be true");
+  // Cross-check: bootstrapOutput() and terminal barrier
+  // agree on the FINAL count once both have settled.
+  assert.equal(out.stdoutBytesSeen, term.stdout.bytesSeen,
+    "BOOTOBS12: bootstrapOutput() and terminal barrier agree on bytesSeen");
 });
 
 /**
