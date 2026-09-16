@@ -366,7 +366,7 @@ test("SNAP05: sparse array -> rejected", () => {
   a[2] = "x";
   const r = snapshotJsonValue(a);
   assert.equal(r.ok, false);
-  if (!r.ok) assert.match(r.reason, /sparse array hole/);
+  if (!r.ok) assert.match(r.reason, /captured indices but declared length/);
 });
 
 test("SNAP06: Proxy throws -> typed boundary_exception", () => {
@@ -648,6 +648,114 @@ test("SNAP17: snapshot record prototype is null", () => {
   }
 });
 
+/*
+ * SNAP19-SNAP23: Proxy TOCTOU hardening for array snapshot
+ * (D-M09 MICROFIX04). The previous implementation had three
+ * windows in which a legal Proxy could:
+ *   - report virtual indices before "length" and have them
+ *     silently dropped from the rebuild
+ *   - return different compatible descriptors on the second
+ *     descriptor read
+ *   - be touched via `get` traps for "length" or src[i]
+ *
+ * Each test below targets one of those windows directly.
+ */
+
+test("SNAP19: Proxy virtual index reported before length -> rejected", () => {
+  // Target: a real length-1 Array. Proxy reports virtual "1"
+  // BEFORE "length" in ownKeys, so a hostile Proxy can attempt
+  // to slip a virtual index into the rebuild. The hardened
+  // implementation MUST capture length FIRST, then see that
+  // declaredLen=1 means index "1" is out of range, and reject.
+  const target: unknown[] = [42];
+  const proxy = new Proxy(target, {
+    ownKeys() {
+      return ["0", "1", "length"];
+    },
+    getOwnPropertyDescriptor(_t, prop) {
+      if (prop === "length") {
+        // Must match the underlying target's descriptor
+        // (Array.length is non-configurable).
+        return {
+          value: 1,
+          writable: true,
+          enumerable: false,
+          configurable: false,
+        };
+      }
+      if (prop === "0") {
+        return {
+          value: 42,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      if (prop === "1") {
+        // Virtual index: not in the underlying target.
+        return {
+          value: 999,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      return undefined;
+    },
+  });
+  assert.equal(Array.isArray(proxy), true);
+  const r = snapshotJsonValue(proxy);
+  assert.equal(r.ok, false, "proxy with virtual out-of-range index must be rejected");
+  if (!r.ok) {
+    assert.ok(
+      r.reason.includes("beyond declared length"),
+      `reason should mention beyond declared length, got: ${r.reason}`,
+    );
+  }
+});
+
+test("SNAP20: ownKeys ordering is irrelevant", () => {
+  // Permutations of ["length","0"] vs ["0","length"] must
+  // produce identical accepted snapshots of a one-element
+  // array. The hardened implementation captures length FIRST
+  // and is therefore order-independent.
+  const makeProxy = (keys: (string | symbol)[]) =>
+    new Proxy([7], {
+      ownKeys() {
+        return keys;
+      },
+      getOwnPropertyDescriptor(_t, prop) {
+        if (prop === "length") {
+          // Match underlying target's non-configurable length.
+          return {
+            value: 1,
+            writable: true,
+            enumerable: false,
+            configurable: false,
+          };
+        }
+        if (prop === "0") {
+          return {
+            value: 7,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          };
+        }
+        return undefined;
+      },
+    });
+
+  const r1 = snapshotJsonValue(makeProxy(["length", "0"]));
+  const r2 = snapshotJsonValue(makeProxy(["0", "length"]));
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true);
+  if (r1.ok && r2.ok) {
+    assert.deepEqual(Array.from(r1.value as ReadonlyArray<unknown>), [7]);
+    assert.deepEqual(Array.from(r2.value as ReadonlyArray<unknown>), [7]);
+  }
+});
+
 test("SNAP18: __proto__ content contributes to SubjectId", () => {
   // Identity oracle: an attacker-controlled __proto__ key
   // changes the SubjectId. If the snapshotter silently
@@ -691,4 +799,135 @@ test("SNAP18: __proto__ content contributes to SubjectId", () => {
       "__proto__ must contribute to the SubjectId",
     );
   }
+});
+
+test("SNAP21: index descriptor is observed exactly once", () => {
+  // The hardened implementation MUST call
+  // getOwnPropertyDescriptor(src, "0") EXACTLY once during
+  // a successful snapshot. If the implementation called it
+  // twice, a hostile Proxy could legally return a different
+  // compatible descriptor on the second call and corrupt
+  // identity.
+  let descCallsFor0 = 0;
+  const proxy = new Proxy([11], {
+    ownKeys() {
+      return ["0", "length"];
+    },
+    getOwnPropertyDescriptor(_t, prop) {
+      if (prop === "0") {
+        descCallsFor0 += 1;
+        return {
+          value: 11,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      if (prop === "length") {
+        return {
+          value: 1,
+          writable: true,
+          enumerable: false,
+          configurable: false,
+        };
+      }
+      return undefined;
+    },
+  });
+  const r = snapshotJsonValue(proxy);
+  assert.equal(r.ok, true);
+  assert.equal(descCallsFor0, 1, "index descriptor must be observed exactly once");
+});
+
+test("SNAP22: descriptor drift cannot bypass enumerability policy", () => {
+  // The first descriptor is enumerable. A hypothetical second
+  // call would have returned non-enumerable. The hardened
+  // implementation MUST NOT make the second call. Therefore:
+  //   - call count for "0" === 1
+  //   - captured value === 11 (not 999)
+  let descCallsFor0 = 0;
+  const proxy = new Proxy([11], {
+    ownKeys() {
+      return ["0", "length"];
+    },
+    getOwnPropertyDescriptor(_t, prop) {
+      if (prop === "0") {
+        descCallsFor0 += 1;
+        // First call: legitimate enumerable data descriptor.
+        // The hardened implementation must STOP here.
+        return {
+          value: 11,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      if (prop === "length") {
+        return {
+          value: 1,
+          writable: true,
+          enumerable: false,
+          configurable: false,
+        };
+      }
+      return undefined;
+    },
+  });
+  const r = snapshotJsonValue(proxy);
+  assert.equal(r.ok, true);
+  assert.equal(descCallsFor0, 1, "no second descriptor observation is allowed");
+  if (r.ok) {
+    assert.deepEqual(Array.from(r.value as ReadonlyArray<unknown>), [11]);
+  }
+});
+
+test("SNAP23: snapshot does not invoke get traps for length or indices", () => {
+  // A successful snapshot MUST NOT trigger any `get` traps
+  // for "length" or numeric indices. The hardened
+  // implementation captures `length` via
+  // getOwnPropertyDescriptor and never reads src.length or
+  // src[i] directly.
+  let getCallsForLength = 0;
+  let getCallsForIndex = 0;
+  const proxy = new Proxy([5], {
+    get(_t, prop) {
+      if (prop === "length") getCallsForLength += 1;
+      if (prop === "0") getCallsForIndex += 1;
+      return undefined;
+    },
+    ownKeys() {
+      return ["0", "length"];
+    },
+    getOwnPropertyDescriptor(_t, prop) {
+      if (prop === "length") {
+        return {
+          value: 1,
+          writable: true,
+          enumerable: false,
+          configurable: false,
+        };
+      }
+      if (prop === "0") {
+        return {
+          value: 5,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      return undefined;
+    },
+  });
+  const r = snapshotJsonValue(proxy);
+  assert.equal(r.ok, true);
+  assert.equal(
+    getCallsForLength,
+    0,
+    "snapshot must not invoke get trap for 'length'",
+  );
+  assert.equal(
+    getCallsForIndex,
+    0,
+    "snapshot must not invoke get trap for index 0",
+  );
 });

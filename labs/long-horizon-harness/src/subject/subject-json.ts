@@ -263,34 +263,84 @@ function snapshotArray(
   path: string,
   ancestors: Set<object>,
 ): JsonValidation {
-  // (1) Walk own-keys. The permitted set is exactly
-  //     "length" plus the string indices "0".."len-1".
-  //     Anything else (symbol, extra string, ...) is a
-  //     shape violation.
+  return snapshotArrayHardened(src, path, ancestors);
+}
+
+/**
+ * Proxy/race-free array snapshot (D-M09 MICROFIX04).
+ *
+ * Three TOCTOU windows existed in the previous implementation:
+ *
+ *   (T1) `declaredLen` was discovered opportunistically during
+ *        the ownKeys walk. A Proxy can report ["0","1","length"]
+ *        while the underlying length is 1; a virtual "1" passes
+ *        validation BEFORE "length" is observed, then disappears.
+ *   (T2) Index descriptors were read TWICE: once for validation,
+ *        once for rebuild. A Proxy's getOwnPropertyDescriptor
+ *        trap may return different compatible descriptors on
+ *        the second call.
+ *   (T3) `src.length` was read directly during rebuild, which
+ *        invokes a `get` trap.
+ *
+ * Capture sequence (each operation MUST happen exactly once):
+ *
+ *   1. getOwnPropertyDescriptor(src, "length")   -> lengthDesc
+ *   2. Reflect.ownKeys(src)                     -> ownKeys
+ *   3. For each permitted index key k in ownKeys:
+ *        getOwnPropertyDescriptor(src, k)       -> indexDesc
+ *   4. Reconstruct the dense frozen Array purely from the
+ *      snapshotter's own captured values. NO further reads.
+ *
+ * Density is proven by comparing capturedByIndex.size against
+ * declaredLen WITHOUT iterating the live source from 0 onward.
+ * A well-formed Proxy cannot report duplicate own keys, so
+ * capturedByIndex.size === declaredLen is the right invariant.
+ *
+ * `declaredLen` is bounded to MAX_SAFE_INTEGER, so a hostile
+ * Proxy cannot force an O(2^53) walk.
+ */
+function snapshotArrayHardened(
+  src: ReadonlyArray<unknown>,
+  path: string,
+  ancestors: Set<object>,
+): JsonValidation {
+  // (1) Capture `length` descriptor FIRST, BEFORE any key walk.
+  //     The declared length is now a fixed scalar for the rest
+  //     of this function. Subsequent index checks cannot be
+  //     tricked by virtual indices reported before "length".
+  const lengthDesc = Object.getOwnPropertyDescriptor(src, "length");
+  if (lengthDesc === undefined) {
+    return fail(`${path}: array has no "length" descriptor`);
+  }
+  if (lengthDesc.get !== undefined || lengthDesc.set !== undefined) {
+    return fail(`${path}.length: array length accessor`);
+  }
+  if (typeof lengthDesc.value !== "number") {
+    return fail(`${path}.length: array length not a number`);
+  }
+  if (!Number.isInteger(lengthDesc.value) || lengthDesc.value < 0) {
+    return fail(
+      `${path}.length: array length is not a non-negative integer`,
+    );
+  }
+  if (lengthDesc.value > Number.MAX_SAFE_INTEGER) {
+    return fail(`${path}.length: array length exceeds MAX_SAFE_INTEGER`);
+  }
+  const declaredLen: number = lengthDesc.value;
+
+  // (2) Walk own-keys EXACTLY once. Key order is irrelevant.
   const ownKeys = Reflect.ownKeys(src);
-  let declaredLen = -1;
+  const capturedByIndex: Map<number, JsonValue> = new Map();
+
   for (const k of ownKeys) {
     if (k === "length") {
-      const d = Object.getOwnPropertyDescriptor(src, "length");
-      if (d === undefined) {
-        return fail(
-          `${path}.length: array length key has no descriptor`,
-        );
-      }
-      if (d.get !== undefined || d.set !== undefined) {
-        return fail(`${path}.length: array length accessor`);
-      }
-      declaredLen = Number(d.value);
+      // Already captured above; ignore duplicate occurrence.
       continue;
     }
     if (typeof k !== "string") {
       return fail(`${path}: array symbol own-key is not a JsonValue`);
     }
-    // Index must be a non-negative integer in canonical
-    // string form. Anything else (a numeric-looking key
-    // like "01", a negative, a float, a string that
-    // happens to look like an integer but isn't one)
-    // is rejected.
+    // Canonical non-negative integer string form only.
     if (!/^(0|[1-9][0-9]*)$/.test(k)) {
       return fail(
         `${path}: array own-key "${k}" is not a permitted index or "length"`,
@@ -298,20 +348,18 @@ function snapshotArray(
     }
     const i = Number(k);
     if (!Number.isInteger(i) || i < 0) {
-      return fail(
-        `${path}: array own-key "${k}" is not a permitted index`,
-      );
+      return fail(`${path}: array own-key "${k}" is not a permitted index`);
     }
-    if (declaredLen !== -1 && i >= declaredLen) {
+    // Range check uses the ALREADY-CAPTURED declaredLen.
+    if (i >= declaredLen) {
       return fail(
         `${path}[${i}]: array own-key beyond declared length ${declaredLen}`,
       );
     }
+    // (3) Read this index's descriptor EXACTLY once.
     const d = Object.getOwnPropertyDescriptor(src, k);
     if (d === undefined) {
-      return fail(
-        `${path}[${i}]: array index has no descriptor`,
-      );
+      return fail(`${path}[${i}]: array index has no descriptor`);
     }
     if (d.get !== undefined || d.set !== undefined) {
       return fail(`${path}[${i}]: array accessor element`);
@@ -323,26 +371,33 @@ function snapshotArray(
     if (v === undefined) {
       return fail(`${path}[${i}]: undefined is not a JsonValue`);
     }
-  }
-
-  // (2) Build the dense fresh array. We do NOT read
-  //     `src[i]` (which would execute getters); we re-use
-  //     the descriptors we already validated above.
-  const declaredLength = declaredLen === -1 ? src.length : declaredLen;
-  const out: JsonValue[] = [];
-  for (let i = 0; i < declaredLength; i++) {
-    const d = Object.getOwnPropertyDescriptor(src, String(i));
-    if (d === undefined) {
-      // Index not in ownKeys: hole. Reject.
-      return fail(`${path}[${i}]: sparse array hole`);
-    }
-    const v: unknown = d.value;
-    if (v === undefined) {
-      return fail(`${path}[${i}]: undefined is not a JsonValue`);
-    }
     const r = snapshotJsonValueInner(v, `${path}[${i}]`, ancestors);
     if (!r.ok) return r;
-    out.push(r.value);
+    // A Proxy cannot return duplicate own keys. If we see a
+    // duplicate here, it is a hostile Proxy and we fail closed.
+    if (capturedByIndex.has(i)) {
+      return fail(`${path}[${i}]: duplicate array index in ownKeys`);
+    }
+    capturedByIndex.set(i, r.value);
+  }
+
+  // (5) Density check WITHOUT re-reading the live source.
+  if (capturedByIndex.size !== declaredLen) {
+    return fail(
+      `${path}: array has ${capturedByIndex.size} captured indices but declared length is ${declaredLen}`,
+    );
+  }
+
+  // (6) Reconstruct from captured snapshots ONLY. No property
+  //     reads, no descriptor calls, no `src[i]`, no `src.length`.
+  const out: JsonValue[] = new Array(declaredLen);
+  for (let i = 0; i < declaredLen; i++) {
+    const captured = capturedByIndex.get(i);
+    if (captured === undefined) {
+      // Unreachable given the size check above; fail closed.
+      return fail(`${path}[${i}]: sparse array hole (post-capture)`);
+    }
+    out[i] = captured;
   }
   Object.freeze(out);
   return ok(out as ReadonlyArray<JsonValue>);

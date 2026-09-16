@@ -714,6 +714,31 @@ ARRAY_SHAPE_CLOSED_WORLD        = PASS  (D-M09: extra string
                                             non-enumerable
                                             indices all rejected
                                             — SNAP11–14)
+PROXY_VIRTUAL_OUT_OF_RANGE      = PASS  (D-M09 MICROFIX04: ownKeys
+                                            virtual index reported
+                                            before length is
+                                            rejected; declared length
+                                            captured FIRST
+                                            — SNAP19)
+ARRAY_KEY_ORDER_INDEPENDENCE    = PASS  (D-M09 MICROFIX04: any
+                                            ownKeys ordering of
+                                            ["length","0",...]
+                                            accepted identically
+                                            — SNAP20)
+SINGLE_DESCRIPTOR_OBSERVATION   = PASS  (D-M09 MICROFIX04: each
+                                            index descriptor is
+                                            read EXACTLY once; no
+                                            TOCTOU window
+                                            — SNAP21)
+DESCRIPTOR_DRIFT_ISOLATION      = PASS  (D-M09 MICROFIX04: a second
+                                            hypothetical descriptor
+                                            call cannot influence
+                                            captured identity
+                                            — SNAP22)
+NO_DIRECT_ARRAY_PROPERTY_READ   = PASS  (D-M09 MICROFIX04: get traps
+                                            for "length" and src[i]
+                                            are never invoked
+                                            — SNAP23)
 PROTO_KEY_PRESERVATION          = PASS  (D-M10: __proto__ is an
                                             own data property of
                                             a null-prototype
