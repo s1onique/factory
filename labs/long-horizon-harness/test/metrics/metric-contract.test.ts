@@ -5,20 +5,23 @@
  * projection), M3 (terminal outcome imported, never
  * recomputed), M11 (RESOURCE_METRICS namespace), and the
  * M14 / M15 fail-classification semantics.
+ *
+ * CORRECTION01: the metric projector (M-C01) now derives
+ * the Phase E projection internally from `orderedEvents`.
+ * Tests no longer pre-project the stream to pass in.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { projectRun } from "../../src/run/run-projector.js";
 import {
   CONVERGENCE_METRIC_CONTRACT_V1,
-  computeRunMetrics,
   isMetricContractVersion,
   guardContractVersion,
   isUnavailableWith,
 } from "../../src/metrics/index.js";
 import {
+  computeRunMetricsFor,
   makeSuccessRunMinimal,
   makeValidTerminalFailure,
   makeCancelledRun,
@@ -62,25 +65,8 @@ test("LH-02 M01: guard accepts only the V1 constant", () => {
 test("LH-02 M02: same inputs -> structurally equal reports", () => {
   const a = makeSuccessRunMinimal({ seed: "replay-A" });
   const b = makeSuccessRunMinimal({ seed: "replay-A" });
-  const projectionA = projectRun(a.manifest, a.events);
-  const projectionB = projectRun(b.manifest, b.events);
-  assert.equal(projectionA.ok, true);
-  assert.equal(projectionB.ok, true);
-  if (!projectionA.ok || !projectionB.ok) throw new Error("ok");
-  const mA = computeRunMetrics({
-    subject: a.manifest.subject_id,
-    manifest: a.manifest,
-    orderedEvents: a.events,
-    runProjection: projectionA.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
-  const mB = computeRunMetrics({
-    subject: b.manifest.subject_id,
-    manifest: b.manifest,
-    orderedEvents: b.events,
-    runProjection: projectionB.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
+  const mA = computeRunMetricsFor(a);
+  const mB = computeRunMetricsFor(b);
   assert.equal(mA.ok, true);
   assert.equal(mB.ok, true);
   if (!mA.ok || !mB.ok) throw new Error("ok");
@@ -89,56 +75,17 @@ test("LH-02 M02: same inputs -> structurally equal reports", () => {
 
 test("LH-02 M03: terminal outcome is imported from the projector (METRIC == PHASE_E)", () => {
   const r = makeValidTerminalFailure({ seed: "lh02-imported-terminal" });
-  const projection = projectRun(r.manifest, r.events);
-  assert.equal(projection.ok, true);
-  if (!projection.ok) throw new Error("ok");
-  const m = computeRunMetrics({
-    subject: r.manifest.subject_id,
-    manifest: r.manifest,
-    orderedEvents: r.events,
-    runProjection: projection.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
+  const m = computeRunMetricsFor(r);
   assert.equal(m.ok, true);
   if (!m.ok) throw new Error("ok");
   assert.equal(m.report.provenance.terminal_outcome, "VALID_FAILURE");
   assert.equal(m.report.convergence.terminal_outcome, "VALID_FAILURE");
   assert.equal(m.report.convergence.trustworthy_success, false);
-  assert.equal(projection.value.terminal_outcome, "VALID_FAILURE");
 });
 
-test("LH-02 M03: cancelled run surfaces CANCELLED via orthogonal booleans", () => {
-  const r = makeCancelledRun({ seed: "lh02-cancel" });
-  const projection = projectRun(r.manifest, r.events);
-  assert.equal(projection.ok, true);
-  if (!projection.ok) throw new Error("ok");
-  const m = computeRunMetrics({
-    subject: r.manifest.subject_id,
-    manifest: r.manifest,
-    orderedEvents: r.events,
-    runProjection: projection.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
-  assert.equal(m.ok, true);
-  if (!m.ok) throw new Error("ok");
-  assert.equal(m.report.convergence.cancelled, true);
-  assert.equal(m.report.convergence.budget_exhausted, false);
-  assert.equal(m.report.convergence.timed_out, false);
-  assert.equal(m.report.convergence.trustworthy_success, false);
-});
-
-test("LH-02 M11: resource namespace exposes typed unavailable values", () => {
-  const r = makeSuccessRunMinimal({ seed: "lh02-no-resources" });
-  const projection = projectRun(r.manifest, r.events);
-  assert.equal(projection.ok, true);
-  if (!projection.ok) throw new Error("ok");
-  const m = computeRunMetrics({
-    subject: r.manifest.subject_id,
-    manifest: r.manifest,
-    orderedEvents: r.events,
-    runProjection: projection.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
+test("LH-02 M11: no-resource run -> every resource slot unavailable (NOT_OBSERVED)", () => {
+  const r = makeIncompleteRun({ seed: "lh02-m11-no-resource" });
+  const m = computeRunMetricsFor(r);
   assert.equal(m.ok, true);
   if (!m.ok) throw new Error("ok");
   const res = m.report.resources;
@@ -153,16 +100,7 @@ test("LH-02 M11: resource namespace exposes typed unavailable values", () => {
 
 test("LH-02 M14: failure shape exposes observed fact; no causal inference", () => {
   const r = makeCancelledRun({ seed: "lh02-failure-shape" });
-  const projection = projectRun(r.manifest, r.events);
-  assert.equal(projection.ok, true);
-  if (!projection.ok) throw new Error("ok");
-  const m = computeRunMetrics({
-    subject: r.manifest.subject_id,
-    manifest: r.manifest,
-    orderedEvents: r.events,
-    runProjection: projection.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
+  const m = computeRunMetricsFor(r);
   assert.equal(m.ok, true);
   if (!m.ok) throw new Error("ok");
   assert.equal(m.report.failure_shape.observed_failure, true);
@@ -177,16 +115,7 @@ test("LH-02 M14: failure shape exposes observed fact; no causal inference", () =
 
 test("LH-02 M15: convergence facts are orthogonal booleans, not a single converged flag", () => {
   const r = makeIncompleteRun({ seed: "lh02-incomplete" });
-  const projection = projectRun(r.manifest, r.events);
-  assert.equal(projection.ok, true);
-  if (!projection.ok) throw new Error("ok");
-  const m = computeRunMetrics({
-    subject: r.manifest.subject_id,
-    manifest: r.manifest,
-    orderedEvents: r.events,
-    runProjection: projection.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
+  const m = computeRunMetricsFor(r);
   assert.equal(m.ok, true);
   if (!m.ok) throw new Error("ok");
   const f = m.report.convergence;
@@ -213,16 +142,7 @@ test("LH-02 M15: convergence facts are orthogonal booleans, not a single converg
 
 test("LH-02 M16: available/unavailable algebra — no silent zero substitution", () => {
   const r = makeIncompleteRun({ seed: "lh02-availability" });
-  const projection = projectRun(r.manifest, r.events);
-  assert.equal(projection.ok, true);
-  if (!projection.ok) throw new Error("ok");
-  const m = computeRunMetrics({
-    subject: r.manifest.subject_id,
-    manifest: r.manifest,
-    orderedEvents: r.events,
-    runProjection: projection.value,
-    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
-  });
+  const m = computeRunMetricsFor(r);
   assert.equal(m.ok, true);
   if (!m.ok) throw new Error("ok");
   const timeToTerminal = m.report.time.time_to_terminal_ms;

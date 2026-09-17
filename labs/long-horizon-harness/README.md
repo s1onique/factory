@@ -1177,8 +1177,13 @@ src/metrics/
                                  MISSING_TIMESTAMPS)
   metric-contract.ts             contract version guard (refuses unknown versions)
   metric-counters.ts             deriveCounters (single-pass counters, M4)
+                                 + deriveAuthorityInvalidation (M6 CORRECTION01:
+                                 historical_authority_invalidation_count)
   metric-distances.ts            deriveConvergenceDistances + deriveCorrectionBurden
-                                 (M5, M6)
+                                 (M5, M6; CORRECTION01 M-C03 distance units:
+                                 actions_to_* use ACTION_STARTED; work_epochs_to_*
+                                 use Phase E work epoch; M-C04 authoritative-pass
+                                 anchor: gate that authorized terminal SUCCESS)
   metric-time.ts                 deriveTimeMetrics (M8 deterministic durations;
                                  no clamping; no silent zero)
   metric-resources.ts            deriveResourceMetrics (M9/M10/M11; lifts
@@ -1190,7 +1195,12 @@ src/metrics/
   metric-hash.ts                 deriveRunEvidenceHash (sha-256 over Phase E
                                  canonical event bytes)
   metric-projector.ts            computeRunMetrics (the single canonical entry
-                                 point; identity-bound to runProjection)
+                                 point; identity-bound to subject; the Phase E
+                                 projection is INTERNALLY derived from
+                                 orderedEvents — callers cannot supply a separate
+                                 projection, M-C01); verifyProjectionBind
+                                 (helper that asserts an externally-supplied
+                                 projection matches the internally-derived one)
   metric-serialize.ts            serializeMetricReport (reuses Phase E
                                  deterministicJson)
   index.ts                       public barrel
@@ -1215,8 +1225,8 @@ node --import tsx --test --test-reporter=spec \
 | M-M01 | metric contract versioned (M1) — single V1 identity; unknown versions refused; `metric_report_schema_version` recorded in every report | PASS |
 | M-M02 | pure metric projection (M2) — same inputs + same contract = structurally equal report; no `Date.now()`, no `Math.random()`, no ambient state, no fs/net/pricing reads | PASS |
 | M-M03 | Phase E outcome imported (M3) — `convergence.terminal_outcome === projection.terminal_outcome`; metric never recomputes / overrides the projector | PASS |
-| M-M04 | structural counters (M4) — action / gate / repair / review counters derived from ordered events only; `counters.work_epoch_count` lifted from `runProjection.work_epoch` | PASS |
-| M-M05 | correction burden (M6) — exposes `repair_cycle_count`, `failed_action_count`, `failing_gate_count`, `failing_review_count`, `authority_invalidation_count` (0/1/2) | PASS |
+| M-M04 | structural counters (M4) — action / gate / repair / review counters derived from ordered events only; `counters.work_epoch_count` lifted from the projector | PASS |
+| M-M05 | correction burden (M6, CORRECTION01) — exposes `repair_cycle_count`, `failed_action_count`, `failing_gate_count`, `failing_review_count`, `historical_authority_invalidation_count` (historical; survives recovery), `current_authority_blocker_count` (current-state diagnostic, 0/1/2) | PASS |
 | M-M06 | time metrics evidence-bound (M8) — only `observed_at`; missing -> `MISSING_TIMESTAMPS`; non-monotonic -> `INVALID_DURATION`; NEVER clamps | PASS |
 | M-M07 | resource metrics evidence-bound (M9/M10/M11) — every resource slot is `Available(value)` or `Unavailable(reason)`; NEVER inferred from action/gate counts | PASS |
 | M-M08 | missing evidence != zero (M16) — every metric value is one of `{available:true,value}` or `{available:false,reason}`; no silent zero substitution | PASS |
@@ -1233,12 +1243,12 @@ node --import tsx --test --test-reporter=spec \
 
 | Suite                              | Count | Status |
 |------------------------------------|-------|--------|
-| `test/metrics/metric-contract.test.ts`    | 10/10 | PASS |
-| `test/metrics/metric-golden.test.ts`      |  6/6  | PASS |
-| `test/metrics/metric-properties.test.ts`  |  8/8  | PASS |
+| `test/metrics/metric-contract.test.ts`    |  9/9  | PASS |
+| `test/metrics/metric-golden.test.ts`      | 13/13 | PASS |
+| `test/metrics/metric-properties.test.ts`  | 12/12 | PASS |
 | `test/metrics/metric-time.test.ts`        |  5/5  | PASS |
 | `test/metrics/metric-resources.test.ts`   |  6/6  | PASS |
-| **LH-02 metrics suite total**             | **35/35** | **PASS** |
+| **LH-02 metrics suite total**             | **45/45** | **PASS** |
 | Phase E `test/run/*.test.ts` (frozen)     | 86/86 | PASS   |
 | Phase D `test:subject`                    |102/102| PASS   |
 | Phase C witness `pure` / `codec`           | 17/17 | PASS   |
@@ -1254,6 +1264,26 @@ node --import tsx --test --test-reporter=spec \
 | `git diff HEAD --check`                    | clean | PASS   |
 | `git worktree list --porcelain`            | 1 main / 0 linked / 0 detached | OK |
 
+### CORRECTION01 closure matrix
+
+The CORRECTION01 patch closes the three measurement-validity
+defects identified in the LH-02 review. Each cell is pinned
+by a named probe.
+
+```text
+M-M17_PROJECTION_EVIDENCE_IDENTITY          PASS  (METRIC24..METRIC27)
+M-M18_HISTORICAL_AUTHORITY_INVALIDATIONS    PASS  (METRIC28..METRIC32)
+M-M19_DISTANCE_UNITS_HONEST                 PASS  (METRIC01, METRIC04, METRIC06)
+M-M20_AUTHORITATIVE_PASS_SEMANTICS          PASS  (METRIC33..METRIC35)
+M-M21_EVIDENCE_HASH_SEMANTICS_FROZEN        PASS  (METRIC20, METRIC27)
+M-M22_CANONICALIZATION_METAMORPHIC_ORACLE   PASS  (METRIC19)
+
+REPORT_PROJECTION_EVIDENCE_SPLIT_BRAIN       IMPOSSIBLE  (M-C01)
+RECOVERED_INVALIDATION_DISAPPEARS_FROM_BURDEN = IMPOSSIBLE  (M-C02)
+EVENT_POSITION_REPORTED_AS_WORK_EPOCH        IMPOSSIBLE  (M-C03)
+HISTORICAL_PASS_REPORTED_AS_AUTHORITATIVE    IMPOSSIBLE  (M-C04)
+```
+
 ### LH-02 Negative Oracles
 
 ```text
@@ -1267,6 +1297,12 @@ METRIC_CODE_CAN_FABRICATE_SURVIVING_DEFECTS  = FALSE  (M7)
 METRIC_CODE_CAN_APPLY_DIFFERENT_FORMULA_AT_SAME_VERSION = FALSE (M1)
 SILENT_REINTERPRETATION_UNDER_SAME_VERSION   = IMPOSSIBLE (M1)
 PRICE_TABLE_COUPLED_TO_DETERMINISTIC_METRIC  = FALSE  (M12)
+
+# CORRECTION01 binding / measurand oracles:
+REPORT_PROJECTION_EVIDENCE_SPLIT_BRAIN        = IMPOSSIBLE  (M-C01)
+RECOVERED_INVALIDATION_DISAPPEARS_FROM_BURDEN = IMPOSSIBLE  (M-C02)
+EVENT_POSITION_REPORTED_AS_WORK_EPOCH         = IMPOSSIBLE  (M-C03)
+HISTORICAL_PASS_REPORTED_AS_AUTHORITATIVE     = IMPOSSIBLE  (M-C04)
 ```
 
 ### LH-02 See

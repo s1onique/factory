@@ -10,6 +10,12 @@
  * shape (`CommittedRunEvent`, `RunManifest`, ...). The
  * fixture builders below construct events / manifests / etc.
  * directly, without going through the production projector.
+ *
+ * CORRECTION01: the metric projector (M-C01) now derives
+ * the Phase E projection INTERNALLY from `orderedEvents`;
+ * tests therefore no longer pre-construct a projection to
+ * pass in. Helper `computeRunMetricsFor()` simply forwards
+ * the call so individual tests stay short.
  */
 
 import type {
@@ -35,6 +41,11 @@ import {
 } from "../../src/run/run-types.js";
 import type { SubjectId } from "../../src/subject/subject-types.js";
 import { makeSubjectId } from "../../src/subject/index.js";
+
+import {
+  CONVERGENCE_METRIC_CONTRACT_V1,
+  computeRunMetrics,
+} from "../../src/metrics/index.js";
 
 /** Fixed set of test ids used across the corpus. */
 export const FIXTURE_IDS = {
@@ -528,3 +539,239 @@ export const makeTimestampedSuccessRun = (args: {
   ]);
   return { manifest, events };
 };
+
+// ---------------------------------------------------------------------------
+// CORRECTION01 fixtures (M-C01..M-C04 probes).
+// ---------------------------------------------------------------------------
+
+/**
+ * METRIC28 — successful run with one minimal action that
+ * contains the gate PASS. No failures, no recovery.
+ * Expected: historical_authority_invalidation_count = 0.
+ */
+export const makePassThenTerminal: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc02-28" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC29 — work -> PASS -> more work -> PASS -> terminal.
+ * Expected:
+ *   historical_authority_invalidation_count = 1
+ *   current_authority_blocker_count        = 0
+ */
+export const makePassThenMoreWorkThenPass: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc02-29" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC30 — work -> PASS -> ACTION ERROR -> work -> PASS ->
+ * terminal. The ACTION_FINISHED(ERROR) after the first PASS
+ * invalidates authority (counted). Expected:
+ *   historical_authority_invalidation_count >= 1
+ *   current_authority_blocker_count        = 0
+ */
+export const makeActionErrorAfterPass: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc02-30" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "ERROR") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC31 — work -> PASS -> REVIEW FAIL -> REVIEW PASS ->
+ * terminal. Expected:
+ *   historical_authority_invalidation_count = 1
+ *   current_authority_blocker_count        = 0
+ */
+export const makeReviewFailThenReviewPass: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc02-31" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evReviewStarted(FIXTURE_IDS.review2) },
+    { ev: evReviewFinished(FIXTURE_IDS.review2, true) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC32 — work -> PASS -> more work -> PASS -> repair ->
+ * work -> PASS -> terminal. Expected:
+ *   historical_authority_invalidation_count = 2
+ *   current_authority_blocker_count        = 0
+ */
+export const makeTwoInvalidationsThenSuccess: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc02-32" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evRepairStarted(FIXTURE_IDS.repair1, "second pass stale") },
+    { ev: evRepairFinished(FIXTURE_IDS.repair1) },
+    { ev: evActionStarted(FIXTURE_IDS.attemptC) },
+    { ev: evGateStarted(FIXTURE_IDS.gate3, FIXTURE_IDS.attemptC) },
+    { ev: evGateFinished(FIXTURE_IDS.gate3, FIXTURE_IDS.attemptC, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptC, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC33 — PASS -> FAIL -> VALID_FAILURE terminal.
+ * The final FAIL stales the prior PASS. Expected:
+ *   trustworthy_success === false
+ *   terminal_outcome === "VALID_FAILURE"
+ *   *_to_last_authoritative_pass unavailable("NOT_APPLICABLE").
+ */
+export const makePassThenFailThenValidFailure: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc04-33" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, false) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC34 — PASS -> work -> PASS -> terminal SUCCESS.
+ * The second PASS is the authoritative one (first was
+ * invalidated by the subsequent ACTION_STARTED).
+ * Expected:
+ *   trustworthy_success                        === true
+ *   actions_to_last_authoritative_pass         === 2
+ *   work_epochs_to_last_authoritative_pass     === 2
+ */
+export const makePassWorkPassSuccess: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc04-34" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC35 — PASS -> REVIEW FAIL -> terminal VALID_FAILURE.
+ * The review FAIL at the current epoch invalidates
+ * authority. Expected:
+ *   `*_to_last_authoritative_pass` unavailable("NOT_APPLICABLE").
+ */
+export const makePassReviewFailTerminal: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc04-35" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+// ---------------------------------------------------------------------------
+// Phase F metric entry-point helper (CORRECTION01)
+//
+// `computeRunMetricsFor` is the canonical way for LH-02
+// tests to invoke the metric projector. It does NOT call
+// `projectRun` itself — the metric projector derives the
+// Phase E projection internally (M-C01). Tests no longer
+// need to pre-construct a projection.
+// ---------------------------------------------------------------------------
+
+/**
+ * Invoke `computeRunMetrics` against a fixture. Same
+ * subject identity as the manifest (the projector will
+ * reject mismatches). Returns the raw `MetricResult`; tests
+ * branch on `ok` for negative-oracle assertions.
+ */
+export function computeRunMetricsFor(input: {
+  readonly manifest: RunManifest;
+  readonly events: ReadonlyArray<CommittedRunEvent>;
+}) {
+  return computeRunMetrics({
+    subject: input.manifest.subject_id,
+    manifest: input.manifest,
+    orderedEvents: input.events,
+    contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
+  });
+}

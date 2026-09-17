@@ -16,6 +16,17 @@
  * The function returns structurally identical output for the
  * same input array (M2 — same-input -> same-output oracle).
  *
+ * The walk also maintains `workEpoch` and
+ * `freshPositiveAuthority` so that:
+ *
+ *   - `work_epoch_count` (already lifted from the
+ *     projector-supplied work epoch) is independently
+ *     reproducible from the event stream by mirroring
+ *     Phase E's E-C14 V2 transition rule.
+ *   - `historical_authority_invalidation_count` can be
+ *     counted as the metric walks the same stream
+ *     using Phase E's frozen precedence semantics.
+ *
  * This module is pure: no I/O.
  */
 
@@ -46,6 +57,30 @@ type CounterAccumulator = {
   review_count: number;
   passing_review_count: number;
   failing_review_count: number;
+  /**
+   * Work epoch as we walk the stream, mirroring Phase E's
+   * E-C14 V2 rule: increments on ACTION_STARTED,
+   * REPAIR_STARTED, and ACTION_FINISHED(ERROR). Used to
+   * check whether a GATE_FINISHED / REVIEW_FINISHED event
+   * happened at the CURRENT work epoch.
+   */
+  workEpoch: number;
+  /**
+   * True iff a passing closure gate has been observed at
+   * the current work epoch (i.e. the projector would
+   * consider closure authority fresh RIGHT NOW at this
+   * point in the walk). Mirrors Phase E's
+   * `closure_authority_fresh` invariant.
+   */
+  freshPositiveAuthority: boolean;
+  /**
+   * Count of events that invalidated previously established
+   * positive closure authority. This is the HISTORICAL
+   * correction burden; it survives later recovery (a later
+   * ACTION_STARTED that re-establishes authority does NOT
+   * subtract from this count).
+   */
+  historical_authority_invalidation_count: number;
 };
 
 function emptyAccumulator(): CounterAccumulator {
@@ -60,6 +95,9 @@ function emptyAccumulator(): CounterAccumulator {
     review_count: 0,
     passing_review_count: 0,
     failing_review_count: 0,
+    workEpoch: 0,
+    freshPositiveAuthority: false,
+    historical_authority_invalidation_count: 0,
   };
 }
 
@@ -67,7 +105,13 @@ function emptyAccumulator(): CounterAccumulator {
  * Apply one event's contribution to the counter accumulator.
  * Pure: no I/O, no mutation outside the accumulator.
  *
- * Counts closed (FINISHED) variants of each lifecycle pair.
+ * Counts closed (FINISHED) variants of each lifecycle pair
+ * for the structural counter section (M4). Also walks the
+ * Phase E E-C14 V2 work-epoch transition and the
+ * fresh-positive-authority invariant so we can count
+ * `historical_authority_invalidation_count` (M6 historical
+ * correction burden, CORRECTION01).
+ *
  * For ACTION we deliberately count ACTION_FINISHED rather
  * than ACTION_STARTED so that open attempts that never
  * close do not inflate `action_count`. Phase E's legality
@@ -81,21 +125,62 @@ function applyEvent(
 ): void {
   const inner: RunEvent = event.event;
   switch (inner.type) {
+    case "ACTION_STARTED":
+      // E-C14 V2: ACTION_STARTED is the general harness-work
+      // primitive and advances the work epoch. If fresh
+      // positive authority existed (a passing gate at the
+      // previous epoch), this event invalidates it.
+      if (acc.freshPositiveAuthority) {
+        acc.historical_authority_invalidation_count += 1;
+        acc.freshPositiveAuthority = false;
+      }
+      acc.workEpoch += 1;
+      return;
     case "ACTION_FINISHED":
       acc.action_count += 1;
       if (inner.status === "OK") {
         acc.successful_action_count += 1;
       } else if (inner.status === "ERROR") {
         acc.failed_action_count += 1;
+        // E-C21: ACTION_FINISHED(ERROR) is authoritative
+        // negative execution evidence; it both invalidates
+        // fresh positive authority AND advances the work
+        // epoch. (E-C14 V2 rule.)
+        if (acc.freshPositiveAuthority) {
+          acc.historical_authority_invalidation_count += 1;
+          acc.freshPositiveAuthority = false;
+        }
+        acc.workEpoch += 1;
       }
       return;
     case "GATE_FINISHED":
       acc.gate_count += 1;
       if (inner.pass === true) {
         acc.passing_gate_count += 1;
+        // A passing gate at the current work epoch
+        // establishes fresh positive authority. Phase E
+        // guarantees gates close at the current work epoch
+        // (E-C14); the metric does NOT need to verify the
+        // epoch separately.
+        acc.freshPositiveAuthority = true;
       } else {
         acc.failing_gate_count += 1;
+        // E-C14: a failing gate stales any prior passing
+        // gate at the same work epoch.
+        if (acc.freshPositiveAuthority) {
+          acc.historical_authority_invalidation_count += 1;
+          acc.freshPositiveAuthority = false;
+        }
       }
+      return;
+    case "REPAIR_STARTED":
+      // E-C14 V2: REPAIR_STARTED advances work epoch AND
+      // invalidates fresh positive authority.
+      if (acc.freshPositiveAuthority) {
+        acc.historical_authority_invalidation_count += 1;
+        acc.freshPositiveAuthority = false;
+      }
+      acc.workEpoch += 1;
       return;
     case "REPAIR_FINISHED":
       acc.repair_cycle_count += 1;
@@ -104,15 +189,29 @@ function applyEvent(
       acc.review_count += 1;
       if (inner.pass === true) {
         acc.passing_review_count += 1;
+        // E-C22: REVIEW_FINISHED(true) supersedes a failing
+        // verdict at the same work epoch; it does NOT
+        // establish fresh positive closure authority (only
+        // a passing GATE_FINISHED does).
       } else {
         acc.failing_review_count += 1;
+        // E-C22: REVIEW_FINISHED(false) at the current
+        // work epoch is authoritative negative review
+        // evidence. (A REPAIR_STARTED before would have
+        // advanced the epoch and made the verdict
+        // historical.)
+        if (acc.freshPositiveAuthority) {
+          acc.historical_authority_invalidation_count += 1;
+          acc.freshPositiveAuthority = false;
+        }
       }
       return;
     default:
       // Other event types intentionally contribute nothing
-      // to structural counters. Including RUN_STARTED would
-      // inflate `action_count`-like metrics with lifecycle
-      // markers, which the ACT forbids.
+      // to structural counters or to authority tracking.
+      // Including RUN_STARTED would inflate `action_count`-
+      // like metrics with lifecycle markers, which the ACT
+      // forbids.
       return;
   }
 }
@@ -136,10 +235,7 @@ export function deriveCounters(
   orderedEvents: ReadonlyArray<CommittedRunEvent>,
   workEpochFromProjection: number,
 ): Counters {
-  const acc = emptyAccumulator();
-  for (const e of orderedEvents) {
-    applyEvent(acc, e);
-  }
+  const acc = walkCounters(orderedEvents);
   return {
     action_count: acc.action_count,
     successful_action_count: acc.successful_action_count,
@@ -154,4 +250,46 @@ export function deriveCounters(
     failing_review_count: acc.failing_review_count,
     work_epoch_count: workEpochFromProjection,
   };
+}
+
+/**
+ * Walk the ordered evidence stream once and return the
+ * structural counters plus the historical authority-
+ * invalidation count. Exposed separately from
+ * `deriveCounters` so the metric projector can read the
+ * historical count without having to expose it on the
+ * public `Counters` type.
+ *
+ * The walk mirrors Phase E's E-C14 V2 work-epoch
+ * transition and the fresh-positive-authority invariant.
+ * The historical count is the number of events in the run
+ * that invalidated previously established positive closure
+ * authority (survives later recovery).
+ */
+export function deriveAuthorityInvalidation(
+  orderedEvents: ReadonlyArray<CommittedRunEvent>,
+): {
+  readonly historical_authority_invalidation_count: number;
+  readonly freshPositiveAuthority: boolean;
+} {
+  const acc = walkCounters(orderedEvents);
+  return {
+    historical_authority_invalidation_count:
+      acc.historical_authority_invalidation_count,
+    freshPositiveAuthority: acc.freshPositiveAuthority,
+  };
+}
+
+/**
+ * Internal: single forward pass that produces the full
+ * accumulator. Pure: same input -> same output.
+ */
+function walkCounters(
+  orderedEvents: ReadonlyArray<CommittedRunEvent>,
+): CounterAccumulator {
+  const acc = emptyAccumulator();
+  for (const e of orderedEvents) {
+    applyEvent(acc, e);
+  }
+  return acc;
 }

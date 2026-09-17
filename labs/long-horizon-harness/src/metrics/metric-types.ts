@@ -239,14 +239,42 @@ export type Counters = {
  *
  * M5 forbids calling any single one "the convergence score".
  *
- * `*_to_terminal` is always defined and counts the events
- * observed BEFORE the terminal claim (or, for non-terminal
- * runs, the events observed up to the end of the stream).
+ * UNIT CONVENTIONS (frozen at CORRECTION01):
  *
- * `*_to_last_authoritative_pass` is the count of events
- * observed up to and including the LAST passing
- * GATE_FINISHED. Unavailable if no passing gate was ever
- * observed.
+ *   `*_to_terminal` fields are always defined. They count
+ *   the requested discriminator kind over the FULL ordered
+ *   stream. (For non-terminal runs the anchor is the end of
+ *   the stream rather than a terminal claim; the metric does
+ *   not invent one.)
+ *
+ *   `*_to_terminal` discriminators:
+ *     - actions:      ACTION_STARTED
+ *     - repairs:      REPAIR_STARTED
+ *     - reviews:      REVIEW_STARTED
+ *     - gates:        GATE_FINISHED
+ *     - work_epochs:  the work epoch reached at the anchor
+ *                     event (Phase E's frozen E-C14 V2
+ *                     transition rule; not the array index).
+ *
+ *   `*_to_last_authoritative_pass` fields are the count of
+ *   events of the requested discriminator kind observed
+ *   UP TO AND INCLUDING the LAST passing closure gate that
+ *   AUTHORIZED terminal SUCCESS. They are available iff
+ *   trustworthy_success === true. For non-SUCCESS runs the
+ *   fields surface `unavailable("NOT_APPLICABLE")` rather
+ *   than anchoring on a passing gate that may later be
+ *   invalidated. (A passing gate followed by negative
+ *   evidence is NOT "authoritative" for purposes of this
+ *   metric; the gate that authorizes SUCCESS is the gate
+ *   that closed at the CURRENT work epoch in the
+ *   trustworthy_success sense.)
+ *
+ *   Discriminators:
+ *     - actions:      ACTION_STARTED (attempts entered)
+ *     - repairs:      REPAIR_STARTED
+ *     - reviews:      REVIEW_STARTED
+ *     - work_epochs:  work epoch reached at the authoritative
+ *                     passing gate
  */
 export type ConvergenceDistances = {
   readonly actions_to_terminal: number;
@@ -267,25 +295,45 @@ export type ConvergenceDistances = {
 /**
  * Correction burden (M6).
  *
- * `authority_invalidation_count` is the count of
- * negative-evidence events that currently invalidate prior
- * closure authority. Concretely it is:
+ * LH-02 distinguishes TWO measurands here, because the original
+ * ACT-definition was historical ("count events that make
+ * previously established positive closure authority stale") but
+ * a current-state scalar was needed for diagnostic surfaces.
  *
- *   current_epoch_action_failure ? 1 : 0
- *   + current_epoch_review_failure ? 1 : 0
+ * `historical_authority_invalidation_count` is the HISTORICAL
+ * correction burden: the number of events in the run that
+ * invalidated previously established positive closure
+ * authority. This count survives later recovery — a run that
+ * required three requalification cycles still reports 3 even
+ * after the final cycle passed. Defined in V1 as the count of:
  *
- * This is bounded by 2 in V1 — those are the only two
- * structural authority-invalidation sources Phase E exposes
- * via projection (ACTION ERROR and REVIEW FAIL). Callers
- * should compose richer "burden" notions from the full
- * counter vector; LH-02 does not invent a single scalar.
+ *   GATE_FINISHED(pass=false)    while fresh positive authority
+ *                                existed;
+ *   ACTION_STARTED               while fresh positive authority
+ *                                existed;
+ *   REPAIR_STARTED               while fresh positive authority
+ *                                existed;
+ *   ACTION_FINISHED(ERROR)       while fresh positive authority
+ *                                existed;
+ *   REVIEW_FINISHED(pass=false)  that lands at the current
+ *                                work epoch (Phase E E-C22).
+ *
+ * The walk mirrors Phase E's frozen precedence semantics.
+ *
+ * `current_authority_blocker_count` is the CURRENT-STATE
+ * diagnostic (the previous V1 definition): 0..2 reflecting
+ * whether an unrecovered failure still blocks SUCCESS.
+ *
+ * LH-02 does NOT add a single scalar "burden" — the historical
+ * counter is what measures how much correction was required.
  */
 export type CorrectionBurden = {
   readonly repair_cycle_count: number;
   readonly failed_action_count: number;
   readonly failing_gate_count: number;
   readonly failing_review_count: number;
-  readonly authority_invalidation_count: number;
+  readonly historical_authority_invalidation_count: number;
+  readonly current_authority_blocker_count: number;
 };
 
 // ---------------------------------------------------------------------------

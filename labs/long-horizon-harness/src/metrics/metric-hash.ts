@@ -81,20 +81,16 @@ function canonicalEvidenceString(
 /**
  * Render a single `CommittedRunEvent` as a canonical JSON
  * object using Phase E's `deterministicJson` encoder. We
- * deliberately avoid calling into Phase E's own envelope
- * encoder because that produces a `schema_version` field
- * with the live `RUN_EVENT_SCHEMA_VERSION` value, which we
- * do not want here (we want the evidence hash to bind to
- * the EVIDENCE not to the version stamp; the metric report
- * already records the schema version via
- * `provenance.metric_report_schema_version`).
- *
- * The fields we emit are the identity-binding metadata of
- * the committed event plus its canonical payload. Two
+ * deliberately include the committed envelope's own
+ * `schema_version` field in the canonical record. Two
  * distinct committed events that differ only in their
- * schema_version stamp would produce distinct hashes; we
- * decide this is acceptable because the stamp is part of
- * what makes the event canonically itself.
+ * committed-envelope `schema_version` stamp will produce
+ * distinct `run_evidence_hash` values — that is the
+ * intended contract: `schema_version` IS part of evidence
+ * identity in V1. The metric report separately records
+ * its own report-level schema version via
+ * `provenance.metric_report_schema_version`, but the
+ * EVIDENCE hash binds to the EVIDENCE including its stamp.
  *
  * Deliberate simplicity: we record the full event payload
  * by recursive canonicalization through `deterministicJson`.

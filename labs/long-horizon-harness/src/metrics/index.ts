@@ -47,6 +47,7 @@ export {
 
 export {
   computeRunMetrics,
+  verifyProjectionBind,
   type MetricResult,
 } from "./metric-projector.js";
 
