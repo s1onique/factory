@@ -1118,3 +1118,158 @@ src/run/
 
 - `src/run/` — full Phase E implementation
 - `test/run/` — adversarial corpus `run-evidence-contract-*.test.ts`
+
+---
+
+## Phase F — LH-02 — Convergence Metric Contract
+
+ACT `ACT-FACTORY-LONG-HORIZON-LAB-CONVERGENCE-METRIC-CONTRACT01`
+(`LH-02`). Defines a deterministic, candidate-neutral metric
+contract for measuring how a harness/model run converges
+toward trustworthy terminal closure.
+
+Metrics are **pure derived values** over the Phase E
+evidence substrate. LH-02 does NOT alter run legality,
+terminal outcome, closure authority, event interpretation,
+or subject identity.
+
+```text
+MetricReport =
+    f(
+      immutable Subject,
+      immutable RunManifest,
+      ordered Phase-E RunEvents,
+      versioned MetricContract
+    )
+```
+
+No harness self-report participates as metric authority
+unless Phase E already captured it as an observation.
+
+### Contract identity (M1)
+
+LH-02 ships exactly one V1 contract identity:
+
+```text
+CONVERGENCE_METRIC_CONTRACT_V1 =
+  "convergence.metric.contract.v1"
+METRIC_REPORT_SCHEMA_VERSION =
+  "metric.report.schema.v1"
+```
+
+Changing metric semantics requires a new contract version.
+Silently re-interpreting historical runs under a changed
+formula while preserving the same version is forbidden.
+
+### Module layout
+
+```text
+src/metrics/
+  metric-types.ts                closed-world types: Counters, ConvergenceDistances,
+                                 CorrectionBurden, TimeMetrics, ResourceMetrics,
+                                 FailureObservations, ConvergenceFacts,
+                                 SuccessNormalized, SurvivingDefectSurface,
+                                 ReportProvenance, MetricReport; MetricValue
+                                 Available/Unavailable algebra; UnavailabilityReason
+                                 closed-world set (NOT_OBSERVED, NOT_APPLICABLE,
+                                 INCOMPLETE_RUN, INVALID_EVIDENCE,
+                                 UNSUPPORTED_BY_CONTRACT, INVALID_DURATION,
+                                 MISSING_TIMESTAMPS)
+  metric-contract.ts             contract version guard (refuses unknown versions)
+  metric-counters.ts             deriveCounters (single-pass counters, M4)
+  metric-distances.ts            deriveConvergenceDistances + deriveCorrectionBurden
+                                 (M5, M6)
+  metric-time.ts                 deriveTimeMetrics (M8 deterministic durations;
+                                 no clamping; no silent zero)
+  metric-resources.ts            deriveResourceMetrics (M9/M10/M11; lifts
+                                 RUN_TIMEOUT.observation only; never infers)
+  metric-shape.ts                deriveConvergenceFacts + deriveFailureObservations
+                                 + deriveSuccessNormalized (M13, M14, M15)
+  metric-surviving-defect.ts     deriveSurvivingDefectSurface (M7; surviving
+                                 defect count deliberately unavailable)
+  metric-hash.ts                 deriveRunEvidenceHash (sha-256 over Phase E
+                                 canonical event bytes)
+  metric-projector.ts            computeRunMetrics (the single canonical entry
+                                 point; identity-bound to runProjection)
+  metric-serialize.ts            serializeMetricReport (reuses Phase E
+                                 deterministicJson)
+  index.ts                       public barrel
+```
+
+### Authoritative commands
+
+```text
+# Run LH-02 metrics suite only
+node --import tsx --test --test-reporter=spec \
+   test/metrics/metric-contract.test.ts \
+   test/metrics/metric-golden.test.ts \
+   test/metrics/metric-properties.test.ts \
+   test/metrics/metric-time.test.ts \
+   test/metrics/metric-resources.test.ts
+```
+
+### Contract Matrix — Phase F (M-M01..M-M16)
+
+| ID    | Property                                                          | Status |
+|-------|-------------------------------------------------------------------|--------|
+| M-M01 | metric contract versioned (M1) — single V1 identity; unknown versions refused; `metric_report_schema_version` recorded in every report | PASS |
+| M-M02 | pure metric projection (M2) — same inputs + same contract = structurally equal report; no `Date.now()`, no `Math.random()`, no ambient state, no fs/net/pricing reads | PASS |
+| M-M03 | Phase E outcome imported (M3) — `convergence.terminal_outcome === projection.terminal_outcome`; metric never recomputes / overrides the projector | PASS |
+| M-M04 | structural counters (M4) — action / gate / repair / review counters derived from ordered events only; `counters.work_epoch_count` lifted from `runProjection.work_epoch` | PASS |
+| M-M05 | correction burden (M6) — exposes `repair_cycle_count`, `failed_action_count`, `failing_gate_count`, `failing_review_count`, `authority_invalidation_count` (0/1/2) | PASS |
+| M-M06 | time metrics evidence-bound (M8) — only `observed_at`; missing -> `MISSING_TIMESTAMPS`; non-monotonic -> `INVALID_DURATION`; NEVER clamps | PASS |
+| M-M07 | resource metrics evidence-bound (M9/M10/M11) — every resource slot is `Available(value)` or `Unavailable(reason)`; NEVER inferred from action/gate counts | PASS |
+| M-M08 | missing evidence != zero (M16) — every metric value is one of `{available:true,value}` or `{available:false,reason}`; no silent zero substitution | PASS |
+| M-M09 | pricing separated (M12) — `RESOURCE_METRICS` exposes `total_tokens` and `tool_calls_total` only; no CostReport; `MEASURED_CONSUMPTION != PRICING` | PASS |
+| M-M10 | failure causality not inferred (M14) — exposes `observed_failure`; `attributed_cause` is `unavailable("UNSUPPORTED_BY_CONTRACT")` in V1 | PASS |
+| M-M11 | report evidence-bound (M17) — every report binds `metric_contract_version`, `metric_report_schema_version`, `run_id`, `subject_id`, `terminal_outcome`, `last_sequence`, `event_count`, `run_evidence_hash` | PASS |
+| M-M12 | report owned inert (M18) — `metric-projector.ts` reuses Phase E type-aware derivation; no caller-owned references; no parallel cloning | PASS |
+| M-M13 | canonical serialization (M19) — `serializeMetricReport` reuses Phase E `deterministicJson`; same semantic report -> same bytes | PASS |
+| M-M14 | replay deterministic (M2 oracle) — replaying the same evidence produces byte-equal MetricReports | PASS |
+| M-M15 | golden hand calculations (M21) — `metric-golden.test.ts` pins 6+ counter vectors by hand against hand-rolled synthetic streams | PASS |
+| M-M16 | metric authority non-interference (M23) — metric cannot authorize SUCCESS; untrusted contract versions / identity mismatches return `{ok:false,reason}` rather than a corrupted report | PASS |
+
+### Acceptance evidence (against committed HEAD)
+
+| Suite                              | Count | Status |
+|------------------------------------|-------|--------|
+| `test/metrics/metric-contract.test.ts`    | 10/10 | PASS |
+| `test/metrics/metric-golden.test.ts`      |  6/6  | PASS |
+| `test/metrics/metric-properties.test.ts`  |  8/8  | PASS |
+| `test/metrics/metric-time.test.ts`        |  5/5  | PASS |
+| `test/metrics/metric-resources.test.ts`   |  6/6  | PASS |
+| **LH-02 metrics suite total**             | **35/35** | **PASS** |
+| Phase E `test/run/*.test.ts` (frozen)     | 86/86 | PASS   |
+| Phase D `test:subject`                    |102/102| PASS   |
+| Phase C witness `pure` / `codec`           | 17/17 | PASS   |
+| Phase B/C `test:witness-start`             | 47/47 (1 skipped) | PASS |
+| `npm run check:eof`                        | 15/15 | PASS   |
+| `npm run check:domain-purity`              |  3/3  | PASS   |
+| `npm run check:trust-boundary`             |  2/2  | PASS   |
+| `npm run typecheck`                        | clean | PASS   |
+| `npm run build`                            | clean | PASS   |
+| `scripts/verify_factory.sh`                | OK    | PASS   |
+| `scripts/verify_worktree_policy.sh`        | OK    | PASS   |
+| `tests/worktree_policy/test_worktree_policy.sh` | 9/9 | PASS |
+| `git diff HEAD --check`                    | clean | PASS   |
+| `git worktree list --porcelain`            | 1 main / 0 linked / 0 detached | OK |
+
+### LH-02 Negative Oracles
+
+```text
+METRIC_CODE_CAN_CHANGE_TERMINAL_OUTCOME        = FALSE  (M3, M16, M23)
+METRIC_CODE_CAN_AUTHORIZE_SUCCESS             = FALSE  (M3, M16, M23)
+METRIC_CODE_CAN_INFER_TOOL_CALLS_FROM_ACTIONS = FALSE  (M9)
+METRIC_CODE_CAN_INFER_TOKEN_PROVENANCE        = FALSE  (M10)
+METRIC_CODE_CAN_CLAMP_NON_MONOTONIC_DURATION  = FALSE  (M8)
+METRIC_CODE_CAN_REPLACE_MISSING_WITH_ZERO    = FALSE  (M16)
+METRIC_CODE_CAN_FABRICATE_SURVIVING_DEFECTS  = FALSE  (M7)
+METRIC_CODE_CAN_APPLY_DIFFERENT_FORMULA_AT_SAME_VERSION = FALSE (M1)
+SILENT_REINTERPRETATION_UNDER_SAME_VERSION   = IMPOSSIBLE (M1)
+PRICE_TABLE_COUPLED_TO_DETERMINISTIC_METRIC  = FALSE  (M12)
+```
+
+### LH-02 See
+
+- `src/metrics/` — full LH-02 implementation
+- `test/metrics/` — adversarial corpus `metric-*.test.ts`
