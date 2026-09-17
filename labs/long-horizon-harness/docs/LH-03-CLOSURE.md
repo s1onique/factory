@@ -19,7 +19,8 @@ FACTORY_GIT_WORKTREE_POLICY_DISPOSITION = OK
 
 ENTRY_HEAD                = 715e6390d78228f089270259e1bd1307140adb75
 DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
-FINAL_HEAD                = <recorded at commit time>
+FINAL_HEAD                = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
+LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
 ```
 
 ## Verdict
