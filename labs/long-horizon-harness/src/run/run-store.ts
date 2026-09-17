@@ -131,8 +131,14 @@ export { canonicalEventBytes };
  * Two steps in strict order, BOTH must succeed before commit:
  *
  *   (a) snapshot the caller input through the Phase D
- *       snapshotter. Rejects Proxy / accessor / cyclic /
- *       exotic inputs without invoking any trap.
+ *       snapshotter. The snapshotter may fire `Reflect.ownKeys`
+ *       and `getOwnPropertyDescriptor` traps as part of the
+ *       defensive structural boundary; the result is validated
+ *       and found non-extensible / non-plain, so Proxy inputs
+ *       are rejected before any property GET, accessor
+ *       execution, canonicalization, EventId generation, or
+ *       idempotency-content lookup can observe the raw caller
+ *       graph.
  *   (b) closed-world RunEvent decode on the snapshot. Rejects
  *       unknown own keys (e.g. an extra `__proto__` field on
  *       ACTION_STARTED) before any commit.
@@ -140,6 +146,12 @@ export { canonicalEventBytes };
  * The returned RunEvent is deeply frozen + typed + closed-
  * world-validated. The caller retains zero references into it.
  * On failure we surface a typed `StoreFailure` (never throw).
+ *
+ * Phase-D D-M04 (precise, not overclaimed):
+ *   NO [[Get]] / accessor / canonicalization / EventId /
+ *   idempotency-content lookup BEFORE ownership.
+ *   `ownKeys` + `getOwnPropertyDescriptor` traps MAY fire as
+ *   bounded, fail-closed structural probes.
  */
 function snapshotDecodeOwnedRunEvent(
   event: RunEvent,

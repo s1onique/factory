@@ -109,15 +109,26 @@ export type LegalityTracker = {
    *     && closureGateEpoch === workEpoch
    *     && no open structural scopes
    *
-   * so any later REPAIR (or any other epoch-advancing event)
-   * invalidates the prior gate authority. This replaces the
-   * stale `lastGateFinishedPass` boolean with explicit
-   * freshness.
+   * so any later epoch-advancing event invalidates the prior
+   * gate authority. This replaces the stale
+   * `lastGateFinishedPass` boolean with explicit freshness.
    *
-   * V1 rule (frozen): only `REPAIR_STARTED` advances the work
-   * epoch. A subsequent `ACTION_STARTED` after a passing gate
-   * does NOT by itself invalidate the gate; it merely opens a
-   * new attempt scope which the open-scope check catches.
+   * V2 rule (frozen by CORRECTION04): both `ACTION_STARTED` and
+   * `REPAIR_STARTED` advance the work epoch. Rationale: ACTION
+   * is the general harness-work primitive. Until an action is
+   * mechanically proven read-only, activity after a passing
+   * qualification must stale that qualification. The desired
+   * property is:
+   *
+   *   work -> gate PASS -> success                          OK
+   *   work -> gate PASS -> more work -> success             INVALID
+   *   work -> gate PASS -> more work -> gate PASS -> success OK
+   *
+   * i.e. SUCCESS requires a fresh passing gate at the CURRENT
+   * work epoch. The open-scope check still catches any attempt
+   * or repair that was never closed before terminal closure;
+   * the epoch check additionally catches the subtler case of a
+   * completed-then-properly-closed action after a gate.
    */
   workEpoch: number;
   closureGateEpoch: number | null;

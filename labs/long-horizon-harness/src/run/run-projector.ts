@@ -97,23 +97,24 @@ function initialProjection(manifest: RunManifest): RunProjection {
  *   contributes to the temporal-authority ordering; the LAST
  *   closed gate's pass value is the authoritative one.
  *
- * E-C14 closure-authority epoch rule (V1):
+ * E-C14 closure-authority epoch rule (V2):
  *
- *   REPAIR_STARTED mutates the artifact under qualification
- *   and therefore invalidates any prior closure-authority
- *   gate. The projector tracks `workEpoch` (advanced by
- *   REPAIR_STARTED) and `closureGateEpoch` (captured at gate
- *   close). SUCCESS requires
+ *   ACTION_STARTED and REPAIR_STARTED both mutating-or-
+ *   unknown-effect events therefore invalidate any prior
+ *   closure-authority gate. The projector tracks `workEpoch`
+ *   (advanced by both events) and `closureGateEpoch` (captured
+ *   at gate close). SUCCESS requires
  *
  *     closureGatePass === true
  *       AND closureGateEpoch === workEpoch
  *
- *   so a PASS gate observed before a repair cannot authorize
- *   a SUCCESS after the repair. The V1 invalidation rule is:
- *   only REPAIR_STARTED advances the work epoch; a subsequent
- *   ACTION_STARTED does NOT advance the epoch on its own.
+ *   so a PASS gate observed before any subsequent work cannot
+ *   authorize a SUCCESS after that work. The V2 invalidation
+ *   rule: ACTION_STARTED and REPAIR_STARTED both advance the
+ *   work epoch; a subsequent completed post-gate action
+ *   stales the gate's closure authority.
  *
- * V1 minimum authoritative-success evidence:
+ * V2 minimum authoritative-success evidence:
  *
  *   1. RUN_STARTED                       (run was initiated)
  *   2. HARNESS_STARTED                   (harness actually ran)

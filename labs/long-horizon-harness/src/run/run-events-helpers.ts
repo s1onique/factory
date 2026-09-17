@@ -76,6 +76,13 @@ export function applyActionStarted(
     };
   }
   tracker.openAttemptId = event.event.target.attempt_id;
+  // E-C14 V2: ACTION_STARTED is the general harness-work primitive.
+  // Until an action is mechanically proven read-only, any work the
+  // harness begins after a passing gate MUST stale that gate. We
+  // therefore advance workEpoch on ACTION_STARTED in addition to
+  // REPAIR_STARTED. The success predicate then requires a fresh
+  // passing gate at the new epoch to authorize SUCCESS.
+  tracker.workEpoch += 1;
   return { ok: true };
 }
 
@@ -235,10 +242,11 @@ export function applyRepairStarted(
   }
   tracker.openRepairId = event.event.repair_id;
   tracker.repair_count += 1;
-  // E-C14: REPAIR mutates the artifact under qualification.
+  // E-C14 V2: REPAIR mutates the artifact under qualification.
   // Advance workEpoch so any prior closure-authority gate is
   // stale; the success predicate will require a fresh closing
-  // gate at the new epoch.
+  // gate at the new epoch. (ACTION_STARTED also advances the
+  // epoch; see applyActionStarted.)
   tracker.workEpoch += 1;
   return { ok: true };
 }

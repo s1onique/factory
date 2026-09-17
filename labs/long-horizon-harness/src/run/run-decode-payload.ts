@@ -22,10 +22,15 @@
  *
  *   The PUBLIC entry point `decodeRunEventPayload` snapshots the
  *   input through the hardened Phase D boundary BEFORE any
- *   structural read; this rejects Proxy / accessor / exotic
- *   inputs without invoking any trap. The internal helper
- *   `decodeOwnedRunEventPayload` is reachable only from inside
- *   the already-snapshotted envelope decoder, where its
+ *   structural read; the snapshotter may fire `Reflect.ownKeys`
+ *   and `getOwnPropertyDescriptor` traps as part of the
+ *   defensive structural boundary, but the raw caller graph is
+ *   never observed via [[Get]], accessor execution, or any
+ *   downstream consumer (canonicalization, EventIdSource,
+ *   idempotency-content lookup). Proxy / accessor / exotic
+ *   inputs are rejected at that snapshot boundary. The internal
+ *   helper `decodeOwnedRunEventPayload` is reachable only from
+ *   inside the already-snapshotted envelope decoder, where its
  *   arguments are guaranteed to be inert owned data.
  *
  * This module is pure: no I/O.
@@ -66,7 +71,10 @@ import {
  * Routes the input through the hardened Phase D snapshotter
  * first, then delegates to the owned-value structural decoder.
  * No structural read in the dispatch path may ever invoke a
- * caller-controlled trap (Proxy / accessor / getter).
+ * caller-controlled `[[Get]]` or accessor execution. The
+ * snapshotter may invoke `Reflect.ownKeys` /
+ * `getOwnPropertyDescriptor` traps as part of the defensive
+ * structural boundary; those are bounded and fail-closed.
  */
 export function decodeRunEventPayload(
   value: unknown,

@@ -883,9 +883,9 @@ level (per-event sub-types) and at runtime (decoder rejection).
 | E-M24 | canonical event content (E-C10) — single deterministic encoder  | PASS   |
 | E-M25 | snapshot precedes every semantic observation (E-C12) — raw caller graph is never hashed, decoded, or canonicalized | PASS   |
 | E-M26 | store enforces closed-world RunEvent schema (E-C13) — unknown own keys rejected before commit | PASS   |
-| E-M27 | closure authority is epoch-bound (E-C14) — REPAIR_STARTED invalidates prior closure gate | PASS   |
+| E-M27 | closure authority is epoch-bound (E-C14) — ACTION_STARTED and REPAIR_STARTED both advance workEpoch and invalidate prior closure gate | PASS   |
 | E-M28 | canonical dependency direction is acyclic (E-C15) — `run-events` and `run-projector` MUST NOT import `run-store` | PASS   |
-| E-M29 | Phase-E hostile-append boundary acceptance (E-C16) — `store.append` does not execute Proxy `get` traps | PASS   |
+| E-M29 | Phase-E hostile-append boundary acceptance (E-C16) — `store.append` does not execute Proxy `[[Get]]` or accessor traps; `ownKeys`/`getOwnPropertyDescriptor` traps may fire as bounded structural probes | PASS   |
 
 The Phase E **first correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
 PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION01) added E-M16..E-M20.
@@ -904,6 +904,23 @@ advances `workEpoch`; SUCCESS requires `closureGateEpoch === workEpoch`.
 The Phase-D ↔ Phase-E dependency graph was hardened (E-C15): `canonicalEventBytes`
 now lives in `run-serialize.ts` (the neutral pure encoder) and `run-events.ts`
 imports it from there rather than from `run-store.ts`.
+
+The Phase E **fourth correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
+PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION04) tightens E-C14 from V1 to V2:
+**`ACTION_STARTED` also advances `workEpoch`**. Rationale: ACTION is the
+general harness-work primitive. Until an action is mechanically proven
+read-only, activity after a passing qualification must stale that
+qualification. The V2 rule gives the precise temporal property:
+
+```text
+work → gate PASS → success                OK
+work → gate PASS → more work → success    INVALID_EVIDENCE
+work → gate PASS → more work → gate PASS → success OK
+```
+
+This is established by the new probes RUN70, RUN71, RUN72. RUN68 was also
+strengthened to test the **completed** post-gate work case (closed attempt
+scope), which the prior open-scope check did not catch.
 
 ### Invariant Probes
 
@@ -945,14 +962,17 @@ SYMBOL_OR_NON_ENUMERABLE_OR_ACCESSOR_REJECTED        = PASS        (RUN64)
 NESTED_PROTO_DATA_PRESERVED_BY_SNAPSHOTTER           = PASS        (RUN65)
 PRE_REPAIR_GATE_AUTHORIZES_POST_REPAIR_SUCCESS       = IMPOSSIBLE  (RUN66)
 POST_REPAIR_GATE_AUTHORIZES_POST_REPAIR_SUCCESS      = POSSIBLE    (RUN67)
-SUBSEQUENT_ACTION_WITHOUT_REPAIR_DOES_NOT_INVALIDATE = POSSIBLE    (RUN68, open scope caught)
+SUBSEQUENT_ACTION_WITHOUT_REPAIR_DOES_NOT_INVALIDATE = IMPOSSIBLE  (RUN68, completed post-gate work; open scope still caught)
+POST_GATE_COMPLETED_WORK_WITHOUT_REGATE_CANNOT_SUCCESS = IMPOSSIBLE (RUN70)
+POST_GATE_COMPLETED_WORK_WITH_REGATE_CAN_SUCCESS      = POSSIBLE    (RUN71)
+MULTIPLE_ACTION_CYCLES_SINGLE_FINAL_PASS              = POSSIBLE    (RUN72)
 FAIL_THEN_REPAIR_THEN_PASS_SUCCESS                   = POSSIBLE    (RUN69)
 RUN_EVENTS_DEPENDS_ON_RUN_STORE                      = FALSE       (RUN_GRAPH)
 RUN_PROJECTOR_DEPENDS_ON_RUN_STORE                   = FALSE       (RUN_GRAPH)
 HOSTILE_INPUT_REACHES_CANONICAL_ENCODER              = IMPOSSIBLE  (RUN16_E_PHASE_E)
 ```
 
-### Adversarial Corpus — RUN01..RUN69
+### Adversarial Corpus — RUN01..RUN72
 
 The acceptance corpus lives in `test/run/`:
 
@@ -967,9 +987,9 @@ The acceptance corpus lives in `test/run/`:
   Phase E second correction (E-C07..E-C11). RUN51/52/53/54/55
   were REWRITTEN in CORRECTION03 to drive hostile inputs
   through `store.append()` rather than the Phase-D primitive.
-- `run-evidence-contract-correction-03.test.ts` (RUN59–RUN69,
-  RUN_GRAPH, RUN16_E_PHASE_E) — Phase E third correction
-  (E-C12..E-C16)
+- `run-evidence-contract-correction-03.test.ts` (RUN59–RUN72,
+  RUN_GRAPH, RUN16_E_PHASE_E) — Phase E third + fourth
+  corrections (E-C12..E-C16 + V2 epoch rule for E-C14).
 
 Run with:
 

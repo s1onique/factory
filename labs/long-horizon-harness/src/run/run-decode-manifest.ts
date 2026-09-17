@@ -58,7 +58,13 @@ import {
  *   Phase D snapshotter (snapshotJsonValue). This guarantees:
  *
  *     - Proxy / accessor / exotic-prototype / cyclic inputs are
- *       rejected without invoking any trap.
+ *       rejected before any [[Get]], accessor execution,
+ *       canonicalization, EventId generation, or
+ *       idempotency-content lookup can observe the raw caller
+ *       graph. The snapshotter may invoke `Reflect.ownKeys` /
+ *       `getOwnPropertyDescriptor` traps as part of the
+ *       defensive structural boundary; those are bounded and
+ *       fail-closed.
  *     - The structural reads that follow operate on owned,
  *       plain-object data with no side effects on the caller.
  *
@@ -78,8 +84,11 @@ export function decodeRunManifest(
   try {
     // (1) Snapshot the input through the hardened Phase D boundary.
     //     This rejects Proxy / accessor / cyclic / exotic inputs
-    //     BEFORE any further structural validation runs, so no
-    //     structural read can ever invoke a caller-controlled trap.
+    //     BEFORE any further structural validation runs. No
+    //     structural read here can ever invoke a caller-controlled
+    //     [[Get]] or accessor execution; `ownKeys` /
+    //     `getOwnPropertyDescriptor` traps may fire as part of the
+    //     defensive boundary but are bounded and fail-closed.
     const snap = snapshotJsonValue(input);
     if (!snap.ok) {
       return fail({ kind: "schema_validation", reason: snap.reason });

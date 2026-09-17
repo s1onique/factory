@@ -18,8 +18,13 @@
  *   E-C14 — closure authority is epoch-bound.
  *     RUN66  PASS -> REPAIR -> REPAIR_FINISHED -> SUCCESS       -> INVALID_EVIDENCE
  *     RUN67  PASS -> REPAIR -> REPAIR_FINISHED -> new PASS      -> TERMINAL/SUCCESS
- *     RUN68  PASS -> subsequent mutating ACTION -> SUCCESS      -> INVALID_EVIDENCE
+ *     RUN68  PASS -> completed post-gate ACTION cycle (no regate)
+ *            -> SUCCESS                                       -> INVALID_EVIDENCE
  *     RUN69  FAIL -> repair -> PASS -> SUCCESS                  -> TERMINAL/SUCCESS
+ *     RUN70  PASS -> completed post-gate ACTION cycle          -> INVALID_EVIDENCE
+ *     RUN71  PASS -> completed post-gate ACTION cycle -> new PASS
+ *                                                              -> TERMINAL/SUCCESS
+ *     RUN72  multiple ACTION cycles -> single final PASS gate  -> TERMINAL/SUCCESS
  *
  *   E-C15 — neutral canonical dependency direction.
  *     RUN_GRAPH  run-events MUST NOT import from run-store
@@ -128,6 +133,9 @@ test("RUN61 BigInt in payload → snapshot stage rejects before canonicalization
     type: "ACTION_STARTED",
     target: { kind: "attempt", attempt_id: ids.attempt },
   };
+  // BigInt is non-JSON-safe. The snapshot stage (Phase D) MUST
+  // reject it BEFORE any canonicalization, EventIdSource, or
+  // idempotency lookup can observe the raw input graph (E-C12).
   Object.defineProperty(input, "extra", {
     value: 1n,
     enumerable: true,
@@ -145,6 +153,17 @@ test("RUN61 BigInt in payload → snapshot stage rejects before canonicalization
   assert.equal(r.ok, false);
   if (!r.ok) {
     assert.equal(r.failure.kind, "hostile_payload");
+    if (r.failure.kind === "hostile_payload") {
+      assert.equal(
+        r.failure.stage,
+        "snapshot",
+        "BigInt MUST be rejected at the snapshot stage, never at decode",
+      );
+    }
+  }
+  assert.equal(store.readRun(manifest.run_id).length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // E-C13 — store enforces the closed-world RunEvent schema
 // ---------------------------------------------------------------------------
@@ -299,11 +318,6 @@ test("RUN65 nested __proto__ as data inside an arbitrary JSON object is preserve
 });
 
 
-  }
-  assert.equal(store.readRun(manifest.run_id).length, 0);
-});
-
-
 
 
 // ---------------------------------------------------------------------------
@@ -374,7 +388,22 @@ test("RUN67 PASS → REPAIR → REPAIR_FINISHED → new PASS → SUCCESS → TER
   assert.equal(r.value.closure_authority_fresh, true);
 });
 
-test("RUN68 PASS → new ACTION → SUCCESS → INVALID_EVIDENCE (open scope)", () => {
+test("RUN68 PASS → completed post-gate ACTION cycle (no regate) → SUCCESS → INVALID_EVIDENCE", () => {
+  // CORRECTION04 V2 rule: even when the post-gate action is
+  // FULLY CLOSED (no open attempt scope), ACTION_STARTED still
+  // advances the work epoch. The prior passing gate is therefore
+  // stale at the terminal event:
+  //
+  //   closureGatePass === true
+  //     BUT closureGateEpoch !== workEpoch  (because the post-
+  //     gate ACTION_STARTED advanced the epoch)
+  //
+  // Under V1 this case was incorrectly permitted because
+  // ACTION_STARTED did not advance workEpoch and the only
+  // structural reject was `openAttemptId !== null`. The
+  // projector now reports INVALID_EVIDENCE, demonstrating that
+  // completed post-gate work without regate cannot authorize
+  // SUCCESS — even when no scope is structurally open.
   const { manifest, events } = buildStream([
     () => ({ type: "RUN_STARTED" }),
     () => ({ type: "HARNESS_STARTED" }),
@@ -383,6 +412,7 @@ test("RUN68 PASS → new ACTION → SUCCESS → INVALID_EVIDENCE (open scope)", 
     () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
     () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt }, status: "OK" }),
     () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt2 } }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt2 }, status: "OK" }),
     () => ({ type: "HARNESS_STOPPED" }),
     () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
   ]);
@@ -391,6 +421,9 @@ test("RUN68 PASS → new ACTION → SUCCESS → INVALID_EVIDENCE (open scope)", 
   if (!r.ok) return;
   assert.equal(r.value.lifecycle_state, "INVALID_EVIDENCE");
   assert.equal(r.value.terminal_outcome, null);
+  // The recorded gate authority is stale at the terminal event:
+  // workEpoch advanced when the second ACTION_STARTED fired.
+  assert.equal(r.value.closure_authority_fresh, false);
 });
 
 test("RUN69 FAIL → REPAIR → PASS → SUCCESS → TERMINAL/SUCCESS", () => {
@@ -420,8 +453,93 @@ test("RUN69 FAIL → REPAIR → PASS → SUCCESS → TERMINAL/SUCCESS", () => {
 });
 
 // ---------------------------------------------------------------------------
-// E-C15 — neutral canonical dependency direction
+// E-C14 V2 — ACTION_STARTED advances workEpoch; regate required after
+// post-gate work. RUN70/71/72 establish the precise temporal rule.
 // ---------------------------------------------------------------------------
+
+test("RUN70 PASS → completed post-gate ACTION cycle → SUCCESS → INVALID_EVIDENCE", () => {
+  // Work -> PASS gate -> new ACTION_STARTED -> ACTION_FINISHED
+  // (closed scope) -> SUCCESS. The completion of an action after
+  // the passing gate stales the gate's authority; without a
+  // regate, the projector must report INVALID_EVIDENCE.
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt }, status: "OK" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt2 } }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt2 }, status: "OK" }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "INVALID_EVIDENCE");
+  assert.equal(r.value.terminal_outcome, null);
+  assert.equal(r.value.closure_authority_fresh, false);
+});
+
+test("RUN71 PASS → completed post-gate ACTION cycle → new PASS → SUCCESS → TERMINAL/SUCCESS", () => {
+  // Work -> PASS gate -> new ACTION_STARTED -> ACTION_FINISHED
+  // -> new PASS gate -> SUCCESS. The fresh gate at the current
+  // work epoch re-establishes closure authority and authorizes
+  // SUCCESS.
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt }, status: "OK" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt2 } }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt2 }, status: "OK" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt3 } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate3, attempt_id: ids.attempt3 }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate3, attempt_id: ids.attempt3, pass: true }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt3 }, status: "OK" }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "TERMINAL");
+  assert.equal(r.value.terminal_outcome, "SUCCESS");
+  assert.equal(r.value.closure_authority_fresh, true);
+});
+
+test("RUN72 multiple ACTION cycles → single final PASS gate → SUCCESS → TERMINAL/SUCCESS", () => {
+  // The projector maintains a single closure-authority
+  // record per gate. Multiple ACTION cycles that all complete
+  // before the final PASS gate do not require a regate after
+  // each one — the final gate captures the current work
+  // epoch and authorizes SUCCESS for the whole run.
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt }, status: "OK" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt2 } }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt2 }, status: "OK" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt3 } }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt3 }, status: "OK" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({ type: "ACTION_FINISHED", target: { kind: "attempt", attempt_id: ids.attempt }, status: "OK" }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "TERMINAL");
+  assert.equal(r.value.terminal_outcome, "SUCCESS");
+  assert.equal(r.value.closure_authority_fresh, true);
+});
 
 test("RUN_GRAPH run-events and run-projector MUST NOT import run-store", async () => {
   const { readFile } = await import("node:fs/promises");
@@ -508,4 +626,3 @@ test("Default EventIdSource uses the single canonical encoder", () => {
   );
   assert.equal(a, b);
 });
-
