@@ -122,6 +122,26 @@ export function applyActionFinished(
   }
   tracker.openAttemptId = null;
   tracker.actionFinishedCount += 1;
+  // E-C21: ACTION_FINISHED(ERROR) is authoritative negative
+  // execution evidence. It must invalidate any passing gate
+  // observed before that failure. The simplest V1/V3 model
+  // is to advance `workEpoch` exactly as ACTION_STARTED and
+  // REPAIR_STARTED do. The closure-gate epoch then no longer
+  // equals the work epoch, and the success predicate rejects
+  // any SUCCESS claim that was previously authorized by the
+  // pre-error gate. A later ACTION_STARTED at a fresh attempt
+  // naturally re-establishes a new epoch and a fresh gate
+  // can re-establish authority.
+  //
+  // E-C23: also record diagnostic state (last status + epoch
+  // at which the failure was observed) so the projection
+  // surfaces the negative evidence directly without forcing
+  // operators to re-derive it from raw stream archaeology.
+  if (event.event.status === "ERROR") {
+    tracker.workEpoch += 1;
+    tracker.actionFailureAtEpoch = tracker.workEpoch;
+  }
+  tracker.lastActionStatus = event.event.status;
   return { ok: true };
 }
 
@@ -333,6 +353,24 @@ export function applyReviewFinished(
     };
   }
   tracker.openReviewId = null;
+  // E-C22: REVIEW_FINISHED is explicit verdict evidence that
+  // MUST NOT disappear merely because openReviewId becomes
+  // null. We capture (workEpoch, pass) at review close so
+  // the success predicate can reject SUCCESS as long as the
+  // current work epoch still carries a failing verdict. A
+  // later review at the same work epoch with pass=true may
+  // supersede; a later ACTION_STARTED / REPAIR_STARTED
+  // advances workEpoch and makes the prior verdict
+  // historical.
+  //
+  // E-C23: also record lastReviewPass and the work epoch
+  // of any failing review for diagnostic visibility.
+  tracker.reviewVerdictEpoch = tracker.workEpoch;
+  tracker.reviewVerdictPass = event.event.pass;
+  if (event.event.pass === false) {
+    tracker.reviewFailureAtEpoch = tracker.workEpoch;
+  }
+  tracker.lastReviewPass = event.event.pass;
   return { ok: true };
 }
 

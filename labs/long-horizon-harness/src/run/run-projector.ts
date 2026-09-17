@@ -65,6 +65,12 @@ function initialProjection(manifest: RunManifest): RunProjection {
     event_count: 0,
     closure_authority_fresh: false,
     work_epoch: 0,
+    last_action_status: null,
+    last_review_pass: null,
+    action_failure_at_epoch: null,
+    review_failure_at_epoch: null,
+    current_epoch_action_failure: false,
+    current_epoch_review_failure: false,
   };
 }
 
@@ -114,6 +120,31 @@ function initialProjection(manifest: RunManifest): RunProjection {
  *   work epoch; a subsequent completed post-gate action
  *   stales the gate's closure authority.
  *
+ * E-C21 — ACTION_FINISHED(ERROR) is also a work-epoch-
+ * advancing event. The implementation chooses the simplest
+ * V1/V3 model: applyActionFinished advances workEpoch on
+ * ERROR. The closure-gate epoch then no longer matches the
+ * work epoch and the success predicate rejects the SUCCESS
+ * claim. (An alternative model would carry a dedicated
+ * failure epoch; the externally observable semantics are
+ * the same.)
+ *
+ * E-C22 — REVIEW_FINISHED records (workEpoch, pass) at
+ * review close. SUCCESS is rejected whenever
+ *
+ *     reviewVerdictEpoch === workEpoch
+ *       AND reviewVerdictPass === false
+ *
+ * because a failing review verdict at the CURRENT work
+ * epoch is unresolved negative evidence. A later review at
+ * the same epoch with pass=true supersedes the failing
+ * verdict; a later ACTION_STARTED / REPAIR_STARTED advances
+ * the work epoch and makes the prior verdict historical.
+ *
+ * E-C23 — diagnostic fields surface the negative evidence
+ * directly so operators do not have to re-derive it from
+ * raw stream archaeology.
+ *
  * V2 minimum authoritative-success evidence:
  *
  *   1. RUN_STARTED                       (run was initiated)
@@ -123,11 +154,21 @@ function initialProjection(manifest: RunManifest): RunProjection {
  *   5. closureGatePass === true          (last closing gate passed)
  *   6. closureGateEpoch === workEpoch    (no repair since the gate)
  *   7. no open attempt / gate / repair / review at close
+ *   8. no current-epoch action failure   (E-C21)
+ *   9. no current-epoch failing review   (E-C22)
  *
  * If any of these is missing while terminal_semantic claims
  * SUCCESS, the projection is INVALID_EVIDENCE — not a tainted
  * SUCCESS. The state-machine integrity is preserved; the
  * evidence, not the assertion, governs the outcome.
+ *
+ * Required negative invariant (E-C24):
+ *
+ *   SUCCESS_WITH_UNRESOLVED_NEGATIVE_EVIDENCE = IMPOSSIBLE
+ *
+ * i.e. SUCCESS claims can never be authorized while a
+ * current-epoch action failure or current-epoch failing
+ * review verdict is unresolved.
  */
 export function successEvidencePredicateSatisfied(
   tracker: LegalityTracker,
@@ -143,12 +184,36 @@ export function successEvidencePredicateSatisfied(
   //   PASS gate -> FAIL gate -> SUCCESS        (last gate did not pass)
   //   PASS gate -> REPAIR_STARTED -> SUCCESS   (epoch stale)
   //   PASS gate -> REPAIR -> REPAIR_FINISHED -> new PASS -> SUCCESS  (epoch fresh)
+  //   PASS gate -> ACTION_FINISHED(ERROR) -> SUCCESS  (epoch stale, E-C21)
+  //   PASS gate -> REVIEW_FINISHED(false) -> SUCCESS  (current-epoch failing review, E-C22)
   if (tracker.closureGatePass !== true) return false;
   if (tracker.closureGateEpoch !== tracker.workEpoch) return false;
   if (tracker.openAttemptId !== null) return false;
   if (tracker.openGateId !== null) return false;
   if (tracker.openRepairId !== null) return false;
   if (tracker.openReviewId !== null) return false;
+  // E-C21: a current-epoch ACTION_FINISHED(ERROR) is
+  // unresolved negative evidence. workEpoch was advanced on
+  // the ERROR itself (so closureGateEpoch !== workEpoch
+  // already catches the post-error SUCCESS in the simple
+  // V1/V3 model). We keep this check explicit so the
+  // precedence model is unambiguous to future readers.
+  if (
+    tracker.actionFailureAtEpoch !== null &&
+    tracker.actionFailureAtEpoch === tracker.workEpoch
+  ) {
+    return false;
+  }
+  // E-C22: a current-epoch failing review is unresolved
+  // negative evidence. SUCCESS requires the review verdict
+  // at the current work epoch to be either pass=true or
+  // stale (superseded by later work).
+  if (
+    tracker.reviewVerdictEpoch === tracker.workEpoch &&
+    tracker.reviewVerdictPass === false
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -184,6 +249,16 @@ function projectionFromTracker(
         tracker.closureGatePass === true &&
         tracker.closureGateEpoch === tracker.workEpoch,
       work_epoch: tracker.workEpoch,
+      last_action_status: tracker.lastActionStatus,
+      last_review_pass: tracker.lastReviewPass,
+      action_failure_at_epoch: tracker.actionFailureAtEpoch,
+      review_failure_at_epoch: tracker.reviewFailureAtEpoch,
+      current_epoch_action_failure:
+        tracker.actionFailureAtEpoch !== null &&
+        tracker.actionFailureAtEpoch === tracker.workEpoch,
+      current_epoch_review_failure:
+        tracker.reviewVerdictEpoch === tracker.workEpoch &&
+        tracker.reviewVerdictPass === false,
     };
   }
 
@@ -211,6 +286,16 @@ function projectionFromTracker(
       tracker.closureGatePass === true &&
       tracker.closureGateEpoch === tracker.workEpoch,
     work_epoch: tracker.workEpoch,
+    last_action_status: tracker.lastActionStatus,
+    last_review_pass: tracker.lastReviewPass,
+    action_failure_at_epoch: tracker.actionFailureAtEpoch,
+    review_failure_at_epoch: tracker.reviewFailureAtEpoch,
+    current_epoch_action_failure:
+      tracker.actionFailureAtEpoch !== null &&
+      tracker.actionFailureAtEpoch === tracker.workEpoch,
+    current_epoch_review_failure:
+      tracker.reviewVerdictEpoch === tracker.workEpoch &&
+      tracker.reviewVerdictPass === false,
   };
 }
 

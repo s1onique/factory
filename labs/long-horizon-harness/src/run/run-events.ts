@@ -134,6 +134,52 @@ export type LegalityTracker = {
   closureGateEpoch: number | null;
   closureGatePass: boolean | null;
   /**
+   * E-C21 — ACTION_FINISHED(ERROR) is authoritative negative
+   * execution evidence and stales any prior positive gate
+   * authority. We capture the work epoch at which the most
+   * recent action ERROR was observed so the projection can
+   * surface it as diagnostic state (E-C23) and the success
+   * predicate can reject the SUCCESS claim as long as no
+   * later work advanced the epoch.
+   *
+   * E-C22 — REVIEW_FINISHED(pass=false) is also authoritative
+   * negative evidence. The same epoch-tracking discipline
+   * applies: `reviewVerdictEpoch` records the work epoch at
+   * the most recent REVIEW_FINISHED, and `reviewVerdictPass`
+   * records its pass value. A later review at the same work
+   * epoch with pass=true may supersede an earlier failing
+   * verdict; a later ACTION_STARTED / REPAIR_STARTED advances
+   * the work epoch and makes the prior verdict historical.
+   *
+   * Precedence:
+   *   - ACTION_FINISHED(ERROR): invalidates prior positive
+   *     closure authority at the current work epoch (E-C21).
+   *   - REVIEW_FINISHED(false): blocks SUCCESS at the current
+   *     work epoch (E-C22).
+   *   - REVIEW_FINISHED(true): clears the failing-review block
+   *     at the current work epoch (E-C22).
+   *   - Subsequent ACTION_STARTED / REPAIR_STARTED advances
+   *     workEpoch so any prior verdict is historical; a
+   *     subsequent fresh gate then qualifies the modified
+   *     artifact.
+   */
+  actionFailureAtEpoch: number | null;
+  reviewVerdictEpoch: number | null;
+  reviewVerdictPass: boolean | null;
+  reviewFailureAtEpoch: number | null;
+  /**
+   * E-C23 — last observed ACTION_FINISHED status. Exposed so
+   * the projection can surface the most recent negative
+   * evidence without forcing operators to re-derive it from
+   * raw stream archaeology.
+   */
+  lastActionStatus: "OK" | "ERROR" | null;
+  /**
+   * E-C23 — last observed REVIEW_FINISHED pass value.
+   * Exposed for the same diagnostic reason.
+   */
+  lastReviewPass: boolean | null;
+  /**
    * Event-id-to-canonical-content map. Used to detect same-id +
    * different-content corruption (E10). Keyed by the literal
    * RunEventId string.
@@ -166,6 +212,12 @@ export function emptyTracker(): LegalityTracker {
     workEpoch: 0,
     closureGateEpoch: null,
     closureGatePass: null,
+    actionFailureAtEpoch: null,
+    reviewVerdictEpoch: null,
+    reviewVerdictPass: null,
+    reviewFailureAtEpoch: null,
+    lastActionStatus: null,
+    lastReviewPass: null,
     eventIdToContent: new Map<string, string>(),
     lastSeq: 0,
     repair_count: 0,

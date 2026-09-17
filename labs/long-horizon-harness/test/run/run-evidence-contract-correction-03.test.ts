@@ -26,6 +26,16 @@
  *                                                              -> TERMINAL/SUCCESS
  *     RUN72  multiple ACTION cycles -> single final PASS gate  -> TERMINAL/SUCCESS
  *
+ *   E-C21 — ACTION_FINISHED(ERROR) invalidates prior positive authority.
+ *     RUN73  gate PASS -> ACTION_FINISHED(ERROR) -> SUCCESS     -> INVALID_EVIDENCE
+ *     RUN74  gate PASS -> ACTION ERROR -> new work -> new PASS -> TERMINAL/SUCCESS
+ *
+ *   E-C22 — REVIEW_FINISHED(false) blocks SUCCESS at the current work epoch.
+ *     RUN75  gate PASS -> REVIEW FAIL -> SUCCESS                -> INVALID_EVIDENCE
+ *     RUN76  gate PASS -> REVIEW FAIL -> REVIEW PASS -> SUCCESS -> TERMINAL/SUCCESS
+ *     RUN77  gate PASS -> REVIEW FAIL -> REPAIR -> new PASS -> SUCCESS
+ *                                                              -> TERMINAL/SUCCESS
+ *
  *   E-C15 — neutral canonical dependency direction.
  *     RUN_GRAPH  run-events MUST NOT import from run-store
  *                run-projector MUST NOT import from run-store
@@ -539,6 +549,223 @@ test("RUN72 multiple ACTION cycles → single final PASS gate → SUCCESS → TE
   assert.equal(r.value.lifecycle_state, "TERMINAL");
   assert.equal(r.value.terminal_outcome, "SUCCESS");
   assert.equal(r.value.closure_authority_fresh, true);
+});
+
+// ---------------------------------------------------------------------------
+// E-C21 — ACTION_FINISHED(ERROR) invalidates prior positive authority
+// ---------------------------------------------------------------------------
+
+test("RUN73 gate PASS → ACTION_FINISHED(ERROR) → SUCCESS → INVALID_EVIDENCE", () => {
+  // The ACTION ran, the gate PASSED, then the action reported
+  // ERROR. Per E-C21, an ACTION_FINISHED(ERROR) is authoritative
+  // negative execution evidence and must invalidate any prior
+  // passing gate. The simplest V1/V3 model: applyActionFinished
+  // advances workEpoch on ERROR; the closure-gate epoch then no
+  // longer matches the work epoch; the success predicate
+  // rejects the SUCCESS claim.
+  //
+  // The projection also surfaces the negative evidence
+  // directly (E-C23):
+  //   last_action_status            = "ERROR"
+  //   action_failure_at_epoch       = current workEpoch
+  //   current_epoch_action_failure  = true
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt },
+      status: "ERROR",
+      failure: { kind: "tool_failure", tool: "build", message: "compile failed" },
+    }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "INVALID_EVIDENCE");
+  assert.equal(r.value.terminal_outcome, null);
+  assert.equal(r.value.closure_authority_fresh, false);
+  // E-C23: the negative evidence is visible directly in the
+  // projection; operators do not need to re-derive it from raw
+  // stream archaeology.
+  assert.equal(r.value.last_action_status, "ERROR");
+  assert.equal(r.value.action_failure_at_epoch, r.value.work_epoch);
+  assert.equal(r.value.current_epoch_action_failure, true);
+  assert.equal(r.value.current_epoch_review_failure, false);
+});
+
+test("RUN74 gate PASS → ACTION ERROR → new work → new gate PASS → SUCCESS → TERMINAL/SUCCESS", () => {
+  // The first attempt ran, the gate passed, then the action
+  // reported ERROR. Subsequent work (new action + new gate) at
+  // a new work epoch re-establishes closure authority and
+  // authorizes SUCCESS — the failure is historical at the new
+  // epoch.
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt },
+      status: "ERROR",
+      failure: { kind: "tool_failure", tool: "build", message: "compile failed" },
+    }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt2 } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate2, attempt_id: ids.attempt2 }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate2, attempt_id: ids.attempt2, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt2 },
+      status: "OK",
+    }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "TERMINAL");
+  assert.equal(r.value.terminal_outcome, "SUCCESS");
+  assert.equal(r.value.closure_authority_fresh, true);
+  // E-C23: the historical failure is recorded but no longer
+  // current; the current-epoch failure flag is false.
+  assert.equal(r.value.last_action_status, "OK");
+  assert.equal(r.value.current_epoch_action_failure, false);
+});
+
+// ---------------------------------------------------------------------------
+// E-C22 — REVIEW_FINISHED(false) blocks SUCCESS at the current work epoch
+// ---------------------------------------------------------------------------
+
+test("RUN75 gate PASS → REVIEW FAIL → SUCCESS → INVALID_EVIDENCE", () => {
+  // An independent review is explicit verdict evidence.
+  // REVIEW_FINISHED(pass=false) at the current work epoch
+  // blocks SUCCESS — the gate's pass value is no longer
+  // authoritative on its own, and the failing review must
+  // be superseded by a later pass OR by later work that
+  // advances the work epoch.
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt },
+      status: "OK",
+    }),
+    () => ({ type: "REVIEW_STARTED", review_id: ids.review, reason: "post-gate audit" }),
+    () => ({ type: "REVIEW_FINISHED", review_id: ids.review, pass: false, reason: "lint regression" }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "INVALID_EVIDENCE");
+  assert.equal(r.value.terminal_outcome, null);
+  // Note: closure_authority_fresh here reports the GATE-only
+  // freshness (last closing gate epoch === work epoch, gate
+  // pass). The SUCCESS claim is rejected not by gate staleness
+  // but by the current-epoch failing review verdict. The two
+  // booleans are orthogonal diagnostics of orthogonal concerns.
+  assert.equal(r.value.closure_authority_fresh, true);
+  // E-C23: the failing review verdict is visible directly.
+  assert.equal(r.value.last_review_pass, false);
+  assert.equal(r.value.review_failure_at_epoch, r.value.work_epoch);
+  assert.equal(r.value.current_epoch_review_failure, true);
+  assert.equal(r.value.current_epoch_action_failure, false);
+});
+
+test("RUN76 gate PASS → REVIEW FAIL → REVIEW PASS → SUCCESS → TERMINAL/SUCCESS", () => {
+  // A later review at the same work epoch with pass=true
+  // supersedes the earlier failing verdict. SUCCESS is
+  // authorized because the most recent review verdict at
+  // the current work epoch is positive.
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt },
+      status: "OK",
+    }),
+    () => ({ type: "REVIEW_STARTED", review_id: ids.review, reason: "post-gate audit" }),
+    () => ({ type: "REVIEW_FINISHED", review_id: ids.review, pass: false, reason: "first reviewer found regression" }),
+    () => ({ type: "REVIEW_STARTED", review_id: ids.review2, reason: "second review after fix" }),
+    () => ({ type: "REVIEW_FINISHED", review_id: ids.review2, pass: true }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "TERMINAL");
+  assert.equal(r.value.terminal_outcome, "SUCCESS");
+  assert.equal(r.value.closure_authority_fresh, true);
+  // E-C23: the LAST review verdict is pass=true, so the
+  // current-epoch review-failure flag is false.
+  assert.equal(r.value.last_review_pass, true);
+  assert.equal(r.value.current_epoch_review_failure, false);
+});
+
+test("RUN77 gate PASS → REVIEW FAIL → REPAIR → new gate PASS → SUCCESS → TERMINAL/SUCCESS", () => {
+  // The failing review verdict is historical at the new
+  // work epoch: REPAIR_STARTED advances workEpoch, and the
+  // subsequent fresh gate authorizes SUCCESS at that new
+  // epoch. The projection still records the historical
+  // failing review for diagnostics, but the current-epoch
+  // review-failure flag is false.
+  const repair = makeRepairCycleId("repair:c3-77");
+  const { manifest, events } = buildStream([
+    () => ({ type: "RUN_STARTED" }),
+    () => ({ type: "HARNESS_STARTED" }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate, attempt_id: ids.attempt }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate, attempt_id: ids.attempt, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt },
+      status: "OK",
+    }),
+    () => ({ type: "REVIEW_STARTED", review_id: ids.review, reason: "post-gate audit" }),
+    () => ({ type: "REVIEW_FINISHED", review_id: ids.review, pass: false, reason: "lint regression" }),
+    () => ({ type: "REPAIR_STARTED", repair_id: repair, reason: "fix regression" }),
+    () => ({ type: "REPAIR_FINISHED", repair_id: repair }),
+    () => ({ type: "ACTION_STARTED", target: { kind: "attempt", attempt_id: ids.attempt2 } }),
+    () => ({ type: "GATE_STARTED", gate_id: ids.gate2, attempt_id: ids.attempt2 }),
+    () => ({ type: "GATE_FINISHED", gate_id: ids.gate2, attempt_id: ids.attempt2, pass: true }),
+    () => ({
+      type: "ACTION_FINISHED",
+      target: { kind: "attempt", attempt_id: ids.attempt2 },
+      status: "OK",
+    }),
+    () => ({ type: "HARNESS_STOPPED" }),
+    () => ({ type: "RUN_FINISHED", semantic: "SUCCESS" }),
+  ]);
+  const r = projectRun(manifest, events);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.lifecycle_state, "TERMINAL");
+  assert.equal(r.value.terminal_outcome, "SUCCESS");
+  assert.equal(r.value.closure_authority_fresh, true);
+  // E-C23: the historical failing review is recorded but no
+  // longer current.
+  assert.equal(r.value.last_review_pass, false);
+  assert.ok(r.value.review_failure_at_epoch !== null);
+  assert.ok(r.value.review_failure_at_epoch! < r.value.work_epoch);
+  assert.equal(r.value.current_epoch_review_failure, false);
 });
 
 test("RUN_GRAPH run-events and run-projector MUST NOT import run-store", async () => {

@@ -886,6 +886,10 @@ level (per-event sub-types) and at runtime (decoder rejection).
 | E-M27 | closure authority is epoch-bound (E-C14) — ACTION_STARTED and REPAIR_STARTED both advance workEpoch and invalidate prior closure gate | PASS   |
 | E-M28 | canonical dependency direction is acyclic (E-C15) — `run-events` and `run-projector` MUST NOT import `run-store` | PASS   |
 | E-M29 | Phase-E hostile-append boundary acceptance (E-C16) — `store.append` does not execute Proxy `[[Get]]` or accessor traps; `ownKeys`/`getOwnPropertyDescriptor` traps may fire as bounded structural probes | PASS   |
+| E-M33 | ACTION_ERROR invalidates closure authority (E-C21) — `ACTION_FINISHED(ERROR)` advances `workEpoch`; the closure-gate epoch then no longer matches and SUCCESS is rejected | PASS   |
+| E-M34 | REVIEW_FAILURE blocks SUCCESS (E-C22) — `REVIEW_FINISHED(pass=false)` records `(reviewVerdictEpoch, reviewVerdictPass)`; SUCCESS is rejected when `reviewVerdictEpoch === workEpoch && reviewVerdictPass === false` | PASS   |
+| E-M35 | negative evidence visible in projection (E-C23) — `RunProjection` exposes `last_action_status`, `last_review_pass`, `action_failure_at_epoch`, `review_failure_at_epoch`, `current_epoch_action_failure`, `current_epoch_review_failure` | PASS   |
+| E-M36 | authority precedence model frozen (E-C24) — WORK invalidates prior closure authority; GATE PASS / FAIL establish positive / negative authority; ACTION_FINISHED(ERROR) invalidates prior positive authority; REVIEW_FINISHED(FAIL/PASS) block / clear at the current work epoch; SUCCESS requires fresh passing gate at the current work epoch AND no current-epoch negative evidence | PASS   |
 
 The Phase E **first correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
 PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION01) added E-M16..E-M20.
@@ -921,6 +925,83 @@ work → gate PASS → more work → gate PASS → success OK
 This is established by the new probes RUN70, RUN71, RUN72. RUN68 was also
 strengthened to test the **completed** post-gate work case (closed attempt
 scope), which the prior open-scope check did not catch.
+
+The Phase E **fifth correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
+PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION05) closes the final semantic
+contradiction:
+
+```text
+EXPLICIT_NEGATIVE_EVIDENCE
+MUST_NOT
+COEXIST_WITH_TERMINAL_SUCCESS
+```
+
+CORRECTION05 freezes the authority precedence model and binds every kind of
+explicit negative evidence (action error, failing review) to the same
+work-epoch model that CORRECTION04 already uses for WORK itself. The model
+is now:
+
+```text
+WORK                            invalidates prior closure authority
+GATE PASS                       establishes positive authority at current epoch
+GATE FAIL                       establishes negative authority at current epoch
+ACTION_FINISHED(ERROR)          invalidates prior positive authority
+REVIEW_FINISHED(FAIL)           blocks SUCCESS at the current epoch
+REVIEW_FINISHED(PASS)           clears the failing-review block at the current epoch
+SUCCESS                         requires:
+                                  - harness started/stopped
+                                  - at least one completed action
+                                  - fresh passing gate at current epoch
+                                  - no open scopes
+                                  - no current-epoch action failure
+                                  - no current-epoch failing review
+```
+
+The required negative invariant (E-C24):
+
+```text
+SUCCESS_WITH_UNRESOLVED_NEGATIVE_EVIDENCE = IMPOSSIBLE
+```
+
+**E-C21** — `applyActionFinished` now advances `workEpoch += 1` when
+`status === "ERROR"`. The simplest V1/V3 model: the closure-gate epoch
+then no longer matches and the success predicate rejects the SUCCESS
+claim. (An equivalent alternative model — a dedicated failure epoch —
+yields the same externally observable semantics; this implementation
+chooses the simpler shared-epoch model.)
+
+**E-C22** — `applyReviewFinished` captures
+`(reviewVerdictEpoch, reviewVerdictPass)` at review close. The success
+predicate rejects SUCCESS whenever the current work epoch carries a
+failing verdict. A later review at the same epoch with `pass=true`
+supersedes the failing verdict; a later `ACTION_STARTED` /
+`REPAIR_STARTED` advances `workEpoch` and makes the prior verdict
+historical.
+
+**E-C23** — `RunProjection` now exposes six diagnostic fields so the
+negative evidence is visible directly without forcing operators to
+re-derive it from raw stream archaeology:
+
+```text
+last_action_status            : "OK" | "ERROR" | null
+last_review_pass              : boolean | null
+action_failure_at_epoch       : number | null
+review_failure_at_epoch       : number | null
+current_epoch_action_failure  : boolean
+current_epoch_review_failure  : boolean
+```
+
+The projector remains the single authority.
+
+Probes RUN73–RUN77 establish the new invariants:
+
+```text
+RUN73  gate PASS → ACTION_FINISHED(ERROR) → SUCCESS                 → INVALID_EVIDENCE
+RUN74  gate PASS → ACTION ERROR → new work → new gate PASS → SUCCESS → TERMINAL/SUCCESS
+RUN75  gate PASS → REVIEW FAIL → SUCCESS                            → INVALID_EVIDENCE
+RUN76  gate PASS → REVIEW FAIL → REVIEW PASS → SUCCESS              → TERMINAL/SUCCESS
+RUN77  gate PASS → REVIEW FAIL → REPAIR → new gate PASS → SUCCESS   → TERMINAL/SUCCESS
+```
 
 ### Invariant Probes
 
@@ -967,12 +1048,25 @@ POST_GATE_COMPLETED_WORK_WITHOUT_REGATE_CANNOT_SUCCESS = IMPOSSIBLE (RUN70)
 POST_GATE_COMPLETED_WORK_WITH_REGATE_CAN_SUCCESS      = POSSIBLE    (RUN71)
 MULTIPLE_ACTION_CYCLES_SINGLE_FINAL_PASS              = POSSIBLE    (RUN72)
 FAIL_THEN_REPAIR_THEN_PASS_SUCCESS                   = POSSIBLE    (RUN69)
+
+# CORRECTION05 — E-C21 .. E-C24
+GATE_PASS_THEN_ACTION_ERROR_SUCCESS                  = IMPOSSIBLE  (RUN73)
+ACTION_ERROR_THEN_NEW_WORK_THEN_NEW_PASS_SUCCESS     = POSSIBLE    (RUN74)
+GATE_PASS_THEN_REVIEW_FAIL_SUCCESS                   = IMPOSSIBLE  (RUN75)
+RESOLVED_REVIEW_FAILURE_CAN_RECOVER                  = POSSIBLE    (RUN76)
+REPAIRED_REVIEW_FAILURE_CAN_REQUALIFY                = POSSIBLE    (RUN77)
+SUCCESS_WITH_UNRESOLVED_NEGATIVE_EVIDENCE            = IMPOSSIBLE  (RUN73, RUN75; E-C24 negative invariant)
+NEGATIVE_EVIDENCE_VISIBLE_IN_PROJECTION              = PASS        (RUN73, RUN75; E-C23 diagnostic fields)
+ACTION_FINISHED_ERROR_ADVANCES_WORK_EPOCH            = PASS        (RUN73 vs RUN70/RUN71)
+REVIEW_FINISHED_FAIL_AT_CURRENT_EPOCH_BLOCKS_SUCCESS = PASS        (RUN75 vs RUN76)
+REVIEW_VERDICT_SUPERSESSION_BY_LATER_PASS            = PASS        (RUN76)
+REVIEW_VERDICT_HISTORICALIZATION_BY_LATER_WORK       = PASS        (RUN77)
 RUN_EVENTS_DEPENDS_ON_RUN_STORE                      = FALSE       (RUN_GRAPH)
 RUN_PROJECTOR_DEPENDS_ON_RUN_STORE                   = FALSE       (RUN_GRAPH)
 HOSTILE_INPUT_REACHES_CANONICAL_ENCODER              = IMPOSSIBLE  (RUN16_E_PHASE_E)
 ```
 
-### Adversarial Corpus — RUN01..RUN72
+### Adversarial Corpus — RUN01..RUN77
 
 The acceptance corpus lives in `test/run/`:
 
@@ -987,9 +1081,10 @@ The acceptance corpus lives in `test/run/`:
   Phase E second correction (E-C07..E-C11). RUN51/52/53/54/55
   were REWRITTEN in CORRECTION03 to drive hostile inputs
   through `store.append()` rather than the Phase-D primitive.
-- `run-evidence-contract-correction-03.test.ts` (RUN59–RUN72,
-  RUN_GRAPH, RUN16_E_PHASE_E) — Phase E third + fourth
-  corrections (E-C12..E-C16 + V2 epoch rule for E-C14).
+- `run-evidence-contract-correction-03.test.ts` (RUN59–RUN77,
+  RUN_GRAPH, RUN16_E_PHASE_E) — Phase E third + fourth + fifth
+  corrections (E-C12..E-C16 + V2 epoch rule for E-C14 + E-C21..
+  E-C24 authority precedence with negative evidence).
 
 Run with:
 
@@ -1010,9 +1105,9 @@ src/run/
   run-decode-payload.ts         public decodeRunEventPayload + internal decodeOwnedRunEventPayload
   run-decode-payload-cases.ts   8 non-terminal decoders
   run-decode-payload-helpers.ts 4 terminal decoders enforcing E-C08 sub-types
-  run-events.ts                 LegalityTracker (with E-C14 epoch fields) + applyLegality
-  run-events-helpers.ts         per-event legality appliers + applyTerminal
-  run-projector.ts              pure projector + epoch-bound successEvidencePredicateSatisfied (E-C02 + E-C07 + E-C14)
+  run-events.ts                 LegalityTracker (with E-C14 epoch fields + E-C21/E-C22 negative-evidence fields) + applyLegality
+  run-events-helpers.ts         per-event legality appliers + applyTerminal; ACTION_FINISHED(ERROR) and REVIEW_FINISHED capture authority precedence (E-C21 + E-C22)
+  run-projector.ts              pure projector + epoch-bound successEvidencePredicateSatisfied (E-C02 + E-C07 + E-C14 + E-C21 + E-C22 + E-C23 diagnostic fields)
   run-serialize.ts              deterministicJson + canonicalEventBytes (SINGLE canonical authority, E-C10 + E-C15)
   run-serialize-payload.ts      per-event encoder
   run-store.ts                  InMemoryRunStore (snapshot+decode BEFORE every semantic observation, E-C12 + E-C13)

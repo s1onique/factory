@@ -344,6 +344,47 @@ export type RunProjection = {
    */
   readonly closure_authority_fresh: boolean;
   readonly work_epoch: number;
+  /**
+   * E-C23 — explicit negative-evidence diagnostics.
+   *
+   * The projector is the single authority, so the projection
+   * MUST expose the precise state that drives the success
+   * predicate rather than forcing operators to re-derive it
+   * from raw stream archaeology.
+   *
+   * `last_action_status` is the status of the LAST
+   * ACTION_FINISHED event observed (null if none). When it is
+   * "ERROR", the run carries explicit negative execution
+   * evidence at `action_failure_at_epoch`.
+   *
+   * `last_review_pass` is the pass value of the LAST
+   * REVIEW_FINISHED event observed (null if none). When it
+   * is false, the run carries explicit negative review
+   * evidence at `review_failure_at_epoch`.
+   *
+   * `action_failure_at_epoch` and `review_failure_at_epoch`
+   * record the work epoch at which the most recent negative
+   * evidence was observed. They are null if no negative
+   * evidence was observed, or if the negative evidence has
+   * since been superseded by a later work-epoch advance
+   * followed by a fresh closing gate (in which case the
+   * `current_epoch_action_failure` and
+   * `current_epoch_review_failure` booleans would be false
+   * — see below).
+   *
+   * `current_epoch_action_failure` and
+   * `current_epoch_review_failure` are the precise
+   * booleans the success predicate consults: they are true
+   * if the most recent negative evidence was observed at the
+   * CURRENT work epoch (i.e. it has NOT been superseded by
+   * later work).
+   */
+  readonly last_action_status: "OK" | "ERROR" | null;
+  readonly last_review_pass: boolean | null;
+  readonly action_failure_at_epoch: number | null;
+  readonly review_failure_at_epoch: number | null;
+  readonly current_epoch_action_failure: boolean;
+  readonly current_epoch_review_failure: boolean;
 };
 
 export type ProjectionFailure =
