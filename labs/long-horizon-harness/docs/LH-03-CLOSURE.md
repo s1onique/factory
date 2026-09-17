@@ -19,8 +19,22 @@ FACTORY_GIT_WORKTREE_POLICY_DISPOSITION = OK
 
 ENTRY_HEAD                = 715e6390d78228f089270259e1bd1307140adb75
 DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
-FINAL_HEAD                = 5d56261f65d22fe0eef55498e77af94f07c2ec25
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
+FINAL_HEAD_BINDING         = 5d56261 = LH03_IMPL_COMMIT + closure-of-record delta
+CURRENT_HEAD              = <recorded at commit time; closure-of-record is bound to LH03_IMPL_COMMIT and to the live `git rev-parse HEAD` observed at this ACT's terminal completion>
+```
+
+The closure-of-record intentionally binds two SHAs:
+
+1. `LH03_IMPL_COMMIT` (04e59784…) — the commit that
+   carries every LH-03 source file. This SHA is stable
+   and will not move under any future LH-04 work.
+2. The `git rev-parse HEAD` observed at the moment of
+   closure. Subsequent commits may carry cosmetic
+   updates to the closure-of-record document itself
+   (such as updating `FINAL_HEAD_BINDING` after the
+   rebind above); the **implementation SHA is the
+   authoritative binding**.
 ```
 
 ## Verdict
