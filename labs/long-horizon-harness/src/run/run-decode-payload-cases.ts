@@ -106,11 +106,13 @@ export function decodeActionFinished(
   }
   let failure: Failure | undefined;
   if (value["failure"] !== undefined) {
-    const fv = value["failure"];
-    if (!isPlainObject(fv)) {
+    if (!isPlainObject(value["failure"])) {
       reasons.push("ACTION_FINISHED.failure must be an object when present");
     } else {
-      const fr = decodeFailure(fv as Record<string, unknown>, "failure");
+      // E-C13: route the parent record + field name so
+      // decodeFailure can look up the value via `parent[field]`
+      // (matches the API used everywhere else in the codec).
+      const fr = decodeFailure(value, "failure");
       if (!fr.ok) {
         return fail(evidenceToRunFailure(fr.error));
       }

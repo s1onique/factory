@@ -90,6 +90,23 @@ export function deterministicJson(value: unknown): string {
   );
 }
 
+/**
+ * E-C15 / E-C10: single canonical-content authority for the
+ * `RunEvent` payload. Every consumer in Phase E (the store's
+ * idempotency check, the projector's same-id-different-content
+ * check, the default content-derived EventIdSource, and any
+ * future JSONL writer) MUST consume this function. Defining it
+ * here (in the neutral pure encoder module, alongside
+ * `deterministicJson`) prevents the cycle
+ *
+ *   run-events -> run-store -> run-projector -> run-events
+ *
+ * because `run-events` now depends only on `run-serialize` and
+ * not on `run-store`. `run-store` re-exports this symbol for
+ * backwards compatibility with the public barrel.
+ */
+export const canonicalEventBytes = deterministicJson;
+
 // ---------------------------------------------------------------------------
 // Public API: encode + decode envelope
 // ---------------------------------------------------------------------------

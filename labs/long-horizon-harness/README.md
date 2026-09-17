@@ -881,6 +881,11 @@ level (per-event sub-types) and at runtime (decoder rejection).
 | E-M22 | terminal semantic coherence (E-C08) — event/semantic matrix enforced | PASS   |
 | E-M23 | store capture parity (E-C09) — store uses Phase D snapshotter    | PASS   |
 | E-M24 | canonical event content (E-C10) — single deterministic encoder  | PASS   |
+| E-M25 | snapshot precedes every semantic observation (E-C12) — raw caller graph is never hashed, decoded, or canonicalized | PASS   |
+| E-M26 | store enforces closed-world RunEvent schema (E-C13) — unknown own keys rejected before commit | PASS   |
+| E-M27 | closure authority is epoch-bound (E-C14) — REPAIR_STARTED invalidates prior closure gate | PASS   |
+| E-M28 | canonical dependency direction is acyclic (E-C15) — `run-events` and `run-projector` MUST NOT import `run-store` | PASS   |
+| E-M29 | Phase-E hostile-append boundary acceptance (E-C16) — `store.append` does not execute Proxy `get` traps | PASS   |
 
 The Phase E **first correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
 PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION01) added E-M16..E-M20.
@@ -888,6 +893,17 @@ PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION01) added E-M16..E-M20.
 The Phase E **second correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
 PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION02) added E-M21..E-M24 and
 strengthened E-M17 with the temporal-authority rule.
+
+The Phase E **third correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
+PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION03) added E-M25..E-M29. CORRECTION03
+introduced the **capture-first, reason-second** ordering invariant (E-C12):
+the store now snapshots AND closed-world-decodes the raw caller graph BEFORE
+any canonicalization, EventIdSource, or idempotency observation. CORRECTION03
+also introduced the closure-authority **epoch model** (E-C14): `REPAIR_STARTED`
+advances `workEpoch`; SUCCESS requires `closureGateEpoch === workEpoch`.
+The Phase-D ↔ Phase-E dependency graph was hardened (E-C15): `canonicalEventBytes`
+now lives in `run-serialize.ts` (the neutral pure encoder) and `run-events.ts`
+imports it from there rather than from `run-store.ts`.
 
 ### Invariant Probes
 
@@ -918,9 +934,25 @@ SYMBOL_OR_NON_ENUMERABLE_OWN_KEY                     = IMPOSSIBLE  (RUN55)
 NESTED_KEY_INSERTION_ORDER_IS_CANONICAL              = PASS        (RUN56)
 STORE_PROJECTOR_CANONICAL_AGREEMENT                  = PASS        (RUN57)
 DEFAULT_EVENTID_SOURCE_USES_SINGLE_AUTHORITY         = PASS        (RUN58)
+
+# CORRECTION03 — E-C12 .. E-C16
+STORE_APPEND_ACCESSOR_PAYLOAD_BEFORE_SNAPSHOT        = IMPOSSIBLE  (RUN59)
+STORE_APPEND_PROXY_PAYLOAD_GET_TRAP_FIRED            = IMPOSSIBLE  (RUN60)
+BIGINT_PAYLOAD_BEFORE_CANONICALIZATION               = REJECTED    (RUN61)
+ACTION_STARTED_EXTRA_PROTO_KEY_REJECTED              = PASS        (RUN62)
+RUN_STARTED_EXTRA_STRING_KEY_REJECTED                = PASS        (RUN63)
+SYMBOL_OR_NON_ENUMERABLE_OR_ACCESSOR_REJECTED        = PASS        (RUN64)
+NESTED_PROTO_DATA_PRESERVED_BY_SNAPSHOTTER           = PASS        (RUN65)
+PRE_REPAIR_GATE_AUTHORIZES_POST_REPAIR_SUCCESS       = IMPOSSIBLE  (RUN66)
+POST_REPAIR_GATE_AUTHORIZES_POST_REPAIR_SUCCESS      = POSSIBLE    (RUN67)
+SUBSEQUENT_ACTION_WITHOUT_REPAIR_DOES_NOT_INVALIDATE = POSSIBLE    (RUN68, open scope caught)
+FAIL_THEN_REPAIR_THEN_PASS_SUCCESS                   = POSSIBLE    (RUN69)
+RUN_EVENTS_DEPENDS_ON_RUN_STORE                      = FALSE       (RUN_GRAPH)
+RUN_PROJECTOR_DEPENDS_ON_RUN_STORE                   = FALSE       (RUN_GRAPH)
+HOSTILE_INPUT_REACHES_CANONICAL_ENCODER              = IMPOSSIBLE  (RUN16_E_PHASE_E)
 ```
 
-### Adversarial Corpus — RUN01..RUN58
+### Adversarial Corpus — RUN01..RUN69
 
 The acceptance corpus lives in `test/run/`:
 
@@ -932,7 +964,12 @@ The acceptance corpus lives in `test/run/`:
 - `run-evidence-contract-correction.test.ts` (RUN26–RUN42) —
   Phase E first correction (E-C01..E-C06)
 - `run-evidence-contract-correction-02.test.ts` (RUN43–RUN58) —
-  Phase E second correction (E-C07..E-C11)
+  Phase E second correction (E-C07..E-C11). RUN51/52/53/54/55
+  were REWRITTEN in CORRECTION03 to drive hostile inputs
+  through `store.append()` rather than the Phase-D primitive.
+- `run-evidence-contract-correction-03.test.ts` (RUN59–RUN69,
+  RUN_GRAPH, RUN16_E_PHASE_E) — Phase E third correction
+  (E-C12..E-C16)
 
 Run with:
 
@@ -953,12 +990,12 @@ src/run/
   run-decode-payload.ts         public decodeRunEventPayload + internal decodeOwnedRunEventPayload
   run-decode-payload-cases.ts   8 non-terminal decoders
   run-decode-payload-helpers.ts 4 terminal decoders enforcing E-C08 sub-types
-  run-events.ts                 LegalityTracker + applyLegality
+  run-events.ts                 LegalityTracker (with E-C14 epoch fields) + applyLegality
   run-events-helpers.ts         per-event legality appliers + applyTerminal
-  run-projector.ts              pure projector + successEvidencePredicateSatisfied (E-C02 + E-C07)
-  run-serialize.ts              deterministicJson — SINGLE canonical event-content authority (E-C10)
+  run-projector.ts              pure projector + epoch-bound successEvidencePredicateSatisfied (E-C02 + E-C07 + E-C14)
+  run-serialize.ts              deterministicJson + canonicalEventBytes (SINGLE canonical authority, E-C10 + E-C15)
   run-serialize-payload.ts      per-event encoder
-  run-store.ts                  InMemoryRunStore (Phase D snapshotter-owned committed graph, E-C09)
+  run-store.ts                  InMemoryRunStore (snapshot+decode BEFORE every semantic observation, E-C12 + E-C13)
   index.ts                      public barrel
 ```
 

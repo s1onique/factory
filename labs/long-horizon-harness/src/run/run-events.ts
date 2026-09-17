@@ -32,7 +32,7 @@
  */
 
 import type { CommittedRunEvent, TerminalSemantic } from "./run-types.js";
-import { canonicalEventBytes } from "./run-store.js";
+import { canonicalEventBytes } from "./run-serialize.js";
 
 import {
   applyActionFinished,
@@ -97,6 +97,32 @@ export type LegalityTracker = {
   lastGateFinishedAttemptId: string | null;
   lastGateFinishedPass: boolean | null;
   /**
+   * E-C14 — closure-authority epoch model.
+   *
+   * `workEpoch` is a monotonic counter advanced by any event
+   * that can make previously validated work stale. A successful
+   * closure gate records `(closureGateEpoch, closureGatePass)`:
+   * the work epoch at the moment the gate closed and the gate's
+   * pass/fail verdict. SUCCESS requires
+   *
+   *   closureGatePass === true
+   *     && closureGateEpoch === workEpoch
+   *     && no open structural scopes
+   *
+   * so any later REPAIR (or any other epoch-advancing event)
+   * invalidates the prior gate authority. This replaces the
+   * stale `lastGateFinishedPass` boolean with explicit
+   * freshness.
+   *
+   * V1 rule (frozen): only `REPAIR_STARTED` advances the work
+   * epoch. A subsequent `ACTION_STARTED` after a passing gate
+   * does NOT by itself invalidate the gate; it merely opens a
+   * new attempt scope which the open-scope check catches.
+   */
+  workEpoch: number;
+  closureGateEpoch: number | null;
+  closureGatePass: boolean | null;
+  /**
    * Event-id-to-canonical-content map. Used to detect same-id +
    * different-content corruption (E10). Keyed by the literal
    * RunEventId string.
@@ -126,6 +152,9 @@ export function emptyTracker(): LegalityTracker {
     lastGateFinishedId: null,
     lastGateFinishedAttemptId: null,
     lastGateFinishedPass: null,
+    workEpoch: 0,
+    closureGateEpoch: null,
+    closureGatePass: null,
     eventIdToContent: new Map<string, string>(),
     lastSeq: 0,
     repair_count: 0,
@@ -145,7 +174,7 @@ export function emptyTracker(): LegalityTracker {
  * all consume the same encoder. There is no parallel
  * `canonicalEventBytes` implementation in Phase E.
  */
-export { canonicalEventBytes } from "./run-store.js";
+export { canonicalEventBytes } from "./run-serialize.js";
 
 /**
  * Apply a single event to the tracker and return either ok or a

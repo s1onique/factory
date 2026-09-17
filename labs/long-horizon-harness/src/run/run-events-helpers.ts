@@ -1,16 +1,7 @@
 /**
  * FOUNDATION04 — PHASE E — Run / Evidence Contract.
- *
- * Per-event legality helpers, split out from run-events.ts to keep
- * the main entry file under the SOURCE_SIZE_DISCIPLINE 400-LOC
- * ceiling.
- *
- * Doctrine: each apply* helper owns ONE event variant's legality
- * check. The dispatcher (applyNonStartLegality in run-events.ts)
- * routes to the right helper. The helpers share the LegalityTracker
- * type defined in run-events.ts.
- *
- * This module is pure: no I/O.
+ * Per-event legality helpers. Each `apply*` helper owns ONE event
+ * variant. Pure: no I/O.
  */
 
 import type { CommittedRunEvent, RunEvent, TerminalSemantic } from "./run-types.js";
@@ -203,13 +194,17 @@ export function applyGateFinished(
   }
   tracker.openGateId = null;
   tracker.openGateAttemptId = null;
-  // E-C02: record the latest gate-finished observation so the
-  // projector can populate current_gate and the success predicate
-  // can count a passing closure authority without rescanning the
-  // event stream.
+  // E-C02: record latest gate-finished for current_gate and
+  // for the passing-gate counter.
   tracker.lastGateFinishedId = event.event.gate_id;
   tracker.lastGateFinishedAttemptId = event.event.attempt_id;
   tracker.lastGateFinishedPass = event.event.pass;
+  // E-C14: capture (workEpoch, pass) at gate close. The success
+  // predicate compares the recorded epoch to the current work
+  // epoch; any later REPAIR advances workEpoch and invalidates
+  // this record.
+  tracker.closureGateEpoch = tracker.workEpoch;
+  tracker.closureGatePass = event.event.pass;
   if (event.event.pass === true) {
     tracker.passingGateCount += 1;
   }
@@ -240,6 +235,11 @@ export function applyRepairStarted(
   }
   tracker.openRepairId = event.event.repair_id;
   tracker.repair_count += 1;
+  // E-C14: REPAIR mutates the artifact under qualification.
+  // Advance workEpoch so any prior closure-authority gate is
+  // stale; the success predicate will require a fresh closing
+  // gate at the new epoch.
+  tracker.workEpoch += 1;
   return { ok: true };
 }
 
@@ -329,18 +329,11 @@ export function applyReviewFinished(
 }
 
 /**
- * Terminal-claim dispatcher.
- *
- * Per E-C03 (correction), only events that COMPLETE the run
- * participate in terminal closure:
- *
- *   RUN_TIMEOUT      — observation: deadline exceeded
- *   RUN_FINISHED     — observation: harness closed cleanly
- *   RUN_ABORTED      — observation: harness aborted
- *
- * `RUN_CANCEL_REQUESTED` is NOT terminal — it is a request
- * capturing intent; only the subsequent terminal event
- * (typically RUN_ABORTED(CANCELLED)) closes the run.
+ * Terminal-claim dispatcher. Per E-C03, only events that COMPLETE
+ * the run participate in closure: RUN_TIMEOUT, RUN_FINISHED,
+ * RUN_ABORTED. `RUN_CANCEL_REQUESTED` is NOT terminal — it is a
+ * request; only the subsequent terminal event (typically
+ * RUN_ABORTED(CANCELLED)) closes the run.
  */
 export function applyTerminal(
   tracker: LegalityTracker,

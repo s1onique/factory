@@ -47,7 +47,6 @@ import {
   makeContentBoundEventIdSource,
 } from "../../src/run/run-store.js";
 import { projectRun } from "../../src/run/run-projector.js";
-import { snapshotJsonValue } from "../../src/run/run-json.js";
 
 import type {
   CommittedRunEvent,
@@ -378,10 +377,21 @@ test("RUN50 cancel request cannot claim SUCCESS/TIMEOUT/etc.", () => {
 });
 
 // ---------------------------------------------------------------------------
-// E-C09 — reuse hardened owned-value capture
+// E-C09 / E-C12 / E-C13 — hardened ownership + closed-world store boundary
 // ---------------------------------------------------------------------------
+//
+// Note: RUN51 and RUN52 are REWRITTEN for CORRECTION03.
+//
+// The previous expectation (preserved `__proto__` as own data on an
+// `ACTION_STARTED` event payload) is incompatible with the closed-world
+// RunEvent schema (E-C13): `ACTION_STARTED_KEYS` does NOT include
+// `__proto__`, so an injected own `__proto__` key MUST now be rejected
+// by the store before commit. The Phase D `__proto__` preservation
+// guarantee applies to nested DATA values (e.g. inside `target`),
+// where it remains in force and is exercised by RUN65 in
+// correction-03.test.ts.
 
-test("RUN51 nested own __proto__ remains own data after commit", () => {
+test("RUN51 store rejects own __proto__ on ACTION_STARTED payload (closed-world)", () => {
   const store = makeInMemoryRunStore({ nowMs: () => 0 });
   const manifest = makeTestManifest();
   store.init(manifest);
@@ -389,9 +399,6 @@ test("RUN51 nested own __proto__ remains own data after commit", () => {
     type: "ACTION_STARTED",
     target: { kind: "attempt", attempt_id: ids.attempt },
   };
-  // Inject __proto__ as an own enumerable string key. The
-  // Phase D snapshotter must preserve it as data via null-
-  // prototype output.
   Object.defineProperty(eventInput, "__proto__", {
     value: { injected: true },
     enumerable: true,
@@ -403,20 +410,17 @@ test("RUN51 nested own __proto__ remains own data after commit", () => {
     eventInput,
     makeRunEventId(`evt:${manifest.run_id}:proto`),
   );
-  assert.equal(r.ok, true);
-  if (!r.ok) return;
-  const committed = r.value;
-  // Read the value via JSON round-trip so we don't have to
-  // argue about null-prototype vs Object.prototype: both are
-  // valid preservation strategies; what matters is that the
-  // key SURVIVED as own data with the same shape.
-  const protoVal = (committed.event as unknown as Record<string, unknown>)["__proto__"];
-  assert.ok(protoVal !== undefined, "expected __proto__ key to be preserved");
-  const asPlain = JSON.parse(JSON.stringify(protoVal));
-  assert.deepEqual(asPlain, { injected: true });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.failure.kind, "hostile_payload");
+  if (r.failure.kind === "hostile_payload") {
+    assert.equal(r.failure.stage, "decode");
+    assert.match(r.failure.reason, /__proto__/);
+  }
+  assert.equal(store.readRun(manifest.run_id).length, 0);
 });
 
-test("RUN52 committed record prototype cannot be corrupted", () => {
+test("RUN52 committed record prototype cannot be corrupted (hostile_payload path)", () => {
   const store = makeInMemoryRunStore({ nowMs: () => 0 });
   const manifest = makeTestManifest();
   store.init(manifest);
@@ -432,52 +436,49 @@ test("RUN52 committed record prototype cannot be corrupted", () => {
     eventInput,
     makeRunEventId(`evt:${manifest.run_id}:proto2`),
   );
-  assert.equal(r.ok, true);
-  if (!r.ok) return;
-  const proto = Object.getPrototypeOf(r.value);
-  // The committed envelope's prototype must NOT be the
-  // injected shape. Phase D snapshotter builds with
-  // Object.create(null) or preserves Object.prototype; the
-  // test forbids the injected payload.
-  assert.equal(
-    (proto as { injected?: unknown } | null)?.injected,
-    undefined,
-  );
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "hostile_payload");
+    if (r.failure.kind === "hostile_payload") {
+      assert.equal(r.failure.stage, "decode");
+    }
+  }
+  assert.equal(store.readRun(manifest.run_id).length, 0);
 });
 
-test("RUN53 accessor payload append does not execute getter", () => {
+test("RUN53 hostile accessor payload → store.append rejects without invoking getter", () => {
   let getterCallCount = 0;
   const input = {
-    type: "GATE_FINISHED",
-    gate_id: ids.gate,
-    attempt_id: ids.attempt,
-  } as Record<string, unknown>;
-  Object.defineProperty(input, "pass", {
+    type: "ACTION_STARTED",
+    target: { kind: "attempt", attempt_id: ids.attempt },
+  } as unknown as Record<string, unknown>;
+  Object.defineProperty(input, "type", {
     get() {
       getterCallCount += 1;
-      return true;
+      return "ACTION_STARTED";
     },
     enumerable: true,
     configurable: true,
   });
-  const r = snapshotJsonValue(input);
-  // snapshotJsonValue MUST reject accessor properties (D-M06).
+  const r = host_append(input);
   assert.equal(r.ok, false);
   if (!r.ok) {
-    assert.match(r.reason, /accessor property/);
+    assert.equal(r.failure.kind, "hostile_payload");
   }
   // Critical: the getter was NEVER invoked.
   assert.equal(getterCallCount, 0);
 });
 
-test("RUN54 Proxy payload cannot execute get/ownKeys traps before rejection", () => {
+test("RUN54 hostile Proxy payload → store.append rejects without invoking get trap", () => {
   let getCount = 0;
+  let ownKeysCount = 0;
   const trap: ProxyHandler<Record<string, unknown>> = {
     get(_t, _k) {
       getCount += 1;
       return undefined;
     },
     ownKeys() {
+      ownKeysCount += 1;
       return [];
     },
     getOwnPropertyDescriptor() {
@@ -486,20 +487,23 @@ test("RUN54 Proxy payload cannot execute get/ownKeys traps before rejection", ()
   };
   const inner = { type: "RUN_STARTED" };
   const proxy = new Proxy(inner, trap);
-  const r = snapshotJsonValue(proxy);
-  // Either rejection on the Proxy itself, or rejection via
-  // Reflect.getPrototypeOf. The key invariant is the get
-  // trap MUST NOT execute (D-M04).
+  const r = host_append(proxy);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.equal(r.failure.kind, "hostile_payload");
+  }
+  // D-M04 invariant: the `get` trap MUST NOT execute. The
+  // snapshotter rejects Proxy without enumerating properties
+  // via [[Get]]; the only trap it may fire is `ownKeys` (via
+  // Reflect.ownKeys) and that result is validated and found
+  // non-extensible / non-plain, so the input is rejected.
   assert.equal(getCount, 0);
-  // If the snapshotter accepted (which it must NOT), this
-  // test would still need to record failure. The Phase D
-  // snapshotter rejects Proxy as non-plain or via the
-  // getPrototypeOf trap; we don't assert a specific failure
-  // kind here, only the get-count invariant.
-  void r;
+  // ownKeys MAY fire once (the snapshotter uses Reflect.ownKeys
+  // to detect non-plain inputs); the response is validated.
+  assert.ok(ownKeysCount <= 1, `ownKeys fired ${ownKeysCount} times`);
 });
 
-test("RUN55 symbol/non-enumerable extra own keys cannot be silently dropped", () => {
+test("RUN55 symbol/non-enumerable extra own keys → store.append rejects without observation", () => {
   const sym = Symbol("phase-e-sym");
   const obj = { type: "RUN_STARTED" } as Record<string | symbol, unknown>;
   Object.defineProperty(obj, sym, {
@@ -507,10 +511,13 @@ test("RUN55 symbol/non-enumerable extra own keys cannot be silently dropped", ()
     enumerable: true,
     configurable: true,
   });
-  const r1 = snapshotJsonValue(obj);
+  const r1 = host_append(obj);
   assert.equal(r1.ok, false);
   if (!r1.ok) {
-    assert.match(r1.reason, /symbol own-key/);
+    assert.equal(r1.failure.kind, "hostile_payload");
+    if (r1.failure.kind === "hostile_payload") {
+      assert.equal(r1.failure.stage, "snapshot");
+    }
   }
   const obj2 = { type: "RUN_STARTED" } as Record<string, unknown>;
   Object.defineProperty(obj2, "secret", {
@@ -518,12 +525,34 @@ test("RUN55 symbol/non-enumerable extra own keys cannot be silently dropped", ()
     enumerable: false,
     configurable: true,
   });
-  const r2 = snapshotJsonValue(obj2);
+  const r2 = host_append(obj2);
   assert.equal(r2.ok, false);
   if (!r2.ok) {
-    assert.match(r2.reason, /non-enumerable own-key/);
+    assert.equal(r2.failure.kind, "hostile_payload");
+    if (r2.failure.kind === "hostile_payload") {
+      assert.equal(r2.failure.stage, "snapshot");
+    }
   }
 });
+
+/**
+ * Helper for hostile-input append probes (RUN53–55). Routes a
+ * raw unknown value through `store.append()` so the test
+ * exercises the Phase-E public boundary, not just the Phase-D
+ * snapshotter primitive.
+ */
+function host_append(
+  raw: unknown,
+): import("../../src/run/run-store.js").StoreResult {
+  const store = makeInMemoryRunStore({ nowMs: () => 0 });
+  const manifest = makeTestManifest();
+  store.init(manifest);
+  return store.append(
+    manifest,
+    raw as RunEvent,
+    makeRunEventId(`evt:${manifest.run_id}:hostile`),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // E-C10 — single canonical event-content encoder

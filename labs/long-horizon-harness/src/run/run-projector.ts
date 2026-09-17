@@ -63,6 +63,8 @@ function initialProjection(manifest: RunManifest): RunProjection {
     review_count: 0,
     last_sequence: 0,
     event_count: 0,
+    closure_authority_fresh: false,
+    work_epoch: 0,
   };
 }
 
@@ -95,19 +97,31 @@ function initialProjection(manifest: RunManifest): RunProjection {
  *   contributes to the temporal-authority ordering; the LAST
  *   closed gate's pass value is the authoritative one.
  *
+ * E-C14 closure-authority epoch rule (V1):
+ *
+ *   REPAIR_STARTED mutates the artifact under qualification
+ *   and therefore invalidates any prior closure-authority
+ *   gate. The projector tracks `workEpoch` (advanced by
+ *   REPAIR_STARTED) and `closureGateEpoch` (captured at gate
+ *   close). SUCCESS requires
+ *
+ *     closureGatePass === true
+ *       AND closureGateEpoch === workEpoch
+ *
+ *   so a PASS gate observed before a repair cannot authorize
+ *   a SUCCESS after the repair. The V1 invalidation rule is:
+ *   only REPAIR_STARTED advances the work epoch; a subsequent
+ *   ACTION_STARTED does NOT advance the epoch on its own.
+ *
  * V1 minimum authoritative-success evidence:
  *
  *   1. RUN_STARTED                       (run was initiated)
  *   2. HARNESS_STARTED                   (harness actually ran)
  *   3. HARNESS_STOPPED                   (harness actually stopped)
  *   4. at least one ACTION_FINISHED      (work was performed)
- *   5. lastGateFinishedPass === true     (temporal authority;
- *                                        the most recent gate
- *                                        closed with pass=true;
- *                                        a failing gate in
- *                                        between invalidates
- *                                        the earlier pass)
- *   6. no open attempt / gate / repair / review at close
+ *   5. closureGatePass === true          (last closing gate passed)
+ *   6. closureGateEpoch === workEpoch    (no repair since the gate)
+ *   7. no open attempt / gate / repair / review at close
  *
  * If any of these is missing while terminal_semantic claims
  * SUCCESS, the projection is INVALID_EVIDENCE — not a tainted
@@ -121,12 +135,15 @@ export function successEvidencePredicateSatisfied(
   if (!tracker.harnessStarted) return false;
   if (!tracker.harnessStopped) return false;
   if (tracker.actionFinishedCount < 1) return false;
-  // E-C07: temporal authority — the LAST closed gate must be
-  // a passing gate. We use the tracker field populated by
-  // applyGateFinished, which overwrites on every GATE_FINISHED
-  // observation, so `null` (no gate ever closed) and `false`
-  // (last gate closed with pass=false) both fail closed.
-  if (tracker.lastGateFinishedPass !== true) return false;
+  // E-C07 + E-C14: temporal AND epoch-bound closure authority.
+  // The recorded closure-gate epoch must equal the current
+  // work epoch (so REPAIR invalidates the gate), and the
+  // gate's verdict must be pass=true. Combined, this rejects:
+  //   PASS gate -> FAIL gate -> SUCCESS        (last gate did not pass)
+  //   PASS gate -> REPAIR_STARTED -> SUCCESS   (epoch stale)
+  //   PASS gate -> REPAIR -> REPAIR_FINISHED -> new PASS -> SUCCESS  (epoch fresh)
+  if (tracker.closureGatePass !== true) return false;
+  if (tracker.closureGateEpoch !== tracker.workEpoch) return false;
   if (tracker.openAttemptId !== null) return false;
   if (tracker.openGateId !== null) return false;
   if (tracker.openRepairId !== null) return false;
@@ -162,6 +179,10 @@ function projectionFromTracker(
       review_count: tracker.review_count,
       last_sequence: tracker.lastSeq,
       event_count: tracker.eventIdToContent.size,
+      closure_authority_fresh:
+        tracker.closureGatePass === true &&
+        tracker.closureGateEpoch === tracker.workEpoch,
+      work_epoch: tracker.workEpoch,
     };
   }
 
@@ -185,6 +206,10 @@ function projectionFromTracker(
     review_count: tracker.review_count,
     last_sequence: tracker.lastSeq,
     event_count: tracker.eventIdToContent.size,
+    closure_authority_fresh:
+      tracker.closureGatePass === true &&
+      tracker.closureGateEpoch === tracker.workEpoch,
+    work_epoch: tracker.workEpoch,
   };
 }
 

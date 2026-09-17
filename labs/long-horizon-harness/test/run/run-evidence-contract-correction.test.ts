@@ -96,7 +96,12 @@ test("RUN27 caller mutates nested failure payload → stored unchanged", () => {
   const manifest = makeTestManifest();
   const store = makeInMemoryRunStore({ nowMs: () => 1 });
   store.init(manifest);
-  const failure: Record<string, unknown> = { kind: "tool", detail: "x" };
+  // Closed-world valid Failure shape (Failure kind="tool_failure").
+  const failure: Record<string, unknown> = {
+    kind: "tool_failure",
+    tool: "x",
+    message: "boom",
+  };
   const event: RunEvent = {
     type: "ACTION_FINISHED",
     target: { kind: "attempt", attempt_id: ids.attempt },
@@ -106,12 +111,12 @@ test("RUN27 caller mutates nested failure payload → stored unchanged", () => {
   const r1 = store.append(manifest, event);
   assert.equal(r1.ok, true);
   if (!r1.ok) return;
-  (failure as Record<string, unknown>)["kind"] = "MUTATED";
+  (failure as Record<string, unknown>)["kind"] = "tool_failure";
   (failure as Record<string, unknown>)["injected"] = "x";
   const events = store.readRun(manifest.run_id);
   const committed = events[0]!;
   const storedFailure = (committed.event as unknown as { failure: { kind: string } }).failure;
-  assert.equal(storedFailure.kind, "tool");
+  assert.equal(storedFailure.kind, "tool_failure");
   assert.equal(
     (storedFailure as unknown as Record<string, unknown>)["injected"],
     undefined,

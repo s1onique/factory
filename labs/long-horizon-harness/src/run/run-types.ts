@@ -1,16 +1,13 @@
 /**
  * FOUNDATION04 — PHASE E — Run / Evidence Contract.
  *
- * Pure types, branded identifiers, schema versions, manifest /
- * envelope / projection shapes, and closed-world key constants.
- * The RunEvent vocabulary + supporting union types live in
- * run-event-types.ts (split out for SOURCE_SIZE_DISCIPLINE) and
- * are re-exported below so the public surface is unchanged.
+ * Pure types, branded IDs, schema versions, manifest / envelope /
+ * projection shapes, and closed-world key constants. RunEvent
+ * vocabulary + supporting unions live in run-event-types.ts
+ * (split for SOURCE_SIZE_DISCIPLINE) and are re-exported below.
  *
  * Doctrine (E2, E13): the harness/model is NEVER authoritative
  * about success; state derives from owned, versioned evidence.
- *
- * This module is pure: no I/O.
  */
 
 import { createHash } from "node:crypto";
@@ -81,21 +78,13 @@ export type RunId = RunBrand<string, "RunId">;
 
 /**
  * RunEventId. Stable opaque token (E-C06):
+ *   EVENT_ID_STABLE                      — id does not change once assigned.
+ *   EVENT_ID_UNIQUE                      — no two events in the same run share an id.
+ *   SAME_ID_DIFFERENT_CONTENT_FAILS_CLOSED — store rejects a retry whose
+ *                                            canonical content differs.
  *
- *   EVENT_ID_STABLE                      — id does not change
- *                                          once assigned.
- *   EVENT_ID_UNIQUE                      — no two events in the
- *                                          same run share an id.
- *   SAME_ID_DIFFERENT_CONTENT_FAILS_CLOSED
- *                                       — store rejects a retry
- *                                          whose canonical
- *                                          content differs.
- *
- * The default event-id factory in run-store.ts is content-derived
- * (sha-256 of run + sequence + canonical bytes); callers may
- * supply their own factory. Phase E does NOT recompute event-ids
- * at every boundary; the closed-world schema forbids arbitrary
- * caller-supplied ids from bypassing uniqueness tracking.
+ * Default factory in run-store.ts is content-derived (sha-256 of
+ * run + sequence + canonical bytes); callers may supply their own.
  */
 export type RunEventId = RunBrand<string, "RunEventId">;
 
@@ -347,6 +336,14 @@ export type RunProjection = {
   readonly review_count: number;
   readonly last_sequence: number;
   readonly event_count: number;
+  /**
+   * E-C14 closure-authority summary. `closure_authority_fresh`
+   * is true when a passing closure gate was observed at the
+   * CURRENT work epoch. `work_epoch` is the monotonic counter
+   * advanced by REPAIR_STARTED.
+   */
+  readonly closure_authority_fresh: boolean;
+  readonly work_epoch: number;
 };
 
 export type ProjectionFailure =

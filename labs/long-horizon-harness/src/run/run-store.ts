@@ -1,31 +1,21 @@
 /**
  * FOUNDATION04 — PHASE E — Run / Evidence Contract.
  *
- * Append-only in-memory event store abstraction (E9, E10).
+ * Append-only in-memory event store (E9, E10). Pure: no fs,
+ * no network. Exposes ONLY append + readRun + the internal
+ * projector helper — no mutation API (E9 doctrine).
  *
- * Phase E establishes the contract; production persistence is
- * deferred to a later ACT. The in-memory store:
+ * Invariants enforced by `append`:
  *
- *   - exposes append(event) and readRun(runId)
- *   - rejects any mutation API beyond append + read
- *   - commits whole events or nothing (atomicity at the event
- *     boundary)
- *   - owns sequence allocation per run
- *   - never rejects an event for an idempotent (event_id, content)
- *     pair; rejects same event_id + different content
+ *   E-C01  committed graph is OWNED + deeply frozen.
+ *   E-C05  idempotent on (event_id, content); rejects on
+ *          (event_id, different content).
+ *   E-C12  no semantic observation of the raw caller graph
+ *          happens before the snapshot+decode boundary.
+ *   E-C13  unknown own keys are rejected by the closed-world
+ *          decode before any commit.
  *
- * Doctrine (E9):
- *
- *   "No mutation API: updateEvent, replaceEvent, deleteEvent,
- *    setRunStatus ... unless explicitly required for test
- *    infrastructure and impossible to expose through the domain
- *    API."
- *
- *   The store therefore exposes ONLY append + readRun + the
- *   internal projector helper. There is no way to mutate
- *   evidence once appended.
- *
- * This module is pure (in-memory; no fs, no network).
+ * Production persistence is deferred to a later ACT.
  */
 
 import { createHash } from "node:crypto";
@@ -39,8 +29,9 @@ import type {
 } from "./run-types.js";
 import { RUN_EVENT_SCHEMA_VERSION, makeRunEventId } from "./run-types.js";
 import { snapshotJsonValue } from "./run-json.js";
-import { deterministicJson } from "./run-serialize.js";
+import { canonicalEventBytes } from "./run-serialize.js";
 import { projectRun } from "./run-projector.js";
+import { decodeRunEventPayload } from "./run-decode-payload.js";
 import type { ProjectionResult } from "./run-types.js";
 
 /**
@@ -49,6 +40,7 @@ import type { ProjectionResult } from "./run-types.js";
 export type StoreFailure =
   | { readonly kind: "identity_mismatch"; readonly field: string; readonly reason: string }
   | { readonly kind: "duplicate_event_id_with_changed_content"; readonly reason: string }
+  | { readonly kind: "hostile_payload"; readonly stage: "snapshot" | "decode"; readonly reason: string }
   | { readonly kind: "boundary_exception"; readonly reason: string };
 
 export type StoreResult =
@@ -77,14 +69,9 @@ export type EventIdSource = {
 
 /**
  * Default event-id source: a content-derived id (sha-256 of the
- * canonical bytes of the event + run_id + sequence). This makes
- * the event-id deterministic given the inputs.
- *
- * E-C10: the canonical bytes authority is the SAME
- * `deterministicJson` encoder the store and projector use to
- * compare two events with the same id. There is exactly ONE
- * canonical encoder in Phase E; the default EventIdSource
- * consumes it.
+ * canonical bytes of the event + run_id + sequence). E-C10: the
+ * canonical encoder is the same one used by the store and
+ * projector — there is exactly ONE canonical encoder in Phase E.
  */
 export function makeContentBoundEventIdSource(): EventIdSource {
   return {
@@ -130,56 +117,70 @@ function emptyLedger(runId: RunId): RunLedger {
 }
 
 /**
- * Canonical bytes for the inner RunEvent payload. Used as the
- * stable identity key for E10 same-id/different-content
- * detection.
- *
- * Per E-C06 the doctrine is EVENT_ID_STABLE +
- * SAME_ID_DIFFERENT_CONTENT_FAILS_CLOSED; the event-id itself
- * is a stable opaque token supplied by the caller (or the
- * default content-derived factory). This helper produces the
- * canonical form used to compare two events with the same id.
- *
- * Per E-C10, this is the SINGLE authority for canonical event
- * content. It is reused by:
- *   - the store's idempotency / same-id-different-content check
- *   - the projector's same-id-different-content check
- *   - the default content-derived EventIdSource
- *   - any future JSONL writer
- *
- * The encoder recurses into nested objects and arrays, sorting
- * object keys at every level. Two payloads that differ ONLY in
- * insertion order round-trip to byte-equal canonical bytes.
+ * Re-export of the SINGLE canonical-content authority for
+ * `RunEvent` (defined in `run-serialize.ts`). E-C10: there is
+ * exactly one encoder. E-C15: inside `src/run/` consumers must
+ * import it from `run-serialize.ts` directly; this re-export
+ * exists for the public barrel.
  */
-export const canonicalEventBytes: (event: RunEvent) => string =
-  deterministicJson;
+export { canonicalEventBytes };
 
 /**
- * E-C09: ownership capture reuses the hardened Phase D
- * snapshotter (`snapshotJsonValue`). The snapshotter:
- *   - rejects Proxy / accessor / cyclic / exotic inputs
- *   - preserves `__proto__` as data via null-prototype output
- *     (D-M10)
- *   - rejects symbol / non-enumerable / undefined / BigInt
- *   - does NOT invoke any Reflect / Object method that can be
- *     trapped by caller-controlled Proxy getters
- *   - returns a frozen inert owned graph (Phase D behaviour)
+ * E-C12 + E-C13 — hardened ownership + closed-world gate.
  *
- * After snapshotting, the owned value is recursively frozen so
- * the caller cannot mutate it via the committed envelope
- * either. (snapshotJsonValue already freezes the top level;
- * nested levels are frozen by snapshotArrayHardened /
- * snapshotJsonValueInner; we add deepFreeze as defense in
- * depth for the resulting typed RunEvent shape.)
+ * Two steps in strict order, BOTH must succeed before commit:
+ *
+ *   (a) snapshot the caller input through the Phase D
+ *       snapshotter. Rejects Proxy / accessor / cyclic /
+ *       exotic inputs without invoking any trap.
+ *   (b) closed-world RunEvent decode on the snapshot. Rejects
+ *       unknown own keys (e.g. an extra `__proto__` field on
+ *       ACTION_STARTED) before any commit.
+ *
+ * The returned RunEvent is deeply frozen + typed + closed-
+ * world-validated. The caller retains zero references into it.
+ * On failure we surface a typed `StoreFailure` (never throw).
  */
-function snapshotRunEvent(event: RunEvent): RunEvent {
+function snapshotDecodeOwnedRunEvent(
+  event: RunEvent,
+):
+  | { readonly ok: true; readonly value: RunEvent }
+  | { readonly ok: false; readonly failure: StoreFailure } {
+  // (a) Snapshot first.
   const r = snapshotJsonValue(event);
   if (!r.ok) {
-    throw new Error(
-      `append: hostile RunEvent rejected by snapshot boundary: ${r.reason}`,
-    );
+    return {
+      ok: false,
+      failure: { kind: "hostile_payload", stage: "snapshot", reason: r.reason },
+    };
   }
-  return deepFreeze(r.value as unknown as RunEvent);
+  // (b) Closed-world decode on the snapshot. Unknown own keys
+  // are rejected here. The snapshotter may produce null-
+  // prototype records; the decoder accepts them per Phase D.
+  const decode = decodeRunEventPayload(r.value);
+  if (!decode.ok) {
+    return {
+      ok: false,
+      failure: {
+        kind: "hostile_payload",
+        stage: "decode",
+        reason: decodeFailureReason(decode.failure),
+      },
+    };
+  }
+  return { ok: true, value: deepFreeze(decode.value) };
+}
+
+function decodeFailureReason(f: {
+  readonly kind: string;
+  readonly reason?: string;
+  readonly field?: string;
+  readonly version?: string;
+}): string {
+  if (f.kind === "unknown_field") return `unknown_field '${f.field}'`;
+  if (f.kind === "unsupported_schema_version")
+    return `unsupported_schema_version '${f.version}'`;
+  return f.reason ?? `decode failure kind='${f.kind}'`;
 }
 
 function snapshotCommittedEnvelope(env: CommittedRunEvent): CommittedRunEvent {
@@ -237,21 +238,23 @@ export class InMemoryRunStore {
    * event atomically. Idempotent on (event_id, content); rejects
    * on (event_id, different content).
    *
-   * E-C01: the committed graph is OWNED. The caller retains
-   * zero references into the committed envelope — neither the
-   * outer CommittedRunEvent nor any nested RunEvent field. The
-   * committed value is deeply frozen so that:
+   * Invariants:
    *
-   *   - subsequent caller mutation of the input RunEvent does
-   *     not mutate stored evidence;
-   *   - in `strict` mode the runtime would throw, in non-strict
-   *     mode the mutation is silently dropped by Object.freeze;
-   *   - in both cases the stored bytes are unchanged.
-   *
-   * E-C05: idempotency lookup uses event_id -> committed event
-   * (not just bytes). A repeated identical retry returns the
-   * ORIGINAL committed event object; the ledger length and
-   * sequence are unchanged.
+   *   E-C01  committed graph is OWNED + deeply frozen.
+   *   E-C05  idempotency returns the ORIGINAL committed event
+   *          on a retry; ledger length and sequence unchanged.
+   *   E-C12  no semantic observation of the raw caller graph
+   *          happens before the snapshot+decode boundary. The
+   *          canonical-bytes hash, the EventIdSource, and the
+   *          idempotency lookup MUST consume the OWNED typed
+   *          event — never the raw caller input.
+   *   E-C13  the snapshot is followed by a closed-world RunEvent
+   *          decode so unknown own keys (e.g. an injected
+   *          `__proto__` field on ACTION_STARTED) are rejected
+   *          before any commit. After this gate the canonical
+   *          bytes authority computes its fingerprint of a
+   *          closed-world-validated event so COMMITTED ↔ ENCODE
+   *          round-trips without content drift.
    */
   append(
     manifest: RunManifest,
@@ -272,13 +275,33 @@ export class InMemoryRunStore {
           },
         };
       }
+
+      // -----------------------------------------------------------------
+      // E-C12 + E-C13 — hardened ownership + closed-world gate FIRST.
+      // -----------------------------------------------------------------
+      // From this point on we MUST NOT touch the raw caller input. The
+      // `ownedEvent` is a snapshotter-built, null-prototype, deeply-
+      // frozen, closed-world-typed RunEvent. Every downstream consumer
+      // (canonicalization, EventIdSource, idempotency) consumes ONLY
+      // `ownedEvent`.
+      const decodeResult = snapshotDecodeOwnedRunEvent(event);
+      if (!decodeResult.ok) {
+        return { ok: false, failure: decodeResult.failure };
+      }
+      const ownedEvent: RunEvent = decodeResult.value;
+
       const sequence = ledger.events.length + 1;
+      // Default EventIdSource consumes the OWNED typed event, never
+      // the raw caller graph (E-C12).
       const eventId =
         explicitId ??
-        this.eventIdSource.next(manifest.run_id, event, sequence);
-      const bytes = canonicalEventBytes(event);
+        this.eventIdSource.next(manifest.run_id, ownedEvent, sequence);
+      const bytes = canonicalEventBytes(ownedEvent);
 
       // E-C05: idempotency lookup by event_id → committed event.
+      // Compare on the canonical bytes of the OWNED events on both
+      // sides; the original committed event is itself an owned typed
+      // value, so this is a fair comparison.
       const existing = ledger.seenCommits.get(eventId);
       if (existing !== undefined) {
         const existingBytes = canonicalEventBytes(existing.event);
@@ -297,12 +320,9 @@ export class InMemoryRunStore {
         return { ok: true, value: existing };
       }
 
-      // E-C01 + E-C09: own the committed graph via the
-      // hardened Phase D snapshotter, then deeply freeze the
-      // typed envelope. The caller can mutate its own `event`
-      // reference after append returns without affecting
-      // stored evidence.
-      const ownedEvent = snapshotRunEvent(event);
+      // E-C01: own the committed graph. The typed envelope is built
+      // from the already-owned `ownedEvent` so the caller retains
+      // zero references into the committed graph.
       const committed: CommittedRunEvent = snapshotCommittedEnvelope({
         schema_version: RUN_EVENT_SCHEMA_VERSION,
         event_id: eventId,
