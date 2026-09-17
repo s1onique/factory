@@ -19,6 +19,14 @@
  *     the SAME object twice.
  *   - METRIC24..METRIC27 (split-brain binding): added
  *     in metric-properties.test.ts as well.
+ *
+ * CORRECTION02 (M-C07, M-C09):
+ *   - METRIC36..METRIC39 verify `verifyProjectionBind`
+ *     against (a) two independently produced projections
+ *     of the same evidence stream; (b) a stale projection;
+ *     (c) a structurally-equal projection copied into a
+ *     new object; (d) a projection with one field
+ *     modified.
  */
 
 import { test } from "node:test";
@@ -30,7 +38,11 @@ import {
   computeRunMetrics,
   serializeMetricReport,
   deriveRunEvidenceHash,
+  verifyProjectionBind,
 } from "../../src/metrics/index.js";
+import {
+  projectRun,
+} from "../../src/run/run-projector.js";
 import {
   computeRunMetricsFor,
   makeSuccessRunMinimal,
@@ -287,33 +299,28 @@ test("METRIC25 (M-C01): same events + matching projection => report accepted", (
   assert.equal(m.report.provenance.run_evidence_hash, deriveRunEvidenceHash(eventsA));
 });
 
-test("METRIC26 (M-C01): one-event mutation with stale projection => rejected by verifyProjectionBind", () => {
+test("METRIC26 (M-C01/M-C07): one-event mutation with stale projection => rejected by verifyProjectionBind", () => {
   const { manifestA, eventsA } = buildDistinguishableStreams();
   // Compute the projection derived from eventsA.
-  // Then mutate events and try verifyProjectionBind.
-  // Since the projector is deterministic, the supplied
-  // projection will not match the new projection.
-  const m1 = computeRunMetricsFor({ manifest: manifestA, events: eventsA });
-  assert.equal(m1.ok, true);
-  if (!m1.ok) throw new Error("ok");
-  // Build mutated events; the supplied projection from
-  // eventsA is now stale.
+  const projA = projectRun(manifestA, eventsA);
+  assert.equal(projA.ok, true);
+  if (!projA.ok) throw new Error("ok");
+  // Build mutated events (gate pass flipped); the supplied
+  // projection from eventsA is now stale for the new stream.
   const mutated = eventsA.map((e) => {
     if (e.event.type !== "GATE_FINISHED") return e;
     return { ...e, event: { ...e.event, pass: false } };
   });
-  // We cannot retrieve the RunProjection from MetricReport
-  // (it is intentionally not exposed). Instead verify the
-  // negative-oracle by re-running computeRunMetrics on the
-  // mutated events and confirming the report's evidence
-  // hash DIFFERS from the original.
-  const m2 = computeRunMetricsFor({ manifest: manifestA, events: mutated });
-  assert.equal(m2.ok, true);
-  if (!m2.ok) throw new Error("ok");
-  assert.notEqual(
-    m2.report.provenance.run_evidence_hash,
-    m1.report.provenance.run_evidence_hash,
-  );
+  // verifyProjectionBind MUST reject the stale projection
+  // against the mutated evidence stream.
+  const v = verifyProjectionBind({
+    manifest: manifestA,
+    orderedEvents: mutated,
+    suppliedRunProjection: projA.value,
+  });
+  assert.equal(v.ok, false);
+  if (v.ok) throw new Error("expected rejection");
+  assert.match(v.reason ?? "", /projection binding/);
 });
 
 test("METRIC27 (M-C01): same run/subject but different terminal stream => different run_evidence_hash", () => {
@@ -330,4 +337,107 @@ test("METRIC27 (M-C01): same run/subject but different terminal stream => differ
     mA.report.provenance.run_evidence_hash,
     mB.report.provenance.run_evidence_hash,
   );
+});
+
+// ---------------------------------------------------------------------------
+// CORRECTION02 probes (M-C07 verifyProjectionBind value equality).
+// ---------------------------------------------------------------------------
+
+/**
+ * METRIC36: two independently produced projections of the
+ * SAME evidence stream have different object identities
+ * but each `verifyProjectionBind` call against its own
+ * evidence must return ok. This is the central
+ * reproducibility oracle (M-C07): value equality, not
+ * reference identity.
+ */
+test("METRIC36 (M-C07): two independent projections of same evidence both pass verifyProjectionBind", () => {
+  const { manifestA, eventsA } = buildDistinguishableStreams();
+  const p1 = projectRun(manifestA, eventsA);
+  const p2 = projectRun(manifestA, eventsA);
+  assert.equal(p1.ok, true);
+  assert.equal(p2.ok, true);
+  if (!p1.ok || !p2.ok) throw new Error("ok");
+  // Reference identity differs:
+  assert.notEqual(p1.value, p2.value);
+  // But each is value-equal to its own evidence:
+  const v1 = verifyProjectionBind({
+    manifest: manifestA,
+    orderedEvents: eventsA,
+    suppliedRunProjection: p1.value,
+  });
+  assert.equal(v1.ok, true);
+  const v2 = verifyProjectionBind({
+    manifest: manifestA,
+    orderedEvents: eventsA,
+    suppliedRunProjection: p2.value,
+  });
+  assert.equal(v2.ok, true);
+});
+
+/**
+ * METRIC37: a projection from stream A is REJECTED when
+ * supplied against the evidence of stream B (which retains
+ * the same run_id / subject_id but differs in content).
+ * This is the central split-brain oracle (M-C07).
+ */
+test("METRIC37 (M-C07): projection from stream A is rejected against stream B's evidence", () => {
+  const { manifestA, eventsA, eventsB } = buildDistinguishableStreams();
+  const projA = projectRun(manifestA, eventsA);
+  assert.equal(projA.ok, true);
+  if (!projA.ok) throw new Error("ok");
+  const v = verifyProjectionBind({
+    manifest: manifestA,
+    orderedEvents: eventsB,
+    suppliedRunProjection: projA.value,
+  });
+  assert.equal(v.ok, false);
+  if (v.ok) throw new Error("expected rejection");
+  assert.match(v.reason ?? "", /projection binding/);
+});
+
+/**
+ * METRIC38: a projection copied into a NEW object
+ * (structurally equal but reference-distinct) is
+ * ACCEPTED. This is the round-tripped-value oracle.
+ */
+test("METRIC38 (M-C07): a structurally-equal projection copied to a new object is accepted", () => {
+  const { manifestA, eventsA } = buildDistinguishableStreams();
+  const projA = projectRun(manifestA, eventsA);
+  assert.equal(projA.ok, true);
+  if (!projA.ok) throw new Error("ok");
+  // Produce a deep-copied, structurally-equal projection.
+  const deepCopy = JSON.parse(JSON.stringify(projA.value));
+  assert.notEqual(deepCopy, projA.value);
+  const v = verifyProjectionBind({
+    manifest: manifestA,
+    orderedEvents: eventsA,
+    suppliedRunProjection: deepCopy,
+  });
+  assert.equal(v.ok, true);
+});
+
+/**
+ * METRIC39: a projection with ONE field modified is
+ * REJECTED. Verifies the equality is structural (per-field),
+ * not just a top-level "same shape" comparison.
+ */
+test("METRIC39 (M-C07): a projection with one field modified is rejected", () => {
+  const { manifestA, eventsA } = buildDistinguishableStreams();
+  const projA = projectRun(manifestA, eventsA);
+  assert.equal(projA.ok, true);
+  if (!projA.ok) throw new Error("ok");
+  // Mutate one field: pretend the recorded event count is
+  // different. Any deterministic single-field change must
+  // be rejected.
+  const mutated = JSON.parse(JSON.stringify(projA.value));
+  mutated.event_count = mutated.event_count + 1;
+  const v = verifyProjectionBind({
+    manifest: manifestA,
+    orderedEvents: eventsA,
+    suppliedRunProjection: mutated,
+  });
+  assert.equal(v.ok, false);
+  if (v.ok) throw new Error("expected rejection");
+  assert.match(v.reason ?? "", /projection binding/);
 });

@@ -295,44 +295,91 @@ export type ConvergenceDistances = {
 /**
  * Correction burden (M6).
  *
- * LH-02 distinguishes TWO measurands here, because the original
- * ACT-definition was historical ("count events that make
- * previously established positive closure authority stale") but
- * a current-state scalar was needed for diagnostic surfaces.
+ * LH-02 distinguishes FOUR measurands here. CORRECTION02
+ * (M-C08) splits the original ACT-definition ("count events
+ * that make previously established positive closure authority
+ * stale") into TWO orthogonal authority channels, because
+ * Phase E's frozen authority precedence model (E-C24) treats
+ * review verdicts as a separate per-epoch SUCCESS blocker
+ * rather than as closure-authority invalidation. Conflating
+ * the two channels would lose measurement traceability.
  *
- * `historical_authority_invalidation_count` is the HISTORICAL
- * correction burden: the number of events in the run that
- * invalidated previously established positive closure
- * authority. This count survives later recovery — a run that
- * required three requalification cycles still reports 3 even
- * after the final cycle passed. Defined in V1 as the count of:
+ * Closure-authority channel (the "M" channel):
  *
- *   GATE_FINISHED(pass=false)    while fresh positive authority
- *                                existed;
- *   ACTION_STARTED               while fresh positive authority
- *                                existed;
- *   REPAIR_STARTED               while fresh positive authority
- *                                existed;
- *   ACTION_FINISHED(ERROR)       while fresh positive authority
- *                                existed;
- *   REVIEW_FINISHED(pass=false)  that lands at the current
- *                                work epoch (Phase E E-C22).
+ *   `historical_authority_invalidation_count`
  *
- * The walk mirrors Phase E's frozen precedence semantics.
+ *     Number of closure-channel invalidation events:
  *
- * `current_authority_blocker_count` is the CURRENT-STATE
- * diagnostic (the previous V1 definition): 0..2 reflecting
- * whether an unrecovered failure still blocks SUCCESS.
+ *       GATE_FINISHED(pass=false)   while fresh positive
+ *                                   authority existed;
+ *       ACTION_STARTED              while fresh positive
+ *                                   authority existed;
+ *       REPAIR_STARTED              while fresh positive
+ *                                   authority existed;
+ *       ACTION_FINISHED(ERROR)      while fresh positive
+ *                                   authority existed.
  *
- * LH-02 does NOT add a single scalar "burden" — the historical
- * counter is what measures how much correction was required.
+ *     REVIEW_FINISHED events are NOT on this channel — see
+ *     the review-blocker channel below. The walk mirrors
+ *     Phase E's E-C14 V2 transition and E-C21 negative-
+ *     evidence rules. The count survives later recovery
+ *     (a later GATE_FINISHED(pass=true) does NOT decrement
+ *     it).
+ *
+ * Review-blocker channel (the "R" channel):
+ *
+ *   `historical_review_blocker_activation_count`
+ *
+ *     Number of REVIEW_FINISHED(pass=false) events that
+ *     raised a per-epoch SUCCESS blocker. A later
+ *     REVIEW_FINISHED(pass=true) at the same work epoch
+ *     CLEARS the blocker but does NOT decrement the
+ *     activation count.
+ *
+ *   `failing_review_count`
+ *
+ *     Closed-world counter (the structural count of failing
+ *     reviews in the stream). Equal to or greater than the
+ *     activation count: an activation is `REVIEW_FINISHED
+ *     (pass=false)`; two failing reviews at the same epoch
+ *     would activate twice under V1 (the metric does not
+ *     track per-epoch suppression).
+ *
+ * Current-state diagnostic:
+ *
+ *   `current_authority_blocker_count` is a 0..2 scalar
+ *   reflecting whether an unrecovered failure still
+ *   blocks SUCCESS right now. LH-02 keeps this scalar
+ *   because a single current-state number is useful for
+ *   dashboards; the historical counts above describe
+ *   how much correction was required.
+ *
+ * LH-02 does NOT collapse these into a single scalar.
  */
 export type CorrectionBurden = {
   readonly repair_cycle_count: number;
   readonly failed_action_count: number;
   readonly failing_gate_count: number;
   readonly failing_review_count: number;
+  /**
+   * Historical closure-channel invalidation count
+   * (M-C08). Survives recovery. REVIEW_FINISHED events
+   * do NOT count here.
+   */
   readonly historical_authority_invalidation_count: number;
+  /**
+   * Historical review-blocker activation count (M-C08).
+   * Tracks the orthogonal review-channel friction
+   * independently of the closure authority channel.
+   * Survives recovery (a clearing REVIEW_FINISHED(true)
+   * at the same epoch clears the per-epoch blocker but
+   * does NOT decrement the activation count).
+   */
+  readonly historical_review_blocker_activation_count: number;
+  /**
+   * Current-state diagnostic (0..2). Whether an unrecovered
+   * failure still blocks SUCCESS right now.
+   */
   readonly current_authority_blocker_count: number;
 };
 

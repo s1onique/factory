@@ -3,11 +3,13 @@
  *
  * Golden hand calculations (M21) for METRIC01..METRIC06,
  * METRIC08, plus the CORRECTION01 probes METRIC28..METRIC32
- * (M-C02) and METRIC33..METRIC35 (M-C04). Each test pins
- * the expected metric values directly (not derived via the
- * same helper). The test harness itself does NOT import the
- * production counter / distance helpers; the only
- * production entry point used is `computeRunMetrics`.
+ * (M-C02) and METRIC33..METRIC35 (M-C04), plus the
+ * CORRECTION02 probes METRIC40..METRIC43 (M-C08 orthogonal
+ * review-blocker channel). Each test pins the expected
+ * metric values directly (not derived via the same helper).
+ * The test harness itself does NOT import the production
+ * counter / distance helpers; the only production entry
+ * point used is `computeRunMetrics`.
  */
 
 import { test } from "node:test";
@@ -32,6 +34,10 @@ import {
   makePassThenFailThenValidFailure,
   makePassWorkPassSuccess,
   makePassReviewFailTerminal,
+  makePassReviewFailReviewPassSuccess,
+  makePassActionStartedThenPassSuccess,
+  makePassReviewFailRepairThenPassSuccess,
+  makePassGateFailThenWorkThenPassSuccess,
 } from "./_metric_helpers.js";
 
 /**
@@ -174,13 +180,20 @@ test("METRIC05 (golden): review FAIL -> recovery -> SUCCESS review vector", () =
   // E-C22: REVIEW_FINISHED(true) supersedes a prior FAIL at
   // the same work epoch.
   assert.equal(m.report.convergence.trustworthy_success, true);
-  // CORRECTION01 M-C02: the REVIEW_FINISHED(false) at the
-  // current epoch DID invalidate prior fresh positive
-  // authority. The historical count reflects that; the
-  // current blocker is 0 because the failing verdict was
-  // superseded by a later passing review at the same epoch.
+  // CORRECTION02 M-C08: REVIEW_FINISHED(false) does NOT
+  // stale the closure-authority channel. The historical
+  // closure-invalidation count remains 0; the review
+  // friction is surfaced on the ORTHOGONAL review-blocker
+  // channel as `historical_review_blocker_activation_count`
+  // (= 1 for this run). The current closure blocker is 0
+  // because the failing verdict was superseded by a later
+  // passing review at the same epoch.
   assert.equal(
     m.report.correction_burden.historical_authority_invalidation_count,
+    0,
+  );
+  assert.equal(
+    m.report.correction_burden.historical_review_blocker_activation_count,
     1,
   );
   assert.equal(
@@ -288,13 +301,21 @@ test("METRIC30 (M-C02): PASS -> ACTION ERROR -> work -> PASS -> invalidation sur
   assert.equal(m.report.convergence.trustworthy_success, true);
 });
 
-test("METRIC31 (M-C02): PASS -> REVIEW FAIL -> REVIEW PASS -> 1 invalidation", () => {
+test("METRIC31 (M-C08): PASS -> REVIEW FAIL -> REVIEW PASS -> closure channel 0 invalidations, review channel 1 activation", () => {
   const r = makeReviewFailThenReviewPass({ seed: "mc02-31" });
   const m = computeRunMetricsFor(r);
   assert.equal(m.ok, true);
   if (!m.ok) throw new Error("ok");
   const b = m.report.correction_burden;
-  assert.equal(b.historical_authority_invalidation_count, 1);
+  // CORRECTION02 M-C08: REVIEW_FINISHED(false) is on the
+  // ORTHOGONAL review-blocker channel. It does NOT stale
+  // the closure gate at the same epoch — the later
+  // REVIEW_FINISHED(pass=true) at the same epoch clears
+  // the per-epoch blocker. The closure-channel
+  // invalidation count stays 0; the review-blocker
+  // activation count is 1.
+  assert.equal(b.historical_authority_invalidation_count, 0);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
   assert.equal(b.current_authority_blocker_count, 0);
   assert.equal(m.report.convergence.trustworthy_success, true);
 });
@@ -367,4 +388,69 @@ test("METRIC35 (M-C04): PASS -> REVIEW FAIL -> terminal VALID_FAILURE -> last_au
   assert.equal(d.actions_to_last_authoritative_pass.available, false);
   if (d.actions_to_last_authoritative_pass.available) throw new Error("ok");
   assert.equal(d.actions_to_last_authoritative_pass.reason, "NOT_APPLICABLE");
+});
+
+// ---------------------------------------------------------------------------
+// CORRECTION02 probes (M-C08 orthogonal review-blocker channel).
+//
+// METRIC40..METRIC43 each pin one corner of the orthogonal
+// channels. The closure-authority channel counts only ACTION_/
+// GATE_/REPAIR_ invalidation events; the review-blocker channel
+// counts only REVIEW_FINISHED(pass=false) activations.
+// ---------------------------------------------------------------------------
+
+test("METRIC40 (M-C08): PASS -> REVIEW FAIL -> REVIEW PASS -> closure 0, review channel 1 activation", () => {
+  const r = makePassReviewFailReviewPassSuccess({ seed: "mc08-40" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  assert.equal(b.historical_authority_invalidation_count, 0);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
+  assert.equal(b.failing_review_count, 1);
+  assert.equal(b.current_authority_blocker_count, 0);
+  assert.equal(m.report.convergence.trustworthy_success, true);
+});
+
+test("METRIC41 (M-C08): PASS -> ACTION_STARTED -> work -> PASS -> closure 1, review channel 0", () => {
+  const r = makePassActionStartedThenPassSuccess({ seed: "mc08-41" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 0);
+  assert.equal(b.current_authority_blocker_count, 0);
+  assert.equal(m.report.convergence.trustworthy_success, true);
+});
+
+test("METRIC42 (M-C08): PASS -> REVIEW FAIL -> REPAIR_STARTED -> work -> PASS -> closure 1 (repair), review 1", () => {
+  const r = makePassReviewFailRepairThenPassSuccess({ seed: "mc08-42" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // The REVIEW FAIL did NOT contribute to closure (orthogonal).
+  // The REPAIR_STARTED invalidated the closure channel
+  // (historical = 1). The review activation count is 1.
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
+  assert.equal(b.failing_review_count, 1);
+  assert.equal(b.current_authority_blocker_count, 0);
+  assert.equal(m.report.convergence.trustworthy_success, true);
+});
+
+test("METRIC43 (M-C08): PASS -> GATE FAIL -> new work -> PASS -> closure 1, review 0", () => {
+  const r = makePassGateFailThenWorkThenPassSuccess({ seed: "mc08-43" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // GATE_FINISHED(pass=false) invalidated the closure channel;
+  // recovery re-established authority but did NOT decrement
+  // the historical count.
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 0);
+  assert.equal(b.current_authority_blocker_count, 0);
+  assert.equal(m.report.convergence.trustworthy_success, true);
 });

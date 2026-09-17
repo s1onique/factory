@@ -16,16 +16,14 @@
  * The function returns structurally identical output for the
  * same input array (M2 — same-input -> same-output oracle).
  *
- * The walk also maintains `workEpoch` and
- * `freshPositiveAuthority` so that:
- *
- *   - `work_epoch_count` (already lifted from the
- *     projector-supplied work epoch) is independently
- *     reproducible from the event stream by mirroring
- *     Phase E's E-C14 V2 transition rule.
- *   - `historical_authority_invalidation_count` can be
- *     counted as the metric walks the same stream
- *     using Phase E's frozen precedence semantics.
+ * The structural counters (action / gate / repair / review)
+ * are walked HERE in a single linear pass. The
+ * authority-channel counters (M-C08 / M-C09) are delegated to
+ * `metric-authority.ts`, which produces BOTH the
+ * closure-channel invalidation count AND the orthogonal
+ * review-blocker activation count from a SINGLE pure walk so
+ * the metric has ONE interpretation of the frozen Phase E
+ * precedence model (M-C09).
  *
  * This module is pure: no I/O.
  */
@@ -39,12 +37,12 @@ import type { CommittedRunEvent, RunEvent } from "../run/run-types.js";
  * `metric-types.ts`.
  */
 import type { Counters } from "./metric-types.js";
+import { walkAuthority } from "./metric-authority.js";
 
 /**
- * Per-event counters accumulated during a single forward pass.
- * The accumulator is intentionally plain mutable state so we
- * can stay linear in time; the publicly-returned `Counters`
- * value is constructed once at the end.
+ * Per-event structural counters accumulated during the
+ * single forward pass. Authority-channel counts come from
+ * `walkAuthority` rather than from this accumulator (M-C09).
  */
 type CounterAccumulator = {
   action_count: number;
@@ -60,27 +58,9 @@ type CounterAccumulator = {
   /**
    * Work epoch as we walk the stream, mirroring Phase E's
    * E-C14 V2 rule: increments on ACTION_STARTED,
-   * REPAIR_STARTED, and ACTION_FINISHED(ERROR). Used to
-   * check whether a GATE_FINISHED / REVIEW_FINISHED event
-   * happened at the CURRENT work epoch.
+   * REPAIR_STARTED, and ACTION_FINISHED(ERROR).
    */
   workEpoch: number;
-  /**
-   * True iff a passing closure gate has been observed at
-   * the current work epoch (i.e. the projector would
-   * consider closure authority fresh RIGHT NOW at this
-   * point in the walk). Mirrors Phase E's
-   * `closure_authority_fresh` invariant.
-   */
-  freshPositiveAuthority: boolean;
-  /**
-   * Count of events that invalidated previously established
-   * positive closure authority. This is the HISTORICAL
-   * correction burden; it survives later recovery (a later
-   * ACTION_STARTED that re-establishes authority does NOT
-   * subtract from this count).
-   */
-  historical_authority_invalidation_count: number;
 };
 
 function emptyAccumulator(): CounterAccumulator {
@@ -96,8 +76,6 @@ function emptyAccumulator(): CounterAccumulator {
     passing_review_count: 0,
     failing_review_count: 0,
     workEpoch: 0,
-    freshPositiveAuthority: false,
-    historical_authority_invalidation_count: 0,
   };
 }
 
@@ -127,13 +105,10 @@ function applyEvent(
   switch (inner.type) {
     case "ACTION_STARTED":
       // E-C14 V2: ACTION_STARTED is the general harness-work
-      // primitive and advances the work epoch. If fresh
-      // positive authority existed (a passing gate at the
-      // previous epoch), this event invalidates it.
-      if (acc.freshPositiveAuthority) {
-        acc.historical_authority_invalidation_count += 1;
-        acc.freshPositiveAuthority = false;
-      }
+      // primitive and advances the work epoch. Authority-
+      // channel effects (invalidation of fresh positive
+      // closure authority) are now derived in
+      // `metric-authority.ts` (CORRECTION02 M-C09).
       acc.workEpoch += 1;
       return;
     case "ACTION_FINISHED":
@@ -143,13 +118,8 @@ function applyEvent(
       } else if (inner.status === "ERROR") {
         acc.failed_action_count += 1;
         // E-C21: ACTION_FINISHED(ERROR) is authoritative
-        // negative execution evidence; it both invalidates
-        // fresh positive authority AND advances the work
-        // epoch. (E-C14 V2 rule.)
-        if (acc.freshPositiveAuthority) {
-          acc.historical_authority_invalidation_count += 1;
-          acc.freshPositiveAuthority = false;
-        }
+        // negative execution evidence; it advances the
+        // work epoch. (E-C14 V2 rule.)
         acc.workEpoch += 1;
       }
       return;
@@ -157,29 +127,15 @@ function applyEvent(
       acc.gate_count += 1;
       if (inner.pass === true) {
         acc.passing_gate_count += 1;
-        // A passing gate at the current work epoch
-        // establishes fresh positive authority. Phase E
-        // guarantees gates close at the current work epoch
-        // (E-C14); the metric does NOT need to verify the
-        // epoch separately.
-        acc.freshPositiveAuthority = true;
+        // Authority-channel effect (establishing fresh
+        // positive closure authority) is derived in
+        // `metric-authority.ts`.
       } else {
         acc.failing_gate_count += 1;
-        // E-C14: a failing gate stales any prior passing
-        // gate at the same work epoch.
-        if (acc.freshPositiveAuthority) {
-          acc.historical_authority_invalidation_count += 1;
-          acc.freshPositiveAuthority = false;
-        }
       }
       return;
     case "REPAIR_STARTED":
-      // E-C14 V2: REPAIR_STARTED advances work epoch AND
-      // invalidates fresh positive authority.
-      if (acc.freshPositiveAuthority) {
-        acc.historical_authority_invalidation_count += 1;
-        acc.freshPositiveAuthority = false;
-      }
+      // E-C14 V2: REPAIR_STARTED advances work epoch.
       acc.workEpoch += 1;
       return;
     case "REPAIR_FINISHED":
@@ -190,20 +146,18 @@ function applyEvent(
       if (inner.pass === true) {
         acc.passing_review_count += 1;
         // E-C22: REVIEW_FINISHED(true) supersedes a failing
-        // verdict at the same work epoch; it does NOT
-        // establish fresh positive closure authority (only
-        // a passing GATE_FINISHED does).
+        // verdict at the same work epoch. It does NOT
+        // establish fresh positive closure authority on the
+        // closure-authority channel — only a passing
+        // GATE_FINISHED does. Review-blocker state is
+        // maintained in `metric-authority.ts`.
       } else {
         acc.failing_review_count += 1;
         // E-C22: REVIEW_FINISHED(false) at the current
         // work epoch is authoritative negative review
-        // evidence. (A REPAIR_STARTED before would have
-        // advanced the epoch and made the verdict
-        // historical.)
-        if (acc.freshPositiveAuthority) {
-          acc.historical_authority_invalidation_count += 1;
-          acc.freshPositiveAuthority = false;
-        }
+        // evidence — but it acts on the ORTHOGONAL
+        // review-blocker channel, not the closure-authority
+        // channel (CORRECTION02 M-C08).
       }
       return;
     default:
@@ -253,18 +207,48 @@ export function deriveCounters(
 }
 
 /**
- * Walk the ordered evidence stream once and return the
- * structural counters plus the historical authority-
- * invalidation count. Exposed separately from
- * `deriveCounters` so the metric projector can read the
- * historical count without having to expose it on the
- * public `Counters` type.
+ * Read the orthogonal authority-channel counters from the
+ * canonical authority walk (CORRECTION02 M-C08 / M-C09).
  *
- * The walk mirrors Phase E's E-C14 V2 work-epoch
- * transition and the fresh-positive-authority invariant.
- * The historical count is the number of events in the run
- * that invalidated previously established positive closure
- * authority (survives later recovery).
+ * Re-exposed here so `metric-distances.ts` and the
+ * `CorrectionBurden` derivation consume the SAME walk
+ * result rather than re-walking the stream themselves.
+ *
+ * The historical closure-invalidation count is the
+ * CORRECTION02 definition: events that staled previously
+ * established POSITIVE closure authority. REVIEW_FINISHED
+ * events no longer contribute here; they live on the
+ * orthogonal review-blocker channel and are surfaced as
+ * `historical_review_blocker_activation_count`.
+ */
+export function deriveAuthorityChannels(
+  orderedEvents: ReadonlyArray<CommittedRunEvent>,
+): {
+  readonly historical_authority_invalidation_count: number;
+  readonly historical_review_blocker_activation_count: number;
+  readonly freshPositiveAuthority: boolean;
+  readonly reviewBlockerOpen: boolean;
+  readonly lastAuthoritativeGatePosition: number | null;
+} {
+  const w = walkAuthority(orderedEvents);
+  return {
+    historical_authority_invalidation_count:
+      w.closure_authority_invalidation_count,
+    historical_review_blocker_activation_count:
+      w.review_blocker_activation_count,
+    freshPositiveAuthority: w.fresh_closure_authority,
+    reviewBlockerOpen: w.review_blocker_open_at_end,
+    lastAuthoritativeGatePosition: w.last_authoritative_gate_position,
+  };
+}
+
+/**
+ * Back-compat alias for `deriveAuthorityChannels`, kept so
+ * prior callers / tests can still request the closure-
+ * channel invalidation count by its previous name.
+ *
+ * New code SHOULD prefer `deriveAuthorityChannels` so the
+ * review-blocker channel is visible.
  */
 export function deriveAuthorityInvalidation(
   orderedEvents: ReadonlyArray<CommittedRunEvent>,
@@ -272,11 +256,11 @@ export function deriveAuthorityInvalidation(
   readonly historical_authority_invalidation_count: number;
   readonly freshPositiveAuthority: boolean;
 } {
-  const acc = walkCounters(orderedEvents);
+  const w = deriveAuthorityChannels(orderedEvents);
   return {
     historical_authority_invalidation_count:
-      acc.historical_authority_invalidation_count,
-    freshPositiveAuthority: acc.freshPositiveAuthority,
+      w.historical_authority_invalidation_count,
+    freshPositiveAuthority: w.freshPositiveAuthority,
   };
 }
 

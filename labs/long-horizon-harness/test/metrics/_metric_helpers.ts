@@ -616,10 +616,14 @@ export const makeActionErrorAfterPass: StreamBuilder = (args) => {
 };
 
 /**
- * METRIC31 — work -> PASS -> REVIEW FAIL -> REVIEW PASS ->
- * terminal. Expected:
- *   historical_authority_invalidation_count = 1
- *   current_authority_blocker_count        = 0
+ * METRIC31 / METRIC40 — work -> PASS -> REVIEW FAIL ->
+ * REVIEW PASS -> terminal. The review FAIL is on the
+ * orthogonal review-blocker channel (CORRECTION02 M-C08):
+ *   historical_authority_invalidation_count = 0
+ *   historical_review_blocker_activation_count = 1
+ *   failing_review_count = 1
+ *   current_authority_blocker_count = 0
+ *   trustworthy_success = true
  */
 export const makeReviewFailThenReviewPass: StreamBuilder = (args) => {
   const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc02-31" });
@@ -744,6 +748,124 @@ export const makePassReviewFailTerminal: StreamBuilder = (args) => {
     { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
     { ev: evHarnessStopped() },
     { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+// ---------------------------------------------------------------------------
+// CORRECTION02 fixtures (M-C07 binding / M-C08 orthogonal review channel).
+// ---------------------------------------------------------------------------
+
+/**
+ * METRIC40 — work -> PASS -> REVIEW FAIL -> REVIEW PASS ->
+ * terminal. (Same stream as METRIC31; defined as its own
+ * fixture so the M-C08 closure row in the closure matrix
+ * can point at it independently.)
+ *   historical_authority_invalidation_count       = 0
+ *   historical_review_blocker_activation_count    = 1
+ *   failing_review_count                          = 1
+ *   current_authority_blocker_count               = 0
+ *   trustworthy_success                           = true
+ */
+export const makePassReviewFailReviewPassSuccess: StreamBuilder = (args) => {
+  return makeReviewFailThenReviewPass(args);
+};
+
+/**
+ * METRIC41 — work -> PASS -> ACTION_STARTED -> work -> PASS
+ * -> terminal SUCCESS. The ACTION_STARTED invalidates the
+ * closure-authority channel; no review events are
+ * involved. Expected:
+ *   historical_authority_invalidation_count       = 1
+ *   historical_review_blocker_activation_count    = 0
+ */
+export const makePassActionStartedThenPassSuccess: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc08-41" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC42 — work -> PASS -> REVIEW FAIL -> REPAIR_STARTED
+ * -> work -> PASS -> terminal SUCCESS. The REVIEW FAIL is
+ * on the orthogonal review-blocker channel and is made
+ * historical by the REPAIR_STARTED (work-epoch advance);
+ * the REPAIR_STARTED itself invalidates the closure
+ * channel. Expected:
+ *   historical_authority_invalidation_count       = 1
+ *   historical_review_blocker_activation_count    = 1
+ *   failing_review_count                          = 1
+ */
+export const makePassReviewFailRepairThenPassSuccess: StreamBuilder = (
+  args,
+) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc08-42" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evRepairStarted(FIXTURE_IDS.repair1, "post-review repair") },
+    { ev: evRepairFinished(FIXTURE_IDS.repair1) },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC43 — work -> PASS -> GATE FAIL -> new work -> PASS
+ * -> terminal SUCCESS. The GATE FAIL invalidates the
+ * closure channel; the subsequent closure path
+ * re-establishes authority but does NOT decrement the
+ * historical count. Expected:
+ *   historical_authority_invalidation_count       = 1
+ *   historical_review_blocker_activation_count    = 0
+ */
+export const makePassGateFailThenWorkThenPassSuccess: StreamBuilder = (
+  args,
+) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc08-43" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, false) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evRepairStarted(FIXTURE_IDS.repair1, "gate failed") },
+    { ev: evRepairFinished(FIXTURE_IDS.repair1) },
+    { ev: evActionStarted(FIXTURE_IDS.attemptC) },
+    { ev: evGateStarted(FIXTURE_IDS.gate3, FIXTURE_IDS.attemptC) },
+    { ev: evGateFinished(FIXTURE_IDS.gate3, FIXTURE_IDS.attemptC, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptC, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
   ]);
   return { manifest, events };
 };

@@ -1176,14 +1176,22 @@ src/metrics/
                                  UNSUPPORTED_BY_CONTRACT, INVALID_DURATION,
                                  MISSING_TIMESTAMPS)
   metric-contract.ts             contract version guard (refuses unknown versions)
+  metric-authority.ts            walkAuthority (M-C09 — single pure authority
+                                 walk: closure-authority channel + orthogonal
+                                 review-blocker channel, M-C08)
   metric-counters.ts             deriveCounters (single-pass counters, M4)
-                                 + deriveAuthorityInvalidation (M6 CORRECTION01:
-                                 historical_authority_invalidation_count)
+                                 + deriveAuthorityChannels / deriveAuthorityInvalidation
+                                 (CORRECTION01: historical_authority_invalidation_count;
+                                 CORRECTION02: historical_review_blocker_activation_count
+                                 is the orthogonal review-channel counter)
   metric-distances.ts            deriveConvergenceDistances + deriveCorrectionBurden
                                  (M5, M6; CORRECTION01 M-C03 distance units:
                                  actions_to_* use ACTION_STARTED; work_epochs_to_*
                                  use Phase E work epoch; M-C04 authoritative-pass
-                                 anchor: gate that authorized terminal SUCCESS)
+                                 anchor: gate that authorized terminal SUCCESS;
+                                 CORRECTION02 M-C09: authoritative-pass walker
+                                 delegates to walkAuthority so the metric has ONE
+                                 interpretation of the Phase E precedence model)
   metric-time.ts                 deriveTimeMetrics (M8 deterministic durations;
                                  no clamping; no silent zero)
   metric-resources.ts            deriveResourceMetrics (M9/M10/M11; lifts
@@ -1199,8 +1207,9 @@ src/metrics/
                                  projection is INTERNALLY derived from
                                  orderedEvents — callers cannot supply a separate
                                  projection, M-C01); verifyProjectionBind
-                                 (helper that asserts an externally-supplied
-                                 projection matches the internally-derived one)
+                                 (CORRECTION02 M-C07: STRUCTURAL-value binding
+                                 via node:util.isDeepStrictEqual — NOT reference
+                                 identity)
   metric-serialize.ts            serializeMetricReport (reuses Phase E
                                  deterministicJson)
   index.ts                       public barrel
@@ -1244,11 +1253,11 @@ node --import tsx --test --test-reporter=spec \
 | Suite                              | Count | Status |
 |------------------------------------|-------|--------|
 | `test/metrics/metric-contract.test.ts`    |  9/9  | PASS |
-| `test/metrics/metric-golden.test.ts`      | 13/13 | PASS |
-| `test/metrics/metric-properties.test.ts`  | 12/12 | PASS |
+| `test/metrics/metric-golden.test.ts`      | 17/17 | PASS |
+| `test/metrics/metric-properties.test.ts`  | 16/16 | PASS |
 | `test/metrics/metric-time.test.ts`        |  5/5  | PASS |
 | `test/metrics/metric-resources.test.ts`   |  6/6  | PASS |
-| **LH-02 metrics suite total**             | **45/45** | **PASS** |
+| **LH-02 metrics suite total**             | **53/53** | **PASS** |
 | Phase E `test/run/*.test.ts` (frozen)     | 86/86 | PASS   |
 | Phase D `test:subject`                    |102/102| PASS   |
 | Phase C witness `pure` / `codec`           | 17/17 | PASS   |
@@ -1284,6 +1293,43 @@ EVENT_POSITION_REPORTED_AS_WORK_EPOCH        IMPOSSIBLE  (M-C03)
 HISTORICAL_PASS_REPORTED_AS_AUTHORITATIVE    IMPOSSIBLE  (M-C04)
 ```
 
+### CORRECTION02 closure matrix
+
+The CORRECTION02 patch closes the two residual defects
+identified in the LH-02 review of CORRECTION01: (1) the
+`verifyProjectionBind` helper previously compared
+JavaScript object identity rather than structural
+projection equality, and (2) the metric had been
+conflating "closure-authority was invalidated" with
+"a per-epoch SUCCESS blocker was raised" — these are
+two orthogonal authority channels under frozen Phase E
+E-C24. The metric module now has (a) a single pure
+authority walk that both `metric-counters.ts` and
+`metric-distances.ts` consume, and (b) `verifyProjectionBind`
+that uses `node:util.isDeepStrictEqual`. No Phase-E
+changes, no harness adapters, no composite score.
+
+```text
+M-M23_PROJECTION_VALUE_BINDING              PASS  (METRIC26, METRIC36..METRIC39)
+M-M24_AUTHORITY_CHANNELS_ORTHOGONAL         PASS  (METRIC05, METRIC31, METRIC40..METRIC43)
+M-M25_SINGLE_METRIC_AUTHORITY_ALGEBRA       PASS  (METRIC34, METRIC35, METRIC40..METRIC43)
+
+REFERENCE_IDENTITY_USED_AS_VALUE_EQUALITY    IMPOSSIBLE  (M-C07)
+STALE_PROJECTION_ACCEPTED                    IMPOSSIBLE  (M-C07)
+REVIEW_BLOCKER_EQUALS_CLOSURE_AUTHORITY_INVALIDATION = FALSE  (M-C08)
+CLOSURE_AUTHORITY_AND_SUCCESS_BLOCKERS_ARE_ORTHOGONAL = TRUE   (M-C08)
+METRIC_AUTHORITY_ALGEBRA_HAS_TWO_DIVERGENT_IMPLEMENTATIONS = FALSE  (M-C09)
+```
+
+Negative-oracle invariants added by CORRECTION02:
+
+```text
+STRUCTURALLY_EQUAL_PROJECTION_REJECTED_DUE_TO_REFERENCE_IDENTITY = IMPOSSIBLE  (M-C07)
+STALE_PROJECTION_ACCEPTED                                           = IMPOSSIBLE  (M-C07)
+REVIEW_FAILURE_STALES_CLOSURE_GATE                                  = FALSE       (M-C08)
+METRIC_AUTHORITY_ALGEBRA_HAS_TWO_IMPLEMENTATIONS                    = FALSE       (M-C09)
+```
+
 ### LH-02 Negative Oracles
 
 ```text
@@ -1303,6 +1349,35 @@ REPORT_PROJECTION_EVIDENCE_SPLIT_BRAIN        = IMPOSSIBLE  (M-C01)
 RECOVERED_INVALIDATION_DISAPPEARS_FROM_BURDEN = IMPOSSIBLE  (M-C02)
 EVENT_POSITION_REPORTED_AS_WORK_EPOCH         = IMPOSSIBLE  (M-C03)
 HISTORICAL_PASS_REPORTED_AS_AUTHORITATIVE     = IMPOSSIBLE  (M-C04)
+
+# CORRECTION02 value-binding / orthogonal-channel oracles:
+REFERENCE_IDENTITY_USED_AS_VALUE_EQUALITY     = IMPOSSIBLE  (M-C07)
+STALE_PROJECTION_ACCEPTED                     = IMPOSSIBLE  (M-C07)
+REVIEW_BLOCKER_EQUALS_CLOSURE_AUTHORITY_INVALIDATION = FALSE  (M-C08)
+CLOSURE_AUTHORITY_AND_SUCCESS_BLOCKERS_ARE_ORTHOGONAL = TRUE   (M-C08)
+METRIC_AUTHORITY_ALGEBRA_HAS_TWO_DIVERGENT_IMPLEMENTATIONS = FALSE  (M-C09)
+```
+
+### LH-02 EXIT (after CORRECTION01 + CORRECTION02)
+
+```text
+CONVERGENCE_METRIC_CONTRACT            = FROZEN
+METRICS                                = PURE / VERSIONED / DETERMINISTIC /
+                                         EVIDENCE_BOUND / CANDIDATE_NEUTRAL
+METRIC_REPORT  ↔  EXACT_RUN_EVIDENCE   = STRUCTURALLY BOUND
+METRIC_REPORT  ↔  PROJECTION          = VALUE-BOUND (verifyProjectionBind
+                                         uses node:util.isDeepStrictEqual;
+                                         no reference-identity shortcut)
+MISSING_EVIDENCE != ZERO               = TRUE
+TERMINAL_OUTCOME_AUTHORITY             = PHASE_E_ONLY
+SUCCESS_AUTHORITY                      = PHASE_E_ONLY
+AUTHORITY_CHANNELS_ORTHOGONAL          = TRUE  (closure-authority channel
+                                                vs review-blocker channel)
+MEASUREMENT_CAN_REPLAY_WITHOUT_HARNESS = YES
+MEASUREMENT_CAN_REPORT_WHAT_IT_MEASURES = YES
+
+LH_02                                  = GREEN_FROZEN
+READY_FOR_LH_03_REAL_HARNESS_ADAPTER_QUALIFICATION = YES
 ```
 
 ### LH-02 See

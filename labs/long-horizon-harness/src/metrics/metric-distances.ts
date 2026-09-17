@@ -33,7 +33,7 @@ import type {
   Counters,
 } from "./metric-types.js";
 import { available, unavailable } from "./metric-types.js";
-import { deriveAuthorityInvalidation } from "./metric-counters.js";
+import { deriveAuthorityChannels } from "./metric-counters.js";
 
 /**
  * 1-based position of an event in the ordered stream. We
@@ -68,55 +68,25 @@ function findFirstTerminalPosition(
 
 /**
  * Locate the LAST GATE_FINISHED(pass=true) event in the
- * stream that AUTHORIZED terminal SUCCESS — i.e. the last
- * passing closure gate observed at the work epoch on which
- * terminal closure authority was fresh. For non-SUCCESS
- * runs (and runs whose final passing gate was followed by
- * negative evidence before terminal) we return `null` so
- * the distance fields surface `unavailable` rather than
- * anchoring on a non-authoritative gate.
+ * stream that authorized terminal SUCCESS.
  *
- * Implementation: walk the stream while maintaining the
- * work epoch and `freshPositiveAuthority` invariant (same
- * as `deriveAuthorityInvalidation`). Whenever a passing
- * gate closes at a fresh epoch, record its 1-based
- * position as a candidate. A later action / repair / error
- * / failing gate clears `freshPositiveAuthority` (without
- * invalidating the previously recorded position), so we
- * only consider the most recent passing gate observed at
- * the current authority state.
+ * CORRECTION02 (M-C09): the authoritative-pass walker now
+ * delegates to `walkAuthority` so it shares its
+ * interpretation of the frozen Phase E precedence model
+ * with `metric-counters.ts`. The previous in-line walker
+ * here had drifted on REVIEW_FINISHED semantics; the
+ * single-source approach removes the divergence.
+ *
+ * Returns `null` when no passing closure gate was
+ * observed; callers anchor the `*_to_last_authoritative_pass`
+ * fields on this position.
  */
 function findAuthoritativePassPosition(
   orderedEvents: ReadonlyArray<CommittedRunEvent>,
 ): Position | null {
-  let freshAuthority = false;
-  let candidate: Position | null = null;
-  for (let i = 0; i < orderedEvents.length; i++) {
-    const e = orderedEvents[i];
-    if (e === undefined) continue;
-    const t = e.event.type;
-    if (t === "ACTION_STARTED") {
-      if (freshAuthority) freshAuthority = false;
-    } else if (t === "ACTION_FINISHED") {
-      if (e.event.status === "ERROR") {
-        if (freshAuthority) freshAuthority = false;
-      }
-    } else if (t === "REPAIR_STARTED") {
-      if (freshAuthority) freshAuthority = false;
-    } else if (t === "GATE_FINISHED") {
-      if (e.event.pass === true) {
-        freshAuthority = true;
-        candidate = { index1Based: i + 1 };
-      } else {
-        if (freshAuthority) freshAuthority = false;
-      }
-    } else if (t === "REVIEW_FINISHED") {
-      if (e.event.pass === false) {
-        if (freshAuthority) freshAuthority = false;
-      }
-    }
-  }
-  return candidate;
+  const w = deriveAuthorityChannels(orderedEvents);
+  if (w.lastAuthoritativeGatePosition === null) return null;
+  return { index1Based: w.lastAuthoritativeGatePosition };
 }
 
 /**
@@ -330,13 +300,16 @@ export function deriveConvergenceDistances(
  * self-contained for downstream consumers.
  *
  * `historical_authority_invalidation_count` is the
- * HISTORICAL correction burden: events that invalidated
- * previously established positive closure authority,
- * counted by the stream walk that mirrors Phase E's
- * E-C14 V2 transition and E-C21 / E-C22 negative-evidence
- * rules. This count survives later recovery — a run that
- * required three requalification cycles still reports 3
- * even after the final cycle passed.
+ * HISTORICAL closure-channel correction burden: events that
+ * invalidated previously established POSITIVE closure
+ * authority, counted by the canonical authority walker in
+ * `metric-authority.ts`. REVIEW_FINISHED events do NOT
+ * contribute (CORRECTION02 M-C08).
+ *
+ * `historical_review_blocker_activation_count` is the
+ * historical review-blocker-channel activation count
+ * (CORRECTION02 M-C08): REVIEW_FINISHED(pass=false)
+ * events. Independent of the closure channel.
  *
  * `current_authority_blocker_count` is the CURRENT-STATE
  * diagnostic (the previous V1 definition): 0..2 reflecting
@@ -354,14 +327,16 @@ export function deriveCorrectionBurden(
     projection.current_epoch_action_failure === true ? 1 : 0;
   const reviewInvalid =
     projection.current_epoch_review_failure === true ? 1 : 0;
-  const historical = deriveAuthorityInvalidation(orderedEvents);
+  const channels = deriveAuthorityChannels(orderedEvents);
   return {
     repair_cycle_count: counters.repair_cycle_count,
     failed_action_count: counters.failed_action_count,
     failing_gate_count: counters.failing_gate_count,
     failing_review_count: counters.failing_review_count,
     historical_authority_invalidation_count:
-      historical.historical_authority_invalidation_count,
+      channels.historical_authority_invalidation_count,
+    historical_review_blocker_activation_count:
+      channels.historical_review_blocker_activation_count,
     current_authority_blocker_count: actionInvalid + reviewInvalid,
   };
 }

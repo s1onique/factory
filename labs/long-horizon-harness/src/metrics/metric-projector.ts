@@ -24,7 +24,7 @@
  *   ==
  *   PHASE_E_TERMINAL_OUTCOME
  *
- * Invariant (M-C01, CORRECTION01):
+ * Invariant (M-C01, CORRECTION01 + CORRECTION02 M-C07):
  *
  *   METRIC_REPORT  ↔  EXACT_RUN_EVIDENCE
  *
@@ -33,7 +33,10 @@
  *   Callers cannot supply a projection from a different
  *   evidence stream. To verify an externally-supplied
  *   projection against the evidence, use
- *   `verifyProjectionBind` separately.
+ *   `verifyProjectionBind` — which compares the supplied
+ *   projection to the internally-derived one with STRUCTURAL
+ *   (value) equality, not JavaScript reference identity
+ *   (CORRECTION02 M-C07).
  *
  * The projector NEVER:
  *
@@ -50,6 +53,8 @@
  * `run_evidence_hash` derivation (`metric-hash.ts`).
  * Otherwise this module is pure.
  */
+
+import { isDeepStrictEqual } from "node:util";
 
 import type {
   CommittedRunEvent,
@@ -243,7 +248,7 @@ export function computeRunMetrics(args: {
 }
 
 /**
- * CORRECTION01 M-C01 — verify-bind helper.
+ * CORRECTION02 M-C07 — value-equality verify-bind helper.
  *
  * Caller-supplied projections are no longer accepted by
  * `computeRunMetrics`. This helper lets callers that ALREADY
@@ -251,13 +256,35 @@ export function computeRunMetrics(args: {
  * decision) verify it was derived from the same evidence
  * the report will describe.
  *
- * Returns `{ok: true}` iff the supplied projection is the
- * SAME OBJECT as the projection derived from
- * `(manifest, orderedEvents)` via `projectRun`. Phase E's
- * projector is deterministic (E12 oracle), so two callers
- * with the same inputs receive structurally-equal
- * projections; reference equality on the projection
- * instance is therefore a sound check.
+ * Returns `{ok: true}` iff `suppliedRunProjection` is
+ * STRUCTURALLY EQUAL to the projection derived from
+ * `(manifest, orderedEvents)` via `projectRun`. We use
+ * `node:util`'s `isDeepStrictEqual` so two independently
+ * produced projections of the same evidence are
+ * recognized as the same projection.
+ *
+ * Why value equality, not reference identity: Phase E's
+ * projector is deterministic (E12 oracle), which means
+ *
+ *   f(x) ≡ f(x)       in value
+ *
+ * NOT
+ *
+ *   f(x) === f(x)     in JavaScript reference identity.
+ *
+ * Two independent calls to a pure projector ordinarily
+ * allocate two distinct object references. A reference-
+ * identity check would (incorrectly) reject a perfectly
+ * valid projection produced by an independent call. That
+ * breaks reproducibility: repeatability requires that
+ * two measurements of the same evidence agree, not
+ * that the two result objects happen to be the same
+ * allocation. See NIST TN 1297 Appendix D.1.
+ *
+ * If the projections disagree on any field, `verifyProjectionBind`
+ * returns a structured `{ok:false, reason}` describing
+ * which field(s) differ so callers can diagnose the
+ * mismatch.
  */
 export function verifyProjectionBind(args: {
   readonly manifest: RunManifest;
@@ -277,12 +304,13 @@ export function verifyProjectionBind(args: {
         `${projectionResult.failure.reason}`,
     };
   }
-  if (projectionResult.value !== args.suppliedRunProjection) {
+  if (!isDeepStrictEqual(projectionResult.value, args.suppliedRunProjection)) {
     return {
       ok: false,
       reason:
-        `verifyProjectionBind: supplied projection was NOT derived ` +
-        `from this evidence stream (projection binding violation; ` +
+        `verifyProjectionBind: supplied projection was NOT ` +
+        `structurally equal to the canonical projection of ` +
+        `this evidence stream (projection binding violation; ` +
         `REPORT_PROJECTION_EVIDENCE_SPLIT_BRAIN)`,
     };
   }
