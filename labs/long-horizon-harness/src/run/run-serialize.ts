@@ -34,7 +34,24 @@ import { RUN_EVENT_SCHEMA_VERSION, RUN_MANIFEST_SCHEMA_VERSION } from "./run-typ
 import { snapshotJsonValue } from "./run-json.js";
 import { encodeRunEvent } from "./run-serialize-payload.js";
 
-function deterministicJson(value: unknown): string {
+/**
+ * E-C10: this is the SINGLE authority for canonical event
+ * content. It is consumed by:
+ *
+ *   - the store's idempotency / same-id-different-content check
+ *   - the projector's same-id-different-content check
+ *   - the default content-derived EventIdSource
+ *   - the envelope encoder (encodeRunEventEnvelope)
+ *   - the manifest encoder (encodeRunManifest)
+ *
+ * The encoder is recursively deterministic: nested objects are
+ * sorted at every level. Two payloads that differ ONLY in
+ * insertion order round-trip to byte-equal canonical bytes.
+ *
+ * The encoder rejects non-finite numbers and unsupported value
+ * types at runtime.
+ */
+export function deterministicJson(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") {

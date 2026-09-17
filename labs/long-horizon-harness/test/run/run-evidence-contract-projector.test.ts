@@ -248,6 +248,14 @@ test("RUN09 duplicate terminal → illegal_event", () => {
 });
 
 // RUN10 — conflicting terminal semantic.
+// E-C08: terminal semantic must be VALID_FAILURE for a
+// RUN_FINISHED event; HARNESS_FAILURE is now rejected by
+// the type system. The closed-world legality check still
+// surfaces an illegal_event projection failure because
+// the value reaches the projector through `commitOne`'s
+// `Record<string, unknown>` escape hatch. Use VALID_FAILURE
+// as the conflicting semantic against a SUCCESS terminal
+// to keep this test about "different terminal semantics".
 test("RUN10 conflicting terminal semantic → illegal_event", () => {
   const { manifest, events } = minimalSuccessRun();
   const last = events[events.length - 1]!;
@@ -255,7 +263,9 @@ test("RUN10 conflicting terminal semantic → illegal_event", () => {
     manifest.run_id,
     manifest.subject_id,
     last.sequence + 1,
-    { type: "RUN_FINISHED", semantic: "HARNESS_FAILURE" },
+    // E-C08: VALID_FAILURE conflicts with the SUCCESS
+    // terminal the run already declared.
+    { type: "RUN_FINISHED", semantic: "VALID_FAILURE" },
     makeRunEventId(`evt:conflict-terminal:7`),
   );
   const r = projectRun(manifest, [...events, conflicting]);

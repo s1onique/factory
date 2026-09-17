@@ -101,6 +101,10 @@ export function seqEventIds(runId: RunId): ReadonlyArray<RunEventId> {
     makeRunEventId(`evt:${runId}:10`),
     makeRunEventId(`evt:${runId}:11`),
     makeRunEventId(`evt:${runId}:12`),
+    makeRunEventId(`evt:${runId}:13`),
+    makeRunEventId(`evt:${runId}:14`),
+    makeRunEventId(`evt:${runId}:15`),
+    makeRunEventId(`evt:${runId}:16`),
   ];
 }
 
@@ -109,6 +113,8 @@ export const ids = {
   attempt2: makeAttemptId("attempt:002"),
   attempt3: makeAttemptId("attempt:003"),
   gate: makeGateId("gate:001"),
+  gate2: makeGateId("gate:002"),
+  gate3: makeGateId("gate:003"),
   repair: makeRepairCycleId("repair:001"),
   review: makeReviewCycleId("review:001"),
   runId: makeRunId("run:placeholder"),

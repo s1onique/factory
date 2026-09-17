@@ -17,12 +17,18 @@ import {
 
 import {
   isTerminalSemantic,
+  isRunFinishedSemantic,
+  isRunTimeoutSemantic,
+  isRunAbortedSemantic,
   makeAttemptId,
   type ActionTarget,
   type AgentSelfReport,
   type ResourceObservation,
   type RunEvent,
   type TerminalSemantic,
+  type RunFinishedSemantic,
+  type RunTimeoutSemantic,
+  type RunAbortedSemantic,
   AGENT_SELF_REPORT_KEYS,
   RESOURCE_OBSERVATION_KEYS,
   ACTION_TARGET_KEYS,
@@ -48,12 +54,15 @@ export function decodeRunCancelRequested(
   value: Record<string, unknown>,
   reasons: string[],
 ): RunDecodeResult<RunEvent> {
+  // E-C08: RUN_CANCEL_REQUESTED is NON-TERMINAL. The closed-world
+  // key list does NOT admit a `semantic` field; the decoder
+  // rejects any unknown key and emits a schema_validation
+  // failure if a hostile payload includes `semantic`.
   rejectUnknownKeys(
     value,
     RUN_CANCEL_REQUESTED_KEYS as ReadonlyArray<string>,
     reasons,
   );
-  const semantic = decodeTerminalSemantic(value["semantic"], reasons);
   let reasonVal: string | undefined;
   if (value["reason"] !== undefined) {
     if (typeof value["reason"] !== "string") {
@@ -62,12 +71,11 @@ export function decodeRunCancelRequested(
       reasonVal = value["reason"] as string;
     }
   }
-  if (!semantic || reasons.length > 0) {
+  if (reasons.length > 0) {
     return fail({ kind: "schema_validation", reason: reasons.join("; ") });
   }
   return pass({
     type: "RUN_CANCEL_REQUESTED",
-    semantic,
     ...(reasonVal !== undefined ? { reason: reasonVal } : {}),
   });
 }
@@ -76,12 +84,23 @@ export function decodeRunTimeout(
   value: Record<string, unknown>,
   reasons: string[],
 ): RunDecodeResult<RunEvent> {
+  // E-C08: enforce per-event semantic sub-type (TIMEOUT |
+  // BUDGET_EXHAUSTED); reject other TerminalSemantic values.
   rejectUnknownKeys(
     value,
     RUN_TIMEOUT_KEYS as ReadonlyArray<string>,
     reasons,
   );
-  const semantic = decodeTerminalSemantic(value["semantic"], reasons);
+  const semanticRaw = value["semantic"];
+  const semantic: RunTimeoutSemantic | null = isRunTimeoutSemantic(semanticRaw)
+    ? semanticRaw
+    : (() => {
+        reasons.push(
+          `RUN_TIMEOUT.semantic must be one of TIMEOUT | BUDGET_EXHAUSTED; ` +
+            `got ${JSON.stringify(semanticRaw)}`,
+        );
+        return null;
+      })();
   const obs = decodeResourceObservation(value["observation"], reasons);
   if (!semantic || !obs || reasons.length > 0) {
     return fail({ kind: "schema_validation", reason: reasons.join("; ") });
@@ -97,12 +116,23 @@ export function decodeRunFinished(
   value: Record<string, unknown>,
   reasons: string[],
 ): RunDecodeResult<RunEvent> {
+  // E-C08: enforce per-event semantic sub-type (SUCCESS |
+  // VALID_FAILURE); reject other TerminalSemantic values.
   rejectUnknownKeys(
     value,
     RUN_FINISHED_KEYS as ReadonlyArray<string>,
     reasons,
   );
-  const semantic = decodeTerminalSemantic(value["semantic"], reasons);
+  const semanticRaw = value["semantic"];
+  const semantic: RunFinishedSemantic | null = isRunFinishedSemantic(semanticRaw)
+    ? semanticRaw
+    : (() => {
+        reasons.push(
+          `RUN_FINISHED.semantic must be one of SUCCESS | VALID_FAILURE; ` +
+            `got ${JSON.stringify(semanticRaw)}`,
+        );
+        return null;
+      })();
   let agent: AgentSelfReport | undefined;
   if (value["agent_report"] !== undefined) {
     const ar = decodeAgentSelfReport(value["agent_report"], reasons);
@@ -128,12 +158,25 @@ export function decodeRunAborted(
   value: Record<string, unknown>,
   reasons: string[],
 ): RunDecodeResult<RunEvent> {
+  // E-C08: enforce per-event semantic sub-type (CANCELLED |
+  // HARNESS_FAILURE | MODEL_FAILURE | ENVIRONMENT_FAILURE |
+  // EVIDENCE_FAILURE); reject other TerminalSemantic values.
   rejectUnknownKeys(
     value,
     RUN_ABORTED_KEYS as ReadonlyArray<string>,
     reasons,
   );
-  const semantic = decodeTerminalSemantic(value["semantic"], reasons);
+  const semanticRaw = value["semantic"];
+  const semantic: RunAbortedSemantic | null = isRunAbortedSemantic(semanticRaw)
+    ? semanticRaw
+    : (() => {
+        reasons.push(
+          `RUN_ABORTED.semantic must be one of CANCELLED | HARNESS_FAILURE | ` +
+            `MODEL_FAILURE | ENVIRONMENT_FAILURE | EVIDENCE_FAILURE; ` +
+            `got ${JSON.stringify(semanticRaw)}`,
+        );
+        return null;
+      })();
   const reasonVal = value["reason"];
   if (typeof reasonVal !== "string" || reasonVal.length === 0) {
     reasons.push("RUN_ABORTED.reason must be a non-empty string");

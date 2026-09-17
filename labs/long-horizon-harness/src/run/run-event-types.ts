@@ -114,13 +114,19 @@ export type ResourceObservation = {
   readonly observed: number;
 };
 
+// ---------------------------------------------------------------------------
+// Terminal semantics: shared super-set + per-event sub-types (E-C08).
+// ---------------------------------------------------------------------------
+
 /**
- * The closed-world terminal semantic claim carried by a terminal
- * event (RUN_FINISHED, RUN_ABORTED, RUN_TIMEOUT, RUN_CANCEL_REQUESTED).
+ * The closed-world set of terminal semantic claims. This is the
+ * super-set over every per-event sub-type; it is the value the
+ * projector derives as `RunProjection.terminal_outcome`.
  *
- * Two terminal claims are compatible iff their TerminalSemantic
- * values agree after projector resolution. Two incompatible claims
- * fail closed (RUN09, RUN10 in the adversarial corpus).
+ * Per E-C08, NOT every terminal event type can carry every
+ * terminal semantic value; each event type declares a per-event
+ * sub-type below. The decoder rejects mismatches at the trust
+ * boundary.
  */
 export type TerminalSemantic =
   | "SUCCESS"
@@ -151,6 +157,88 @@ export function isTerminalSemantic(value: unknown): value is TerminalSemantic {
     (TERMINAL_OUTCOMES as readonly string[]).includes(value)
   );
 }
+
+/**
+ * E-C08: per-event terminal-semantic sub-types. These narrow the
+ * set of legal values a given event may carry.
+ *
+ *   RUN_FINISHED            : SUCCESS | VALID_FAILURE
+ *   RUN_TIMEOUT             : TIMEOUT | BUDGET_EXHAUSTED
+ *   RUN_ABORTED             : CANCELLED
+ *                            | HARNESS_FAILURE
+ *                            | MODEL_FAILURE
+ *                            | ENVIRONMENT_FAILURE
+ *                            | EVIDENCE_FAILURE
+ *
+ *   RUN_CANCEL_REQUESTED    : NON-TERMINAL (no terminal semantic
+ *                            in V1; carries an optional reason
+ *                            only). Run-cancellation INTENT is
+ *                            observation; the actual closure
+ *                            must come from a subsequent
+ *                            RUN_ABORTED(CANCELLED) or
+ *                            RUN_TIMEOUT(CANCELLED). The
+ *                            decoder rejects any terminal
+ *                            semantic field on a
+ *                            RUN_CANCEL_REQUESTED payload.
+ */
+export type RunFinishedSemantic = "SUCCESS" | "VALID_FAILURE";
+export const RUN_FINISHED_SEMANTICS: readonly RunFinishedSemantic[] = [
+  "SUCCESS",
+  "VALID_FAILURE",
+] as const;
+export function isRunFinishedSemantic(
+  value: unknown,
+): value is RunFinishedSemantic {
+  return (
+    typeof value === "string" &&
+    (RUN_FINISHED_SEMANTICS as readonly string[]).includes(value)
+  );
+}
+
+export type RunTimeoutSemantic = "TIMEOUT" | "BUDGET_EXHAUSTED";
+export const RUN_TIMEOUT_SEMANTICS: readonly RunTimeoutSemantic[] = [
+  "TIMEOUT",
+  "BUDGET_EXHAUSTED",
+] as const;
+export function isRunTimeoutSemantic(
+  value: unknown,
+): value is RunTimeoutSemantic {
+  return (
+    typeof value === "string" &&
+    (RUN_TIMEOUT_SEMANTICS as readonly string[]).includes(value)
+  );
+}
+
+export type RunAbortedSemantic =
+  | "CANCELLED"
+  | "HARNESS_FAILURE"
+  | "MODEL_FAILURE"
+  | "ENVIRONMENT_FAILURE"
+  | "EVIDENCE_FAILURE";
+export const RUN_ABORTED_SEMANTICS: readonly RunAbortedSemantic[] = [
+  "CANCELLED",
+  "HARNESS_FAILURE",
+  "MODEL_FAILURE",
+  "ENVIRONMENT_FAILURE",
+  "EVIDENCE_FAILURE",
+] as const;
+export function isRunAbortedSemantic(
+  value: unknown,
+): value is RunAbortedSemantic {
+  return (
+    typeof value === "string" &&
+    (RUN_ABORTED_SEMANTICS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * E-C08: RUN_CANCEL_REQUESTED is NON-TERMINAL. The decoder
+ * rejects any `semantic` field on a cancel-request payload; the
+ * closed-world key list no longer admits `semantic` for that
+ * event type. The `reason?` field is the only payload-side
+ * observation.
+ */
+export const RUN_CANCEL_REQUESTED_KEYS = ["type", "reason"] as const;
 
 /**
  * Optional agent self-report. Per E7, this is OBSERVATION only; the
@@ -215,22 +303,28 @@ export type RunEvent =
     }
   | {
       readonly type: "RUN_CANCEL_REQUESTED";
-      readonly semantic: TerminalSemantic;
+      // E-C08: cancel-request is NON-TERMINAL; it carries an
+      // optional reason only. The `semantic` field has been
+      // removed from both the type and the closed-world key
+      // list.
       readonly reason?: string;
     }
   | {
       readonly type: "RUN_TIMEOUT";
-      readonly semantic: TerminalSemantic;
+      // E-C08: narrowed to the per-event semantic sub-type.
+      readonly semantic: RunTimeoutSemantic;
       readonly observation: ResourceObservation;
     }
   | {
       readonly type: "RUN_FINISHED";
-      readonly semantic: TerminalSemantic;
+      // E-C08: narrowed to the per-event semantic sub-type.
+      readonly semantic: RunFinishedSemantic;
       readonly agent_report?: AgentSelfReport;
     }
   | {
       readonly type: "RUN_ABORTED";
-      readonly semantic: TerminalSemantic;
+      // E-C08: narrowed to the per-event semantic sub-type.
+      readonly semantic: RunAbortedSemantic;
       readonly reason: string;
     };
 
@@ -267,7 +361,9 @@ export const REVIEW_FINISHED_KEYS = [
   "pass",
   "reason",
 ] as const;
-export const RUN_CANCEL_REQUESTED_KEYS = ["type", "semantic", "reason"] as const;
+// NOTE (E-C08): RUN_CANCEL_REQUESTED_KEYS is declared above
+// alongside the per-event semantic sub-types; it does NOT
+// include `semantic` because cancel-request is non-terminal.
 export const RUN_TIMEOUT_KEYS = [
   "type",
   "semantic",

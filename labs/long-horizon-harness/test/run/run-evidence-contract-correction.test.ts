@@ -275,7 +275,7 @@ test("RUN34 cancellation request alone → ACTIVE", () => {
     commitEvent(manifest, { type: "HARNESS_STARTED" }, 2, eids[1]!),
     commitEvent(
       manifest,
-      { type: "RUN_CANCEL_REQUESTED", semantic: "CANCELLED", reason: "user" },
+      { type: "RUN_CANCEL_REQUESTED", reason: "user" },
       3,
       eids[2]!,
     ),
@@ -295,7 +295,7 @@ test("RUN35 request → harness stop → abort(CANCELLED) → TERMINAL/CANCELLED
     commitEvent(manifest, { type: "HARNESS_STARTED" }, 2, eids[1]!),
     commitEvent(
       manifest,
-      { type: "RUN_CANCEL_REQUESTED", semantic: "CANCELLED", reason: "user" },
+      { type: "RUN_CANCEL_REQUESTED", reason: "user" },
       3,
       eids[2]!,
     ),
@@ -322,7 +322,7 @@ test("RUN36 ordinary semantic evidence after cancellation request remains legal 
     commitEvent(manifest, { type: "HARNESS_STARTED" }, 2, eids[1]!),
     commitEvent(
       manifest,
-      { type: "RUN_CANCEL_REQUESTED", semantic: "CANCELLED", reason: "user" },
+      { type: "RUN_CANCEL_REQUESTED", reason: "user" },
       3,
       eids[2]!,
     ),

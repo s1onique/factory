@@ -93,9 +93,11 @@ export function encodeRunEvent(event: RunEvent): JsonValue {
         type: event.type,
       });
     case "RUN_CANCEL_REQUESTED":
+      // E-C08: RUN_CANCEL_REQUESTED is NON-TERMINAL and carries
+      // only an optional reason. The encoder MUST NOT emit a
+      // `semantic` field.
       return jsonObject({
         reason: event.reason,
-        semantic: event.semantic,
         type: event.type,
       });
     case "RUN_TIMEOUT":

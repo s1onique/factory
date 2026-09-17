@@ -38,6 +38,8 @@ import type {
   RunManifest,
 } from "./run-types.js";
 import { RUN_EVENT_SCHEMA_VERSION, makeRunEventId } from "./run-types.js";
+import { snapshotJsonValue } from "./run-json.js";
+import { deterministicJson } from "./run-serialize.js";
 import { projectRun } from "./run-projector.js";
 import type { ProjectionResult } from "./run-types.js";
 
@@ -78,10 +80,11 @@ export type EventIdSource = {
  * canonical bytes of the event + run_id + sequence). This makes
  * the event-id deterministic given the inputs.
  *
- * NOTE: this is a placeholder. Phase E does not require a
- * specific content-hash algorithm; it only requires that the
- * factory be deterministic and content-bound. Tests can pass an
- * alternate factory.
+ * E-C10: the canonical bytes authority is the SAME
+ * `deterministicJson` encoder the store and projector use to
+ * compare two events with the same id. There is exactly ONE
+ * canonical encoder in Phase E; the default EventIdSource
+ * consumes it.
  */
 export function makeContentBoundEventIdSource(): EventIdSource {
   return {
@@ -90,15 +93,11 @@ export function makeContentBoundEventIdSource(): EventIdSource {
       event: RunEvent,
       sequence: number,
     ): RunEventId => {
-      const sorted = Object.keys(event as Record<string, unknown>).sort();
-      const obj: Record<string, unknown> = {};
-      for (const k of sorted) {
-        obj[k] = (event as Record<string, unknown>)[k];
-      }
+      const canonical = canonicalEventBytes(event);
       const material =
         `factory:phase-e:event:id:v1\u0000` +
         `run:${runId}|seq=${sequence}|` +
-        JSON.stringify(obj);
+        canonical;
       const hex = createHash("sha256")
         .update(material, "utf8")
         .digest("hex");
@@ -140,73 +139,58 @@ function emptyLedger(runId: RunId): RunLedger {
  * is a stable opaque token supplied by the caller (or the
  * default content-derived factory). This helper produces the
  * canonical form used to compare two events with the same id.
+ *
+ * Per E-C10, this is the SINGLE authority for canonical event
+ * content. It is reused by:
+ *   - the store's idempotency / same-id-different-content check
+ *   - the projector's same-id-different-content check
+ *   - the default content-derived EventIdSource
+ *   - any future JSONL writer
+ *
+ * The encoder recurses into nested objects and arrays, sorting
+ * object keys at every level. Two payloads that differ ONLY in
+ * insertion order round-trip to byte-equal canonical bytes.
  */
-function canonicalEventBytes(event: RunEvent): string {
-  const sorted = Object.keys(event as Record<string, unknown>).sort();
-  const obj: Record<string, unknown> = {};
-  for (const k of sorted) {
-    obj[k] = (event as Record<string, unknown>)[k];
-  }
-  return JSON.stringify(obj);
-}
+export const canonicalEventBytes: (event: RunEvent) => string =
+  deterministicJson;
 
 /**
- * Structural deep-clone of a Phase E RunEvent.
+ * E-C09: ownership capture reuses the hardened Phase D
+ * snapshotter (`snapshotJsonValue`). The snapshotter:
+ *   - rejects Proxy / accessor / cyclic / exotic inputs
+ *   - preserves `__proto__` as data via null-prototype output
+ *     (D-M10)
+ *   - rejects symbol / non-enumerable / undefined / BigInt
+ *   - does NOT invoke any Reflect / Object method that can be
+ *     trapped by caller-controlled Proxy getters
+ *   - returns a frozen inert owned graph (Phase D behaviour)
  *
- * Phase E payload shapes are closed-world JSON-compatibles:
- * strings, numbers, booleans, null, arrays, and plain objects
- * with string keys. We implement a hand-rolled cloner (no
- * host-provided JSON round-trip) so that the store never
- * depends on a parallel stringification path. The cloner is
- * deterministic and rejects functions / symbols / undefined /
- * non-finite numbers — exactly the boundary we want.
+ * After snapshotting, the owned value is recursively frozen so
+ * the caller cannot mutate it via the committed envelope
+ * either. (snapshotJsonValue already freezes the top level;
+ * nested levels are frozen by snapshotArrayHardened /
+ * snapshotJsonValueInner; we add deepFreeze as defense in
+ * depth for the resulting typed RunEvent shape.)
  */
-function deepClone<T>(value: T): T {
-  return cloneInner(value, new Map()) as T;
+function snapshotRunEvent(event: RunEvent): RunEvent {
+  const r = snapshotJsonValue(event);
+  if (!r.ok) {
+    throw new Error(
+      `append: hostile RunEvent rejected by snapshot boundary: ${r.reason}`,
+    );
+  }
+  return deepFreeze(r.value as unknown as RunEvent);
 }
 
-function cloneInner(value: unknown, seen: Map<object, unknown>): unknown {
-  if (value === null) return null;
-  const t = typeof value;
-  if (t === "string" || t === "boolean") return value;
-  if (t === "number") {
-    if (!Number.isFinite(value as number)) {
-      throw new Error("deepClone: non-finite number encountered");
-    }
-    return value;
-  }
-  if (t !== "object") {
-    throw new Error(`deepClone: unsupported primitive typeof ${t}`);
-  }
-  const src = value as object;
-  const cached = seen.get(src);
-  if (cached !== undefined) return cached;
-  if (Array.isArray(src)) {
-    const out: unknown[] = [];
-    seen.set(src, out);
-    for (let i = 0; i < src.length; i++) {
-      out[i] = cloneInner(src[i], seen);
-    }
-    return out;
-  }
-  // Reject non-plain objects (Date / Map / Set / Promise / etc.)
-  const proto = Object.getPrototypeOf(src);
-  if (proto !== Object.prototype && proto !== null) {
-    throw new Error("deepClone: non-plain object prototype");
-  }
-  const out: Record<string, unknown> = {};
-  seen.set(src, out);
-  for (const k of Object.keys(src as Record<string, unknown>)) {
-    out[k] = cloneInner((src as Record<string, unknown>)[k], seen);
-  }
-  return out;
+function snapshotCommittedEnvelope(env: CommittedRunEvent): CommittedRunEvent {
+  return deepFreeze(env);
 }
 
 /**
  * Recursively freeze a value. Operates only on plain objects
- * and arrays; primitives pass through. Combined with deepClone
- * it produces an owned, immutable graph that the caller cannot
- * mutate, in either strict or sloppy mode.
+ * and arrays; primitives pass through. Combined with the
+ * snapshotter it produces an owned, immutable graph that the
+ * caller cannot mutate, in either strict or sloppy mode.
  */
 function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
@@ -313,12 +297,13 @@ export class InMemoryRunStore {
         return { ok: true, value: existing };
       }
 
-      // E-C01: own the committed graph. Deep-freeze the inner
-      // RunEvent payload and the outer envelope. The caller
-      // can mutate its own `event` reference after append
-      // returns without affecting stored evidence.
-      const ownedEvent = deepFreeze(deepClone(event));
-      const committed: CommittedRunEvent = deepFreeze({
+      // E-C01 + E-C09: own the committed graph via the
+      // hardened Phase D snapshotter, then deeply freeze the
+      // typed envelope. The caller can mutate its own `event`
+      // reference after append returns without affecting
+      // stored evidence.
+      const ownedEvent = snapshotRunEvent(event);
+      const committed: CommittedRunEvent = snapshotCommittedEnvelope({
         schema_version: RUN_EVENT_SCHEMA_VERSION,
         event_id: eventId,
         run_id: manifest.run_id,

@@ -27,14 +27,23 @@ export type {
   ResourceObservation,
   ResourceObservationKind,
   TerminalSemantic,
+  RunFinishedSemantic,
+  RunTimeoutSemantic,
+  RunAbortedSemantic,
   AgentSelfReport,
   Failure,
 } from "./run-event-types.js";
 export {
   RUN_EVENT_TYPES,
   TERMINAL_OUTCOMES,
+  RUN_FINISHED_SEMANTICS,
+  RUN_TIMEOUT_SEMANTICS,
+  RUN_ABORTED_SEMANTICS,
   isRunEventType,
   isTerminalSemantic,
+  isRunFinishedSemantic,
+  isRunTimeoutSemantic,
+  isRunAbortedSemantic,
 } from "./run-event-types.js";
 // ---------------------------------------------------------------------------
 // Schema versions

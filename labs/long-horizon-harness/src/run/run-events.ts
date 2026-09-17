@@ -31,7 +31,8 @@
  * This module is pure: no I/O.
  */
 
-import type { CommittedRunEvent, RunEvent, TerminalSemantic } from "./run-types.js";
+import type { CommittedRunEvent, TerminalSemantic } from "./run-types.js";
+import { canonicalEventBytes } from "./run-store.js";
 
 import {
   applyActionFinished,
@@ -137,16 +138,14 @@ export function emptyTracker(): LegalityTracker {
  * event-id duplicate detector (E10): same event_id + same canonical
  * bytes is treated as idempotent (accepted); same event_id +
  * different bytes is rejected as duplicate-with-changed-content.
+ *
+ * E-C10: this re-exports the SINGLE authority
+ * (`deterministicJson` from run-serialize.ts). The store,
+ * projector, default EventIdSource, and envelope decoder
+ * all consume the same encoder. There is no parallel
+ * `canonicalEventBytes` implementation in Phase E.
  */
-export function canonicalEventBytes(event: RunEvent): string {
-  // Stable JSON encoding with sorted top-level keys.
-  const sorted = Object.keys(event as Record<string, unknown>).sort();
-  const obj: Record<string, unknown> = {};
-  for (const k of sorted) {
-    obj[k] = (event as Record<string, unknown>)[k];
-  }
-  return JSON.stringify(obj);
-}
+export { canonicalEventBytes } from "./run-store.js";
 
 /**
  * Apply a single event to the tracker and return either ok or a

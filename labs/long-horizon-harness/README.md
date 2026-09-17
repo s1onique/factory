@@ -794,7 +794,12 @@ own. The contract is:
   mutation API exists in the in-memory store beyond `append`
   and `readRun` (E9)
 - **content-bound**: `run_id = sha256(subject_id|schema_version|repetition)`
-  (E2); `event_id` is content-bound (E10)
+  (E2)
+- **event-id doctrine (E-C06 settled)**:
+  - `EVENT_ID_STABLE`                    — id does not change once assigned
+  - `EVENT_ID_UNIQUE`                    — no two events in the same run share an id
+  - `SAME_ID_DIFFERENT_CONTENT_FAILS_CLOSED` — store rejects a retry whose canonical
+    content differs from the originally committed one
 - **replayable**: the projector folds the ordered evidence stream
   into a `RunProjection` deterministically; live == replay
   projection for any stream (E12)
@@ -830,11 +835,23 @@ own. The contract is:
 | `TERMINAL`       | terminal event observed; `terminal_outcome` is derivable   |
 | `INVALID_EVIDENCE`| projector rejection (illegal_event, identity_mismatch, …) |
 
-### TerminalSemantic (E6)
+### TerminalSemantic (E6 + E-C08)
 
-9 closed-world terminal claims: `SUCCESS`, `VALID_FAILURE`,
-`HARNESS_FAILURE`, `MODEL_FAILURE`, `ENVIRONMENT_FAILURE`,
-`TIMEOUT`, `CANCELLED`, `EVIDENCE_FAILURE`, `BUDGET_EXHAUSTED`.
+9 closed-world terminal claims form the super-set
+`TerminalSemantic` and are what the projector derives as
+`RunProjection.terminal_outcome`. Each terminal event type
+narrows to a per-event sub-type (E-C08); the decoder rejects
+mismatches at the trust boundary.
+
+| Event type          | Allowed terminal-semantic values                          |
+|---------------------|-----------------------------------------------------------|
+| `RUN_FINISHED`      | `SUCCESS`, `VALID_FAILURE`                                |
+| `RUN_TIMEOUT`       | `TIMEOUT`, `BUDGET_EXHAUSTED`                             |
+| `RUN_ABORTED`       | `CANCELLED`, `HARNESS_FAILURE`, `MODEL_FAILURE`, `ENVIRONMENT_FAILURE`, `EVIDENCE_FAILURE` |
+| `RUN_CANCEL_REQUESTED` | non-terminal — carries `reason?` only; the closed-world key list does NOT admit `semantic` |
+
+The terminal-event/semantic matrix is encoded both at the type
+level (per-event sub-types) and at runtime (decoder rejection).
 
 ### Contract Matrix — Phase E (E-M01..E-M15 + E-M16..E-M20 corrections)
 
@@ -856,13 +873,21 @@ own. The contract is:
 | E-M14 | replay deterministic (same stream → identical projection)         | PASS   |
 | E-M15 | live == replay projection (pure projector)                        | PASS   |
 | E-M16 | store caller isolation (E-C01) — committed graph is owned/frozen  | PASS   |
-| E-M17 | success requires authority (E-C02) — SUCCESS needs passing gate   | PASS   |
+| E-M17 | success requires authority (E-C02 + E-C07) — SUCCESS needs LAST passing gate | PASS   |
 | E-M18 | cancel request non-terminal (E-C03) — request ≠ closure          | PASS   |
 | E-M19 | public decoder inertness (E-C04) — snapshot-first hostile boundary| PASS   |
 | E-M20 | idempotent append (E-C05) — same id+content returns same committed| PASS   |
+| E-M21 | success authority is final-state (E-C07) — last gate wins        | PASS   |
+| E-M22 | terminal semantic coherence (E-C08) — event/semantic matrix enforced | PASS   |
+| E-M23 | store capture parity (E-C09) — store uses Phase D snapshotter    | PASS   |
+| E-M24 | canonical event content (E-C10) — single deterministic encoder  | PASS   |
 
-The Phase E **correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
+The Phase E **first correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
 PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION01) added E-M16..E-M20.
+
+The Phase E **second correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
+PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION02) added E-M21..E-M24 and
+strengthened E-M17 with the temporal-authority rule.
 
 ### Invariant Probes
 
@@ -876,9 +901,26 @@ CANCEL_REQUEST_LEGAL_BEFORE_TERMINAL                 = PASS        (RUN35, RUN36
 HOSTILE_PUBLIC_DECODER_GETTER_EXECUTION              = IMPOSSIBLE  (RUN37, RUN38, RUN39, RUN40)
 IDENTICAL_RETRY_CREATES_SECOND_EVENT                 = FALSE       (RUN41)
 SAME_ID_DIFFERENT_CONTENT                           = FAIL_CLOSED (RUN42)
+
+# CORRECTION02 — E-C07 .. E-C11
+EARLIER_PASS_LATER_FAIL_CANNOT_SUCCESS               = PASS        (RUN43)
+FAIL_THEN_PASS_REINSTATES_AUTHORITY                  = PASS        (RUN44)
+OPEN_REPAIR_AT_TERMINAL_IS_UNAUTHORIZED              = PASS        (RUN45)
+RUN_TIMEOUT_SUCCESS                                  = IMPOSSIBLE  (RUN46)
+RUN_ABORTED_SUCCESS                                  = IMPOSSIBLE  (RUN47)
+RUN_FINISHED_TIMEOUT                                 = IMPOSSIBLE  (RUN48)
+ALLOWED_EVENT_SEMANTIC_PAIRS                         = ROUND_TRIP  (RUN49)
+CANCEL_REQUEST_CLAIMS_TERMINAL_SEMANTIC              = IMPOSSIBLE  (RUN50)
+PROTO_KEY_CAPTURE_DRIFT                              = IMPOSSIBLE  (RUN51, RUN52)
+GETTER_EXECUTION_ON_HOSTILE_INPUT                    = IMPOSSIBLE  (RUN53)
+PROXY_TRAP_EXECUTION_BEFORE_REJECTION                = IMPOSSIBLE  (RUN54)
+SYMBOL_OR_NON_ENUMERABLE_OWN_KEY                     = IMPOSSIBLE  (RUN55)
+NESTED_KEY_INSERTION_ORDER_IS_CANONICAL              = PASS        (RUN56)
+STORE_PROJECTOR_CANONICAL_AGREEMENT                  = PASS        (RUN57)
+DEFAULT_EVENTID_SOURCE_USES_SINGLE_AUTHORITY         = PASS        (RUN58)
 ```
 
-### Adversarial Corpus — RUN01..RUN42
+### Adversarial Corpus — RUN01..RUN58
 
 The acceptance corpus lives in `test/run/`:
 
@@ -888,13 +930,9 @@ The acceptance corpus lives in `test/run/`:
   RUN24, RUN25b–RUN25e) — envelope / manifest decoders +
   boundary
 - `run-evidence-contract-correction.test.ts` (RUN26–RUN42) —
-  Phase E correction probes (E-C01..E-C06)
-
-Run with:
-
-```text
-node --import tsx --test --test-reporter=spec test/run/*.test.ts
-```
+  Phase E first correction (E-C01..E-C06)
+- `run-evidence-contract-correction-02.test.ts` (RUN43–RUN58) —
+  Phase E second correction (E-C07..E-C11)
 
 Run with:
 
@@ -907,20 +945,20 @@ node --import tsx --test --test-reporter=spec test/run/*.test.ts
 ```text
 src/run/
   run-types.ts                  branded IDs, manifest, envelope, projection, key constants
-  run-event-types.ts            RunEvent vocabulary + supporting union types (split out)
+  run-event-types.ts            RunEvent vocabulary + per-event semantic sub-types (E-C08)
   run-json.ts                   re-export of Phase D snapshotter
   run-decode.ts                 shared decode helpers
   run-decode-manifest.ts        decodeRunManifest (snapshot-first hostile boundary)
   run-decode-envelope.ts        decodeRunEventEnvelope (snapshot-first hostile boundary)
   run-decode-payload.ts         public decodeRunEventPayload + internal decodeOwnedRunEventPayload
   run-decode-payload-cases.ts   8 non-terminal decoders
-  run-decode-payload-helpers.ts 4 terminal decoders + shared
+  run-decode-payload-helpers.ts 4 terminal decoders enforcing E-C08 sub-types
   run-events.ts                 LegalityTracker + applyLegality
   run-events-helpers.ts         per-event legality appliers + applyTerminal
-  run-projector.ts              pure projector + successEvidencePredicateSatisfied
-  run-serialize.ts              canonical JSON encoder
+  run-projector.ts              pure projector + successEvidencePredicateSatisfied (E-C02 + E-C07)
+  run-serialize.ts              deterministicJson — SINGLE canonical event-content authority (E-C10)
   run-serialize-payload.ts      per-event encoder
-  run-store.ts                  InMemoryRunStore (deep-freeze owned committed graph)
+  run-store.ts                  InMemoryRunStore (Phase D snapshotter-owned committed graph, E-C09)
   index.ts                      public barrel
 ```
 

@@ -67,7 +67,7 @@ function initialProjection(manifest: RunManifest): RunProjection {
 }
 
 /**
- * Authoritative-success predicate (E-C02).
+ * Authoritative-success predicate (E-C02 + E-C07).
  *
  * The projector is the single authority joining two worlds:
  *
@@ -80,16 +80,33 @@ function initialProjection(manifest: RunManifest): RunProjection {
  * that the harness actually completed work and reached a
  * passing closure authority.
  *
+ * E-C07 temporal-authority rule (V1):
+ *
+ *   Success requires that the LAST closed authoritative gate
+ *   be a passing gate. A later failing gate invalidates an
+ *   earlier passing one; the predicate is "last-closure-gate
+ *   pass" rather than "any-prior-pass". This matches the
+ *   long-horizon reality that repair loops naturally produce
+ *   earlier passing checks followed by later regressions.
+ *
+ *   Phase E does NOT yet distinguish "ordinary intermediate
+ *   gates" from "terminal closure-authority gates" — there
+ *   is exactly one gate class. Every closed gate's pass value
+ *   contributes to the temporal-authority ordering; the LAST
+ *   closed gate's pass value is the authoritative one.
+ *
  * V1 minimum authoritative-success evidence:
  *
  *   1. RUN_STARTED                       (run was initiated)
  *   2. HARNESS_STARTED                   (harness actually ran)
  *   3. HARNESS_STOPPED                   (harness actually stopped)
  *   4. at least one ACTION_FINISHED      (work was performed)
- *   5. at least one GATE_FINISHED(pass=true)
- *                                       (an independent passing
- *                                        closure authority was
- *                                        exercised)
+ *   5. lastGateFinishedPass === true     (temporal authority;
+ *                                        the most recent gate
+ *                                        closed with pass=true;
+ *                                        a failing gate in
+ *                                        between invalidates
+ *                                        the earlier pass)
  *   6. no open attempt / gate / repair / review at close
  *
  * If any of these is missing while terminal_semantic claims
@@ -104,7 +121,12 @@ export function successEvidencePredicateSatisfied(
   if (!tracker.harnessStarted) return false;
   if (!tracker.harnessStopped) return false;
   if (tracker.actionFinishedCount < 1) return false;
-  if (tracker.passingGateCount < 1) return false;
+  // E-C07: temporal authority — the LAST closed gate must be
+  // a passing gate. We use the tracker field populated by
+  // applyGateFinished, which overwrites on every GATE_FINISHED
+  // observation, so `null` (no gate ever closed) and `false`
+  // (last gate closed with pass=false) both fail closed.
+  if (tracker.lastGateFinishedPass !== true) return false;
   if (tracker.openAttemptId !== null) return false;
   if (tracker.openGateId !== null) return false;
   if (tracker.openRepairId !== null) return false;
