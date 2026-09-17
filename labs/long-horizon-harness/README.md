@@ -781,3 +781,150 @@ or convergence metrics. Those arrive in Phase E.
 - `test/subject/` — unit tests for canonicalization,
   decoder, freeze, JsonValue boundary, and source-size
   discipline (`npm run test:subject`)
+
+## FOUNDATION04 — Phase E — Run / Evidence Contract
+
+ACT `ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-PHASE-E-RUN-EVIDENCE-CONTRACT01`.
+
+Phase E introduces the **candidate-neutral run / evidence
+contract** that Phase D's subject manifest binds to but does not
+own. The contract is:
+
+- **append-only**: events are immutable once committed; no
+  mutation API exists in the in-memory store beyond `append`
+  and `readRun` (E9)
+- **content-bound**: `run_id = sha256(subject_id|schema_version|repetition)`
+  (E2); `event_id` is content-bound (E10)
+- **replayable**: the projector folds the ordered evidence stream
+  into a `RunProjection` deterministically; live == replay
+  projection for any stream (E12)
+- **closed-world**: every decoder rejects unknown keys at every
+  layer (envelope, manifest, event payload, identifier)
+- **frozen vocabulary**: 15 `RunEvent` variants; no new variant
+  may be added without a schema-version bump
+- **totality**: every decoder wraps its boundary in a single
+  try/catch that returns a typed failure — never propagates a
+  throw, never invokes a getter, never introspects a `caught` value
+- **agent non-authority**: the optional `agent_report` is
+  OBSERVATION only; the projector MUST NOT promote it to a
+  terminal claim (E7)
+
+### Run / Evidence Vocabulary (E5)
+
+15 closed-world event types:
+
+- `RUN_STARTED`, `HARNESS_STARTED`, `HARNESS_STOPPED`
+- `ACTION_STARTED`, `ACTION_FINISHED`
+- `GATE_STARTED`, `GATE_FINISHED`
+- `REPAIR_STARTED`, `REPAIR_FINISHED`
+- `REVIEW_STARTED`, `REVIEW_FINISHED`
+- `RUN_CANCEL_REQUESTED`, `RUN_TIMEOUT`
+- `RUN_FINISHED`, `RUN_ABORTED`
+
+### LifecycleState (E11)
+
+| state            | meaning                                                    |
+|------------------|------------------------------------------------------------|
+| `INCOMPLETE`     | empty stream — no evidence observed                        |
+| `ACTIVE`         | non-empty stream, no terminal event observed               |
+| `TERMINAL`       | terminal event observed; `terminal_outcome` is derivable   |
+| `INVALID_EVIDENCE`| projector rejection (illegal_event, identity_mismatch, …) |
+
+### TerminalSemantic (E6)
+
+9 closed-world terminal claims: `SUCCESS`, `VALID_FAILURE`,
+`HARNESS_FAILURE`, `MODEL_FAILURE`, `ENVIRONMENT_FAILURE`,
+`TIMEOUT`, `CANCELLED`, `EVIDENCE_FAILURE`, `BUDGET_EXHAUSTED`.
+
+### Contract Matrix — Phase E (E-M01..E-M15 + E-M16..E-M20 corrections)
+
+| ID    | Property                                                          | Status |
+|-------|-------------------------------------------------------------------|--------|
+| E-M01 | `run_id` content-bound (Phase E computeRunId)                     | PASS   |
+| E-M02 | subject binding: envelope `subject_id` must match manifest        | PASS   |
+| E-M03 | event schema closed-world (15 variants, no extras)                | PASS   |
+| E-M04 | append-only history (no mutation API beyond append + readRun)     | PASS   |
+| E-M05 | event identity contract (stable id + same-id-diff-content fails)  | PASS   |
+| E-M06 | sequence total order (no gaps, no duplicates, no reorders)        | PASS   |
+| E-M07 | owned inert payload (store deep-freezes committed graph)          | PASS   |
+| E-M08 | boundary totality (every decoder wraps in try/catch)              | PASS   |
+| E-M09 | lifecycle state machine (ACTIVE/TERMINAL/INCOMPLETE/INVALID)      | PASS   |
+| E-M10 | agent report non-authoritative (observation only)                 | PASS   |
+| E-M11 | terminal uniqueness (one terminal outcome per run)                | PASS   |
+| E-M12 | truncation detectable (empty stream → INCOMPLETE)                 | PASS   |
+| E-M13 | corruption detectable (sequence / identity / state violations)    | PASS   |
+| E-M14 | replay deterministic (same stream → identical projection)         | PASS   |
+| E-M15 | live == replay projection (pure projector)                        | PASS   |
+| E-M16 | store caller isolation (E-C01) — committed graph is owned/frozen  | PASS   |
+| E-M17 | success requires authority (E-C02) — SUCCESS needs passing gate   | PASS   |
+| E-M18 | cancel request non-terminal (E-C03) — request ≠ closure          | PASS   |
+| E-M19 | public decoder inertness (E-C04) — snapshot-first hostile boundary| PASS   |
+| E-M20 | idempotent append (E-C05) — same id+content returns same committed| PASS   |
+
+The Phase E **correction** (ACT-FACTORY-LONG-HORIZON-LAB-FOUNDATION04-
+PHASE-E-RUN-EVIDENCE-CONTRACT01-CORRECTION01) added E-M16..E-M20.
+
+### Invariant Probes
+
+```text
+CALLER_MUTATION_AFTER_APPEND_CANNOT_CHANGE_EVIDENCE = PASS  (RUN26, RUN27, RUN28, RUN29)
+READ_API_CANNOT_MUTATE_LEDGER                        = PASS  (RUN28)
+UNSUPPORTED_SUCCESS_CLAIM                           = IMPOSSIBLE  (RUN30, RUN31, RUN32)
+SUCCESS_WITH_AUTHORITY                              = POSSIBLE    (RUN33)
+CANCEL_REQUEST_EQUALS_TERMINAL                       = FALSE       (RUN34)
+CANCEL_REQUEST_LEGAL_BEFORE_TERMINAL                 = PASS        (RUN35, RUN36)
+HOSTILE_PUBLIC_DECODER_GETTER_EXECUTION              = IMPOSSIBLE  (RUN37, RUN38, RUN39, RUN40)
+IDENTICAL_RETRY_CREATES_SECOND_EVENT                 = FALSE       (RUN41)
+SAME_ID_DIFFERENT_CONTENT                           = FAIL_CLOSED (RUN42)
+```
+
+### Adversarial Corpus — RUN01..RUN42
+
+The acceptance corpus lives in `test/run/`:
+
+- `run-evidence-contract-projector.test.ts` (RUN01–RUN15,
+  RUN21, RUN22, RUN25) — projector + store
+- `run-evidence-contract-decode.test.ts` (RUN16–RUN20, RUN23,
+  RUN24, RUN25b–RUN25e) — envelope / manifest decoders +
+  boundary
+- `run-evidence-contract-correction.test.ts` (RUN26–RUN42) —
+  Phase E correction probes (E-C01..E-C06)
+
+Run with:
+
+```text
+node --import tsx --test --test-reporter=spec test/run/*.test.ts
+```
+
+Run with:
+
+```text
+node --import tsx --test --test-reporter=spec test/run/*.test.ts
+```
+
+### Phase E Module Layout
+
+```text
+src/run/
+  run-types.ts                  branded IDs, manifest, envelope, projection, key constants
+  run-event-types.ts            RunEvent vocabulary + supporting union types (split out)
+  run-json.ts                   re-export of Phase D snapshotter
+  run-decode.ts                 shared decode helpers
+  run-decode-manifest.ts        decodeRunManifest (snapshot-first hostile boundary)
+  run-decode-envelope.ts        decodeRunEventEnvelope (snapshot-first hostile boundary)
+  run-decode-payload.ts         public decodeRunEventPayload + internal decodeOwnedRunEventPayload
+  run-decode-payload-cases.ts   8 non-terminal decoders
+  run-decode-payload-helpers.ts 4 terminal decoders + shared
+  run-events.ts                 LegalityTracker + applyLegality
+  run-events-helpers.ts         per-event legality appliers + applyTerminal
+  run-projector.ts              pure projector + successEvidencePredicateSatisfied
+  run-serialize.ts              canonical JSON encoder
+  run-serialize-payload.ts      per-event encoder
+  run-store.ts                  InMemoryRunStore (deep-freeze owned committed graph)
+  index.ts                      public barrel
+```
+
+### See
+
+- `src/run/` — full Phase E implementation
+- `test/run/` — adversarial corpus `run-evidence-contract-*.test.ts`
