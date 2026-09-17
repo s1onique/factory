@@ -20,8 +20,8 @@ FACTORY_GIT_WORKTREE_POLICY_DISPOSITION = OK
 ENTRY_HEAD                = 715e6390d78228f089270259e1bd1307140adb75
 DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
-FINAL_HEAD_BINDING         = 5d56261 = LH03_IMPL_COMMIT + closure-of-record delta
-CURRENT_HEAD              = <recorded at commit time; closure-of-record is bound to LH03_IMPL_COMMIT and to the live `git rev-parse HEAD` observed at this ACT's terminal completion>
+CLOSURE_DOC_REBINDS       = 5d56261, ac23c57 (cosmetic; impl commit is canonical)
+CURRENT_HEAD              = ac23c5730e9bb306743cac72e69ea3e11db9d975
 ```
 
 The closure-of-record intentionally binds two SHAs:
@@ -32,8 +32,8 @@ The closure-of-record intentionally binds two SHAs:
 2. The `git rev-parse HEAD` observed at the moment of
    closure. Subsequent commits may carry cosmetic
    updates to the closure-of-record document itself
-   (such as updating `FINAL_HEAD_BINDING` after the
-   rebind above); the **implementation SHA is the
+   (such as updating `CURRENT_HEAD` after the rebinds
+   above); the **implementation SHA is the
    authoritative binding**.
 ```
 
