@@ -441,3 +441,66 @@ test("METRIC39 (M-C07): a projection with one field modified is rejected", () =>
   if (v.ok) throw new Error("expected rejection");
   assert.match(v.reason ?? "", /projection binding/);
 });
+
+// ---------------------------------------------------------------------------
+// CORRECTION03 probes (M-C13 — authority end-state parity with Phase E).
+// ---------------------------------------------------------------------------
+
+import {
+  walkAuthority,
+  assertAuthorityEndStateMatchesProjection,
+} from "../../src/metrics/metric-authority.js";
+import {
+  makePassReviewFailReviewPassSuccess,
+  makePassReviewFailNoRecovery,
+  makePassReviewFailRepairThenPassSuccessV2,
+  makePassReviewFailActionStartedThenPassSuccess,
+  makeTwoEpochReviewFailTerminal,
+  makeTwoFailsSameEpoch,
+  makeFailPassFailSameEpoch,
+  makeFailEpochAdvanceFail,
+  makePassGateFailThenWorkThenPassSuccess,
+} from "./_metric_helpers.js";
+
+/**
+ * METRIC51: across representative streams, the canonical
+ * `walkAuthority()` end-state equals the Phase E
+ * projector's end-state field-by-field. This is the
+ * oracle: METRIC_AUTHORITY_END_STATE == PHASE_E_AUTHORITY_END_STATE.
+ */
+test("METRIC51 (M-C13): walkAuthority end-state equals Phase E projection end-state across streams", () => {
+  const fixtures = [
+    makeSuccessRunMinimal({ seed: "m-c13-1" }),
+    makePassReviewFailReviewPassSuccess({ seed: "m-c13-2" }),
+    makePassReviewFailNoRecovery({ seed: "m-c13-3" }),
+    makePassReviewFailRepairThenPassSuccessV2({ seed: "m-c13-4" }),
+    makePassReviewFailActionStartedThenPassSuccess({ seed: "m-c13-5" }),
+    makeTwoEpochReviewFailTerminal({ seed: "m-c13-6" }),
+    makeTwoFailsSameEpoch({ seed: "m-c13-7" }),
+    makeFailPassFailSameEpoch({ seed: "m-c13-8" }),
+    makeFailEpochAdvanceFail({ seed: "m-c13-9" }),
+    makePassGateFailThenWorkThenPassSuccess({ seed: "m-c13-10" }),
+  ];
+  for (const r of fixtures) {
+    const walk = walkAuthority(r.events);
+    const proj = projectRun(r.manifest, r.events);
+    assert.equal(proj.ok, true, `projector rejected for stream ${JSON.stringify(r)}`);
+    if (!proj.ok) throw new Error("ok");
+    const parity = assertAuthorityEndStateMatchesProjection(walk, proj.value);
+    assert.equal(
+      parity.ok,
+      true,
+      `parity failed for stream: ${(parity as { reason?: string }).reason ?? ""}`,
+    );
+    // Field-by-field equality (defense-in-depth).
+    assert.equal(
+      walk.fresh_closure_authority,
+      proj.value.closure_authority_fresh,
+    );
+    assert.equal(
+      walk.review_blocker_open_at_end,
+      proj.value.current_epoch_review_failure,
+    );
+    assert.equal(walk.work_epoch_at_end, proj.value.work_epoch);
+  }
+});

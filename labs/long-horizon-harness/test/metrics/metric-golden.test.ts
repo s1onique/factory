@@ -5,11 +5,13 @@
  * METRIC08, plus the CORRECTION01 probes METRIC28..METRIC32
  * (M-C02) and METRIC33..METRIC35 (M-C04), plus the
  * CORRECTION02 probes METRIC40..METRIC43 (M-C08 orthogonal
- * review-blocker channel). Each test pins the expected
- * metric values directly (not derived via the same helper).
- * The test harness itself does NOT import the production
- * counter / distance helpers; the only production entry
- * point used is `computeRunMetrics`.
+ * review-blocker channel), plus the CORRECTION03 probes
+ * METRIC44..METRIC50 (M-C10..M-C12 review-blocker epoch
+ * scoping and activation TRANSITION semantics). Each test
+ * pins the expected metric values directly (not derived
+ * via the same helper). The test harness itself does NOT
+ * import the production counter / distance helpers; the
+ * only production entry point used is `computeRunMetrics`.
  */
 
 import { test } from "node:test";
@@ -38,6 +40,13 @@ import {
   makePassActionStartedThenPassSuccess,
   makePassReviewFailRepairThenPassSuccess,
   makePassGateFailThenWorkThenPassSuccess,
+  makePassReviewFailNoRecovery,
+  makePassReviewFailRepairThenPassSuccessV2,
+  makePassReviewFailActionStartedThenPassSuccess,
+  makeTwoEpochReviewFailTerminal,
+  makeTwoFailsSameEpoch,
+  makeFailPassFailSameEpoch,
+  makeFailEpochAdvanceFail,
 } from "./_metric_helpers.js";
 
 /**
@@ -453,4 +462,125 @@ test("METRIC43 (M-C08): PASS -> GATE FAIL -> new work -> PASS -> closure 1, revi
   assert.equal(b.historical_review_blocker_activation_count, 0);
   assert.equal(b.current_authority_blocker_count, 0);
   assert.equal(m.report.convergence.trustworthy_success, true);
+});
+
+// ---------------------------------------------------------------------------
+// CORRECTION03 probes (M-C10..M-C12 review-blocker epoch scoping).
+//
+// These tests exercise the per-epoch review-blocker
+// semantics that CORRECTION03 introduces:
+//   - work-epoch advance historicalises an open blocker;
+//   - activation is a state-machine TRANSITION, not a
+//     raw failing-review count.
+// ---------------------------------------------------------------------------
+
+test("METRIC44 (M-C10): PASS -> REVIEW FAIL no recovery -> blocker open at end", () => {
+  const r = makePassReviewFailNoRecovery({ seed: "mc10-44" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  assert.equal(b.historical_authority_invalidation_count, 0);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
+  assert.equal(b.failing_review_count, 1);
+  // Phase E reports current_epoch_review_failure=true here.
+  assert.equal(b.current_authority_blocker_count, 1);
+  assert.equal(m.report.convergence.trustworthy_success, false);
+  assert.equal(m.report.convergence.terminal_outcome, "VALID_FAILURE");
+});
+
+test("METRIC45 (M-C11): PASS -> REVIEW FAIL -> REPAIR_STARTED -> PASS -> blocker closed at end", () => {
+  const r = makePassReviewFailRepairThenPassSuccessV2({ seed: "mc11-45" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // M-C11: REPAIR_STARTED advanced work epoch and
+  // historicalised the review blocker. The activation
+  // count is 1 (the transition at epoch 1), and the
+  // current blocker is 0.
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
+  assert.equal(b.current_authority_blocker_count, 0);
+  assert.equal(m.report.convergence.trustworthy_success, true);
+});
+
+test("METRIC46 (M-C11): PASS -> REVIEW FAIL -> ACTION_STARTED -> PASS -> blocker closed at end", () => {
+  const r = makePassReviewFailActionStartedThenPassSuccess({
+    seed: "mc11-46",
+  });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // M-C11: ACTION_STARTED advanced work epoch and
+  // historicalised the review blocker. Activation count
+  // is 1; current blocker is 0.
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
+  assert.equal(b.current_authority_blocker_count, 0);
+  assert.equal(m.report.convergence.trustworthy_success, true);
+});
+
+test("METRIC47 (M-C11): FAIL @ epoch1 -> REPAIR -> FAIL @ epoch2 -> activation_count=2, blocker open", () => {
+  const r = makeTwoEpochReviewFailTerminal({ seed: "mc11-47" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // M-C11: each epoch's FAIL is a separate transition.
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 2);
+  assert.equal(b.failing_review_count, 2);
+  // Final FAIL has not been cleared; blocker is open.
+  assert.equal(b.current_authority_blocker_count, 1);
+  assert.equal(m.report.convergence.terminal_outcome, "VALID_FAILURE");
+});
+
+test("METRIC48 (M-C12): two FAILs same epoch -> activation_count=1, failing_review_count=2", () => {
+  const r = makeTwoFailsSameEpoch({ seed: "mc12-48" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // M-C12: the second FAIL observes the blocker already
+  // open at the same epoch, so it does NOT count as a
+  // new activation. activation_count = 1, failing_review_count = 2.
+  assert.equal(b.historical_authority_invalidation_count, 0);
+  assert.equal(b.historical_review_blocker_activation_count, 1);
+  assert.equal(b.failing_review_count, 2);
+  assert.equal(m.report.convergence.terminal_outcome, "VALID_FAILURE");
+});
+
+test("METRIC49 (M-C12): FAIL -> PASS -> FAIL same epoch -> activation_count=2", () => {
+  const r = makeFailPassFailSameEpoch({ seed: "mc12-49" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // M-C12: REVIEW PASS clears the blocker at the same
+  // epoch, so the second FAIL observes a `not_blocked`
+  // state and counts as a new activation. Two
+  // transitions total.
+  assert.equal(b.historical_authority_invalidation_count, 0);
+  assert.equal(b.historical_review_blocker_activation_count, 2);
+  assert.equal(b.failing_review_count, 2);
+  assert.equal(m.report.convergence.terminal_outcome, "VALID_FAILURE");
+});
+
+test("METRIC50 (M-C12): FAIL @ epoch1 -> REPAIR -> FAIL @ epoch2 -> activation_count=2", () => {
+  const r = makeFailEpochAdvanceFail({ seed: "mc12-50" });
+  const m = computeRunMetricsFor(r);
+  assert.equal(m.ok, true);
+  if (!m.ok) throw new Error("ok");
+  const b = m.report.correction_burden;
+  // M-C12: work-epoch advance clears the first blocker;
+  // the FAIL at epoch 2 sees a `not_blocked` state and
+  // counts as a new activation. Two transitions total.
+  // The REPAIR_STARTED also invalidates the fresh closure
+  // authority from the original PASS, so closure count = 1.
+  assert.equal(b.historical_authority_invalidation_count, 1);
+  assert.equal(b.historical_review_blocker_activation_count, 2);
+  assert.equal(b.failing_review_count, 2);
+  assert.equal(m.report.convergence.terminal_outcome, "VALID_FAILURE");
 });

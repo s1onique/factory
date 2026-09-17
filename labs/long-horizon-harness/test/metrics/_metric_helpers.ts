@@ -871,6 +871,107 @@ export const makePassGateFailThenWorkThenPassSuccess: StreamBuilder = (
 };
 
 // ---------------------------------------------------------------------------
+// CORRECTION03 fixtures (M-C10..M-C13 review-blocker epoch scoping).
+//
+// These streams exercise the per-epoch review-blocker
+// semantics that CORRECTION03 introduces:
+//   - work-epoch advance historicalises the blocker;
+//   - activation is a state-machine TRANSITION, not a raw
+//     failing-review count.
+// ---------------------------------------------------------------------------
+
+/**
+ * METRIC44 — work -> PASS -> REVIEW FAIL at epoch 1 (no
+ * further work). The blocker is open at the end of the walk
+ * because no work-epoch advance occurs after the REVIEW
+ * FAIL.
+ *   review_blocker_open_at_end          = true
+ *   historical_review_blocker_activation_count = 1
+ *   current_authority_blocker_count     = 1
+ */
+export const makePassReviewFailNoRecovery: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc10-44" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC45 — work -> PASS -> REVIEW FAIL -> REPAIR_STARTED
+ * -> work -> PASS -> SUCCESS. The REPAIR_STARTED advances
+ * the work epoch and historicalises the REVIEW FAIL; the
+ * blocker is closed at the end of the walk.
+ *   review_blocker_open_at_end          = false
+ *   historical_review_blocker_activation_count = 1
+ *   current_authority_blocker_count     = 0
+ */
+export const makePassReviewFailRepairThenPassSuccessV2: StreamBuilder = (
+  args,
+) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc11-45" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evRepairStarted(FIXTURE_IDS.repair1, "after review fail") },
+    { ev: evRepairFinished(FIXTURE_IDS.repair1) },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC46 — work -> PASS -> REVIEW FAIL -> ACTION_STARTED
+ * -> work -> PASS -> SUCCESS. The ACTION_STARTED advances
+ * the work epoch and historicalises the REVIEW FAIL.
+ *   review_blocker_open_at_end          = false
+ *   historical_review_blocker_activation_count = 1
+ *   current_authority_blocker_count     = 0
+ */
+export const makePassReviewFailActionStartedThenPassSuccess: StreamBuilder = (
+  args,
+) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc11-46" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evGateStarted(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB) },
+    { ev: evGateFinished(FIXTURE_IDS.gate2, FIXTURE_IDS.attemptB, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptB, "OK") },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("SUCCESS") },
+  ]);
+  return { manifest, events };
+};
+
+// ---------------------------------------------------------------------------
 // Phase F metric entry-point helper (CORRECTION01)
 //
 // `computeRunMetricsFor` is the canonical way for LH-02
@@ -897,3 +998,120 @@ export function computeRunMetricsFor(input: {
     contractVersion: CONVERGENCE_METRIC_CONTRACT_V1,
   });
 }
+
+/**
+ * METRIC47 — work -> PASS -> REVIEW FAIL at epoch 1 ->
+ * REPAIR -> work at epoch 2 -> REVIEW FAIL at epoch 2
+ * -> terminal VALID_FAILURE. Each epoch's REVIEW FAIL
+ * is a separate activation; blocker is open at the end
+ * because the FINAL REVIEW FAIL has not been cleared.
+ *   review_blocker_open_at_end          = true
+ *   historical_review_blocker_activation_count = 2
+ *   current_authority_blocker_count     = 1
+ */
+export const makeTwoEpochReviewFailTerminal: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc11-47" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evRepairStarted(FIXTURE_IDS.repair1, "after review fail epoch1") },
+    { ev: evRepairFinished(FIXTURE_IDS.repair1) },
+    { ev: evActionStarted(FIXTURE_IDS.attemptB) },
+    { ev: evReviewStarted(FIXTURE_IDS.review2) },
+    { ev: evReviewFinished(FIXTURE_IDS.review2, false) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC48 — work -> PASS -> REVIEW FAIL -> REVIEW FAIL at
+ * the SAME work epoch. The second FAIL observes the
+ * blocker already open at the same epoch; it does NOT
+ * count as a new activation.
+ *   historical_review_blocker_activation_count = 1
+ *   failing_review_count                   = 2
+ */
+export const makeTwoFailsSameEpoch: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc12-48" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evReviewStarted(FIXTURE_IDS.review2) },
+    { ev: evReviewFinished(FIXTURE_IDS.review2, false) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC49 — work -> PASS -> REVIEW FAIL -> REVIEW PASS ->
+ * REVIEW FAIL at the SAME work epoch. The blocker is
+ * cleared by REVIEW PASS, then re-activated by the
+ * second REVIEW FAIL — so two transitions.
+ *   historical_review_blocker_activation_count = 2
+ *   failing_review_count                   = 2
+ */
+export const makeFailPassFailSameEpoch: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc12-49" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evReviewStarted(FIXTURE_IDS.review2) },
+    { ev: evReviewFinished(FIXTURE_IDS.review2, true) },
+    { ev: evReviewStarted(FIXTURE_IDS.review3) },
+    { ev: evReviewFinished(FIXTURE_IDS.review3, false) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};
+
+/**
+ * METRIC50 — work -> PASS -> REVIEW FAIL @ epoch 1 ->
+ * REPAIR -> work -> REVIEW FAIL @ epoch 2. Each epoch's
+ * REVIEW FAIL produces a separate activation; the
+ * work-epoch advance between them clears the first blocker.
+ *   historical_review_blocker_activation_count = 2
+ *   failing_review_count                   = 2
+ */
+export const makeFailEpochAdvanceFail: StreamBuilder = (args) => {
+  const manifest = makeTestManifest({ seed: args?.seed ?? "lh02-mc12-50" });
+  const events = buildStream(manifest, [
+    { ev: evRunStarted() },
+    { ev: evHarnessStarted() },
+    { ev: evActionStarted(FIXTURE_IDS.attemptA) },
+    { ev: evGateStarted(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA) },
+    { ev: evGateFinished(FIXTURE_IDS.gate1, FIXTURE_IDS.attemptA, true) },
+    { ev: evActionFinished(FIXTURE_IDS.attemptA, "OK") },
+    { ev: evReviewStarted(FIXTURE_IDS.review1) },
+    { ev: evReviewFinished(FIXTURE_IDS.review1, false) },
+    { ev: evRepairStarted(FIXTURE_IDS.repair1, "epoch advance") },
+    { ev: evRepairFinished(FIXTURE_IDS.repair1) },
+    { ev: evReviewStarted(FIXTURE_IDS.review2) },
+    { ev: evReviewFinished(FIXTURE_IDS.review2, false) },
+    { ev: evHarnessStopped() },
+    { ev: evRunFinished("VALID_FAILURE") },
+  ]);
+  return { manifest, events };
+};

@@ -330,20 +330,29 @@ export type ConvergenceDistances = {
  *
  *   `historical_review_blocker_activation_count`
  *
- *     Number of REVIEW_FINISHED(pass=false) events that
- *     raised a per-epoch SUCCESS blocker. A later
- *     REVIEW_FINISHED(pass=true) at the same work epoch
- *     CLEARS the blocker but does NOT decrement the
- *     activation count.
+ *     Number of blocker TRANSITIONS on the review channel
+ *     (CORRECTION03 M-C12). Increments when REVIEW
+ *     FINISHED(false) observes a `not_blocked -> blocked`
+ *     transition at the CURRENT work epoch. Repeated
+ *     REVIEW FINISHED(false) at the SAME epoch while the
+ *     blocker is already open does NOT count. A later
+ *     REVIEW FINISHED(true) at the same epoch CLEARS the
+ *     blocker but does NOT decrement the activation count.
+ *     A work-epoch advance historicalises an open blocker
+ *     (M-C11) — the next epoch's REVIEW FAIL counts as a
+ *     new activation.
  *
  *   `failing_review_count`
  *
  *     Closed-world counter (the structural count of failing
- *     reviews in the stream). Equal to or greater than the
- *     activation count: an activation is `REVIEW_FINISHED
- *     (pass=false)`; two failing reviews at the same epoch
- *     would activate twice under V1 (the metric does not
- *     track per-epoch suppression).
+ *     review CLOSE events in the stream). Independent of
+ *     the activation TRANSITION count: a single activation
+ *     may correspond to one OR multiple failing reviews at
+ *     the same epoch (two consecutive FAILs at the same
+ *     epoch produce failing_review_count = 2 but
+ *     activation_count = 1; one FAIL -> one PASS -> one FAIL
+ *     at the same epoch produces failing_review_count = 2
+ *     and activation_count = 2).
  *
  * Current-state diagnostic:
  *

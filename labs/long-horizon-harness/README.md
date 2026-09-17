@@ -1178,12 +1178,20 @@ src/metrics/
   metric-contract.ts             contract version guard (refuses unknown versions)
   metric-authority.ts            walkAuthority (M-C09 — single pure authority
                                  walk: closure-authority channel + orthogonal
-                                 review-blocker channel, M-C08)
+                                 review-blocker channel, M-C08; CORRECTION03
+                                 M-C10 work-epoch tracking; M-C11 epoch
+                                 advance historicalises the blocker;
+                                 M-C12 activation counted as blocker
+                                 TRANSITION `not_blocked -> blocked`);
+                                 + assertAuthorityEndStateMatchesProjection
+                                 (M-C13: end-state parity oracle against
+                                 Phase E)
   metric-counters.ts             deriveCounters (single-pass counters, M4)
                                  + deriveAuthorityChannels / deriveAuthorityInvalidation
                                  (CORRECTION01: historical_authority_invalidation_count;
                                  CORRECTION02: historical_review_blocker_activation_count
-                                 is the orthogonal review-channel counter)
+                                 is the orthogonal review-channel TRANSITION counter,
+                                 CORRECTION03 M-C12)
   metric-distances.ts            deriveConvergenceDistances + deriveCorrectionBurden
                                  (M5, M6; CORRECTION01 M-C03 distance units:
                                  actions_to_* use ACTION_STARTED; work_epochs_to_*
@@ -1191,7 +1199,10 @@ src/metrics/
                                  anchor: gate that authorized terminal SUCCESS;
                                  CORRECTION02 M-C09: authoritative-pass walker
                                  delegates to walkAuthority so the metric has ONE
-                                 interpretation of the Phase E precedence model)
+                                 interpretation of the Phase E precedence model;
+                                 CORRECTION03 M-C10..M-C11: authority walk now
+                                 tracks work epoch and historicalises the review
+                                 blocker on every epoch advance)
   metric-time.ts                 deriveTimeMetrics (M8 deterministic durations;
                                  no clamping; no silent zero)
   metric-resources.ts            deriveResourceMetrics (M9/M10/M11; lifts
@@ -1206,7 +1217,11 @@ src/metrics/
                                  point; identity-bound to subject; the Phase E
                                  projection is INTERNALLY derived from
                                  orderedEvents — callers cannot supply a separate
-                                 projection, M-C01); verifyProjectionBind
+                                 projection, M-C01; CORRECTION03 M-C13 —
+                                 assertAuthorityEndStateMatchesProjection is
+                                 called on every report; any authority-algebra
+                                 drift between walkAuthority and Phase E
+                                 surfaces as a typed rejection); verifyProjectionBind
                                  (CORRECTION02 M-C07: STRUCTURAL-value binding
                                  via node:util.isDeepStrictEqual — NOT reference
                                  identity)
@@ -1253,11 +1268,11 @@ node --import tsx --test --test-reporter=spec \
 | Suite                              | Count | Status |
 |------------------------------------|-------|--------|
 | `test/metrics/metric-contract.test.ts`    |  9/9  | PASS |
-| `test/metrics/metric-golden.test.ts`      | 17/17 | PASS |
-| `test/metrics/metric-properties.test.ts`  | 16/16 | PASS |
+| `test/metrics/metric-golden.test.ts`      | 24/24 | PASS |
+| `test/metrics/metric-properties.test.ts`  | 17/17 | PASS |
 | `test/metrics/metric-time.test.ts`        |  5/5  | PASS |
 | `test/metrics/metric-resources.test.ts`   |  6/6  | PASS |
-| **LH-02 metrics suite total**             | **53/53** | **PASS** |
+| **LH-02 metrics suite total**             | **61/61** | **PASS** |
 | Phase E `test/run/*.test.ts` (frozen)     | 86/86 | PASS   |
 | Phase D `test:subject`                    |102/102| PASS   |
 | Phase C witness `pure` / `codec`           | 17/17 | PASS   |
@@ -1330,6 +1345,36 @@ REVIEW_FAILURE_STALES_CLOSURE_GATE                                  = FALSE     
 METRIC_AUTHORITY_ALGEBRA_HAS_TWO_IMPLEMENTATIONS                    = FALSE       (M-C09)
 ```
 
+### CORRECTION03 closure matrix
+
+The CORRECTION03 patch tightens the canonical
+`walkAuthority()` to reproduce frozen Phase-E epoch
+semantics for the review-blocker channel and to make the
+`historical_review_blocker_activation_count` a true
+state-machine TRANSITION count (rather than a raw
+failing-review count). It also adds a hard end-state
+parity oracle that the metric projector enforces for
+every report it computes: any future authority-algebra
+drift now surfaces as a typed rejection.
+
+```text
+M-M26_REVIEW_BLOCKER_EPOCH_SCOPED          PASS  (METRIC44..METRIC47)
+M-M27_REVIEW_ACTIVATION_MEASURAND_HONEST  PASS  (METRIC48..METRIC50)
+M-M28_METRIC_PHASE_E_AUTHORITY_PARITY      PASS  (METRIC51, every-report reject)
+
+HISTORICAL_REVIEW_FAILURE_BLOCKS_NEW_EPOCH              = FALSE       (M-C11)
+REPEATED_FAIL_ALREADY_BLOCKED_COUNTS_ACTIVATION         = FALSE       (M-C12)
+METRIC_AUTHORITY_END_STATE_DIFFERS_FROM_PHASE_E         = IMPOSSIBLE  (M-C13)
+```
+
+Negative-oracle invariants added by CORRECTION03:
+
+```text
+REVIEW_BLOCKER_PERSISTS_PAST_WORK_EPOCH_ADVANCE         = IMPOSSIBLE  (M-C11)
+ACTIVATION_DOUBLE_COUNTED_FOR_REPEATED_FAIL_SAME_EPOCH  = IMPOSSIBLE  (M-C12)
+METRIC_AUTHORITY_WALK_DIFFERS_FROM_PHASE_E_AUTHORITY    = IMPOSSIBLE  (M-C13)
+```
+
 ### LH-02 Negative Oracles
 
 ```text
@@ -1356,9 +1401,17 @@ STALE_PROJECTION_ACCEPTED                     = IMPOSSIBLE  (M-C07)
 REVIEW_BLOCKER_EQUALS_CLOSURE_AUTHORITY_INVALIDATION = FALSE  (M-C08)
 CLOSURE_AUTHORITY_AND_SUCCESS_BLOCKERS_ARE_ORTHOGONAL = TRUE   (M-C08)
 METRIC_AUTHORITY_ALGEBRA_HAS_TWO_DIVERGENT_IMPLEMENTATIONS = FALSE  (M-C09)
+
+# CORRECTION03 review-blocker epoch scoping / activation measurand:
+HISTORICAL_REVIEW_FAILURE_BLOCKS_NEW_EPOCH              = FALSE       (M-C11)
+REPEATED_FAIL_ALREADY_BLOCKED_COUNTS_ACTIVATION         = FALSE       (M-C12)
+METRIC_AUTHORITY_END_STATE_DIFFERS_FROM_PHASE_E         = IMPOSSIBLE  (M-C13)
+REVIEW_BLOCKER_PERSISTS_PAST_WORK_EPOCH_ADVANCE         = IMPOSSIBLE  (M-C11)
+ACTIVATION_DOUBLE_COUNTED_FOR_REPEATED_FAIL_SAME_EPOCH  = IMPOSSIBLE  (M-C12)
+METRIC_AUTHORITY_WALK_DIFFERS_FROM_PHASE_E_AUTHORITY    = IMPOSSIBLE  (M-C13)
 ```
 
-### LH-02 EXIT (after CORRECTION01 + CORRECTION02)
+### LH-02 EXIT (after CORRECTION01 + CORRECTION02 + CORRECTION03)
 
 ```text
 CONVERGENCE_METRIC_CONTRACT            = FROZEN
@@ -1368,11 +1421,19 @@ METRIC_REPORT  ↔  EXACT_RUN_EVIDENCE   = STRUCTURALLY BOUND
 METRIC_REPORT  ↔  PROJECTION          = VALUE-BOUND (verifyProjectionBind
                                          uses node:util.isDeepStrictEqual;
                                          no reference-identity shortcut)
+METRIC_AUTHORITY_WALK
+    ↔  PHASE_E_AUTHORITY_END_STATE     = TRUE  (computeRunMetrics asserts
+                                                 parity on every report;
+                                                 any drift surfaces as a
+                                                 typed rejection, CORRECTION03
+                                                 M-C13)
 MISSING_EVIDENCE != ZERO               = TRUE
 TERMINAL_OUTCOME_AUTHORITY             = PHASE_E_ONLY
 SUCCESS_AUTHORITY                      = PHASE_E_ONLY
 AUTHORITY_CHANNELS_ORTHOGONAL          = TRUE  (closure-authority channel
                                                 vs review-blocker channel)
+REVIEW_BLOCKER_EPOCH_SCOPED            = TRUE  (CORRECTION03 M-C11)
+ACTIVATION = BLOCKER_TRANSITION         = TRUE  (CORRECTION03 M-C12)
 MEASUREMENT_CAN_REPLAY_WITHOUT_HARNESS = YES
 MEASUREMENT_CAN_REPORT_WHAT_IT_MEASURES = YES
 

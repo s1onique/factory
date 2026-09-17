@@ -24,7 +24,8 @@
  *   ==
  *   PHASE_E_TERMINAL_OUTCOME
  *
- * Invariant (M-C01, CORRECTION01 + CORRECTION02 M-C07):
+ * Invariant (M-C01, CORRECTION01 + CORRECTION02 M-C07
+ *             + CORRECTION03 M-C13):
  *
  *   METRIC_REPORT  ↔  EXACT_RUN_EVIDENCE
  *
@@ -37,6 +38,16 @@
  *   projection to the internally-derived one with STRUCTURAL
  *   (value) equality, not JavaScript reference identity
  *   (CORRECTION02 M-C07).
+ *
+ *   METRIC_AUTHORITY_END_STATE == PHASE_E_AUTHORITY_END_STATE
+ *
+ *   The metric has ONE interpretation of the frozen
+ *   Phase-E precedence model (M-C09). `walkAuthority()`
+ *   returns the same closure-authority boolean, the same
+ *   review-blocker boolean, and the same work epoch as
+ *   the Phase-E projector (M-C13). Any divergence is a
+ *   typed metric rejection so authority-algebra drift
+ *   surfaces here rather than in a downstream consumer.
  *
  * The projector NEVER:
  *
@@ -79,6 +90,10 @@ import {
 } from "./metric-types.js";
 
 import { guardContractVersion } from "./metric-contract.js";
+import {
+  assertAuthorityEndStateMatchesProjection,
+  walkAuthority,
+} from "./metric-authority.js";
 import { deriveCounters } from "./metric-counters.js";
 import {
   deriveConvergenceDistances,
@@ -170,6 +185,29 @@ export function computeRunMetrics(args: {
       reason:
         `computeRunMetrics: subject '${args.subject}' does not match ` +
         `projection.subject_id '${projection.subject_id}'`,
+    };
+  }
+
+  // (3.5) End-state parity oracle (CORRECTION03 M-C13).
+  // The metric has ONE interpretation of the frozen
+  // Phase-E authority precedence model. We now assert
+  // that the canonical `walkAuthority()` end-state
+  // matches the Phase-E projector's end-state on every
+  // field that the metric channeled exposes:
+  // closure authority, review-blocker boolean, and
+  // work epoch. Any divergence is a typed metric
+  // rejection — never a silent corruption — so future
+  // authority-algebra drift surfaces here rather than
+  // in a downstream consumer's report.
+  const authorityWalk = walkAuthority(args.orderedEvents);
+  const parity = assertAuthorityEndStateMatchesProjection(
+    authorityWalk,
+    projection,
+  );
+  if (!parity.ok) {
+    return {
+      ok: false,
+      reason: `computeRunMetrics: ${parity.reason}`,
     };
   }
 

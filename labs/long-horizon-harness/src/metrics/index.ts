@@ -59,3 +59,9 @@ export {
 export {
   deriveRunEvidenceHash,
 } from "./metric-hash.js";
+
+export {
+  walkAuthority,
+  assertAuthorityEndStateMatchesProjection,
+  type AuthorityWalk,
+} from "./metric-authority.js";
