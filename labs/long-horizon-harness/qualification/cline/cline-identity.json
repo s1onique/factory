@@ -1,0 +1,10 @@
+{
+  "harness_name": "cline",
+  "package_name": null,
+  "package_version": null,
+  "executable_path": null,
+  "executable_sha256": null,
+  "reported_cli_version": null,
+  "protocol_mode": "JSONL_EVENTS",
+  "native_schema_fingerprint": null
+}

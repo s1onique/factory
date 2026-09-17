@@ -1,0 +1,33 @@
+{
+  "identity": {
+    "harness_name": "cline",
+    "package_name": null,
+    "package_version": null,
+    "executable_path": null,
+    "executable_sha256": null,
+    "reported_cli_version": null,
+    "protocol_mode": "JSONL_EVENTS",
+    "native_schema_fingerprint": null
+  },
+  "discovered_at_ms": 1789684200000,
+  "capabilities": {
+    "HEADLESS": "UNQUALIFIED",
+    "STREAMING_EVENTS": "UNQUALIFIED",
+    "FINAL_JSON": "UNQUALIFIED",
+    "JSONL": "UNQUALIFIED",
+    "RPC": "UNQUALIFIED",
+    "SESSION_RESUME": "UNQUALIFIED",
+    "SESSION_FORK": "UNQUALIFIED",
+    "EXPLICIT_CWD": "UNQUALIFIED",
+    "ISOLATED_DATA_DIR": "UNQUALIFIED",
+    "MODEL_SELECTION": "UNQUALIFIED",
+    "PROVIDER_SELECTION": "UNQUALIFIED",
+    "TIMEOUT": "UNQUALIFIED",
+    "CANCELLATION": "UNQUALIFIED",
+    "AUTO_APPROVAL": "UNQUALIFIED",
+    "TOOL_EVENT_VISIBILITY": "UNQUALIFIED",
+    "TOKEN_USAGE": "UNQUALIFIED",
+    "RESOURCE_USAGE": "UNQUALIFIED",
+    "SESSION_ARTIFACTS": "UNQUALIFIED"
+  }
+}

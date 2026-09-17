@@ -1,0 +1,7 @@
+{
+  "metric_contract_version": "convergence.metric.contract.v1",
+  "metric_report_schema_version": "metric.report.schema.v1",
+  "terminal_outcome": null,
+  "metric_evidence_failure_observed": false,
+  "notes": "No live evidence; LH-02 metrics for which no signal exists are emitted as unavailable() rather than zero."
+}

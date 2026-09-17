@@ -1,0 +1,90 @@
+{
+  "generated_at_iso": "2026-09-17T22:25:00.000Z",
+  "lh03_disposition": "DISCOVERY_ONLY",
+  "records": [
+    {
+      "candidate": "Qwen Code",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://github.com/QwenLM/Qwen3-Coder",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    },
+    {
+      "candidate": "OpenCode",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://opencode.ai/docs/",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    },
+    {
+      "candidate": "Hermes",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://github.com/NousResearch/hermes",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    },
+    {
+      "candidate": "mini-swe-agent",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://github.com/SWE-agent/mini-SWE-agent",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    }
+  ]
+}

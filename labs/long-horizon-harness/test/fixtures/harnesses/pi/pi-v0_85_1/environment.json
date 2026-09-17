@@ -1,0 +1,27 @@
+{
+  "captured_at_iso": "2026-09-17T22:27:44.539Z",
+  "cwd": "/private/tmp/pi-live",
+  "os": "darwin",
+  "architecture": "arm64",
+  "node_version": "v26.0.0",
+  "harness_package": "@earendil-works/pi-coding-agent",
+  "harness_package_version": "0.85.1",
+  "harness_executable": "/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+  "harness_executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
+  "harness_reported_cli_version": "0.85.1",
+  "protocol_mode": "JSONL_EVENTS",
+  "args_redacted": [
+    "--mode",
+    "json",
+    "--no-session",
+    "--offline",
+    "--provider",
+    "google",
+    "-p",
+    "Read input.txt and report its contents."
+  ],
+  "model": null,
+  "provider": "google",
+  "live_probe_outcome": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+  "notes": "argv values are redacted at the structural layer; sensitive env vars are redacted in the adapter before persistence."
+}

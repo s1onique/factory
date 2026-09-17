@@ -1,0 +1,69 @@
+{
+  "generated_at_iso": "2026-09-17T22:30:00.000Z",
+  "rows": [
+    {
+      "candidate": "pi",
+      "qualification_identity": {
+        "harness_name": "pi",
+        "package_name": "@earendil-works/pi-coding-agent",
+        "package_version": "0.85.1",
+        "executable_path": "/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        "executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
+        "reported_cli_version": "0.85.1",
+        "protocol_mode": "JSONL_EVENTS",
+        "native_schema_fingerprint": "af78efa6a0f5ccf8649c4f39d94b42d7501ff16289b9a4c3e2cacf4f18cdee3d"
+      },
+      "protocol": "JSONL_EVENTS",
+      "headless": "SUPPORTED",
+      "streaming_events": "SUPPORTED",
+      "final_json": "SUPPORTED",
+      "jsonl": "SUPPORTED",
+      "rpc": "SUPPORTED",
+      "session_resume": "UNSUPPORTED",
+      "session_fork": "UNSUPPORTED",
+      "explicit_cwd": "SUPPORTED",
+      "isolated_state": "SUPPORTED",
+      "model_selection": "SUPPORTED",
+      "provider_selection": "SUPPORTED",
+      "timeout": "UNSUPPORTED",
+      "cancellation": "SUPPORTED",
+      "tool_visibility": "SUPPORTED",
+      "token_visibility": "UNQUALIFIED",
+      "resource_visibility": "UNQUALIFIED",
+      "replay_fixture": "test/fixtures/harnesses/pi/pi-v0_85_1",
+      "qualification_status": "QUALIFIED_WITH_LIMITATIONS"
+    },
+    {
+      "candidate": "cline",
+      "qualification_identity": {
+        "harness_name": "cline",
+        "package_name": null,
+        "package_version": null,
+        "executable_path": null,
+        "executable_sha256": null,
+        "reported_cli_version": null,
+        "protocol_mode": "JSONL_EVENTS",
+        "native_schema_fingerprint": null
+      },
+      "protocol": "JSONL_EVENTS",
+      "headless": "UNQUALIFIED",
+      "streaming_events": "UNQUALIFIED",
+      "final_json": "UNQUALIFIED",
+      "jsonl": "UNQUALIFIED",
+      "rpc": "UNQUALIFIED",
+      "session_resume": "UNQUALIFIED",
+      "session_fork": "UNQUALIFIED",
+      "explicit_cwd": "UNQUALIFIED",
+      "isolated_state": "UNQUALIFIED",
+      "model_selection": "UNQUALIFIED",
+      "provider_selection": "UNQUALIFIED",
+      "timeout": "UNQUALIFIED",
+      "cancellation": "UNQUALIFIED",
+      "tool_visibility": "UNQUALIFIED",
+      "token_visibility": "UNQUALIFIED",
+      "resource_visibility": "UNQUALIFIED",
+      "replay_fixture": "test/fixtures/harnesses/cline/cline-discovery-only",
+      "qualification_status": "UNQUALIFIED"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+(node:40888) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+No API key found for the selected model.
+
+Use /login to log into a provider via OAuth or API key. See:
+  /private/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/docs/providers.md
+  /private/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/docs/models.md

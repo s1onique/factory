@@ -1,0 +1,9 @@
+{
+  "run_id": "lh03-cline-discovery-only",
+  "subject_id": "cline-discovery-only-subject",
+  "lifecycle_state": "INCOMPLETE",
+  "terminal_outcome": null,
+  "event_count": 0,
+  "last_sequence": 0,
+  "notes": "No live capture; LH-03 adapter contract verified via deterministic unit tests against the stub."
+}

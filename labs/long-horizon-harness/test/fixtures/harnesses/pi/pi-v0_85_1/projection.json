@@ -1,0 +1,9 @@
+{
+  "run_id": "lh03-pi-v0_85_1-fixture",
+  "subject_id": "pi-v0_85_1-fixture-subject",
+  "lifecycle_state": "INCOMPLETE",
+  "terminal_outcome": null,
+  "event_count": 1,
+  "last_sequence": 1,
+  "notes": "Live capture truncated at session envelope due to missing provider credentials (HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE). Replay fixture preserves the deterministic envelope exactly; downstream Phase E projection sees only the captured raw record."
+}

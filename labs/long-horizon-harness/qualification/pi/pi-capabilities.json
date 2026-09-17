@@ -1,0 +1,33 @@
+{
+  "identity": {
+    "harness_name": "pi",
+    "package_name": "@earendil-works/pi-coding-agent",
+    "package_version": "0.85.1",
+    "executable_path": "/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+    "executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
+    "reported_cli_version": "0.85.1",
+    "protocol_mode": "JSONL_EVENTS",
+    "native_schema_fingerprint": "af78efa6a0f5ccf8649c4f39d94b42d7501ff16289b9a4c3e2cacf4f18cdee3d"
+  },
+  "discovered_at_ms": 1789684064539,
+  "capabilities": {
+    "HEADLESS": "SUPPORTED",
+    "STREAMING_EVENTS": "SUPPORTED",
+    "FINAL_JSON": "SUPPORTED",
+    "JSONL": "SUPPORTED",
+    "RPC": "SUPPORTED",
+    "SESSION_RESUME": "UNSUPPORTED",
+    "SESSION_FORK": "UNSUPPORTED",
+    "EXPLICIT_CWD": "SUPPORTED",
+    "ISOLATED_DATA_DIR": "SUPPORTED",
+    "MODEL_SELECTION": "SUPPORTED",
+    "PROVIDER_SELECTION": "SUPPORTED",
+    "TIMEOUT": "UNSUPPORTED",
+    "CANCELLATION": "SUPPORTED",
+    "AUTO_APPROVAL": "UNQUALIFIED",
+    "TOOL_EVENT_VISIBILITY": "SUPPORTED",
+    "TOKEN_USAGE": "UNQUALIFIED",
+    "RESOURCE_USAGE": "UNQUALIFIED",
+    "SESSION_ARTIFACTS": "SUPPORTED"
+  }
+}

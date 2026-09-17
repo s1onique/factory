@@ -1,0 +1,18 @@
+{
+  "captured_at_iso": "2026-09-17T22:30:00.000Z",
+  "cwd": ".",
+  "os": "darwin",
+  "architecture": "arm64",
+  "node_version": "v26.0.0",
+  "harness_package": null,
+  "harness_package_version": null,
+  "harness_executable": null,
+  "harness_executable_sha256": null,
+  "harness_reported_cli_version": null,
+  "protocol_mode": "JSONL_EVENTS",
+  "args_redacted": [],
+  "model": null,
+  "provider": null,
+  "live_probe_outcome": "HALT_CLINE_NOT_INSTALLED",
+  "notes": "Discovery-only record. No live capture attempted; live qualification requires Cline / ClineMM on the host."
+}

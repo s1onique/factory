@@ -1,0 +1,18 @@
+{
+  "process_spawned": true,
+  "process_exit_code": 1,
+  "process_exit_signal": null,
+  "cancel_requested": false,
+  "timeout_initiated": false,
+  "external_kill_used": false,
+  "native_abort_observed": false,
+  "exit_at_ms": 1789684064539,
+  "halt_disposition": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+  "halt_reason": "No API key found for the selected model.",
+  "adapter_errors": [
+    {
+      "code": "HARNESS_NOT_FOUND",
+      "message": "No provider credentials available; live capture truncated to session envelope."
+    }
+  ]
+}

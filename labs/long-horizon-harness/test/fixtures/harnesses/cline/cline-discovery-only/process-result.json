@@ -1,0 +1,18 @@
+{
+  "process_spawned": false,
+  "process_exit_code": null,
+  "process_exit_signal": null,
+  "cancel_requested": false,
+  "timeout_initiated": false,
+  "external_kill_used": false,
+  "native_abort_observed": false,
+  "exit_at_ms": null,
+  "halt_disposition": "HALT_CLINE_NOT_INSTALLED",
+  "halt_reason": "Cline / ClineMM executable is not present on this host; live qualification cannot proceed.",
+  "adapter_errors": [
+    {
+      "code": "HARNESS_NOT_FOUND",
+      "message": "Cline / ClineMM binary not found in PATH and no --data-dir / --cwd captured."
+    }
+  ]
+}

@@ -128,6 +128,11 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // witness runtime) is the whole point of the
     // witness-controller-binding module.
     "src/witness/witness-controller-binding.ts",
+    // LH-03: the candidate-neutral JSON trust-boundary
+    // codec. This is the only module in `src/adapter-common`
+    // that may call JSON.parse; candidate-specific adapters
+    // MUST route harness-native lines through it.
+    "src/adapter-common/json-codec.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {
