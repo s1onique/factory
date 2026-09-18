@@ -1,14 +1,14 @@
 {
   "lh03_emit_kind": "DETERMINISTIC_CONSOLIDATED_EMIT",
   "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
-  "lh03_correction": "CORRECTION06",
+  "lh03_correction": "CORRECTION07",
   "lh03_correction_history": [
     "CORRECTION01",
     "CORRECTION02",
     "CORRECTION03",
     "CORRECTION04",
     "CORRECTION05",
-    "CORRECTION06"
+    "CORRECTION07"
   ],
   "generated_at_iso": "2026-09-18T01:00:00.000Z",
   "input_evidence": {
@@ -77,12 +77,12 @@
       "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json",
       "invocation_invocation_mode": "headless",
       "disposition": "PASS",
-      "rationale": "CORRECTION06 C06-03: HEADLESS is now LIVE_QUALIFIED iff the durable invocation artifact's invocation_mode field equals 'headless'. The verifier re-reads the invocation from disk and recomputes expected from it."
+      "rationale": "CORRECTION07 C07-03: HEADLESS is LIVE_QUALIFIED iff the durable invocation artifact's derived.headless flag is true (derived from argv: -p/--print or --mode json/rpc). The verifier re-reads the invocation from disk and recomputes expected from it. Author-supplied protocol/invocation_mode fields on the artifact are no longer authoritative."
     },
     "STREAMING_EVENTS": {
       "probe_kind": "NOT_RUN",
       "harness_capability": "SUPPORTED",
-      "rationale": "CORRECTION06 C06-04: STREAMING_EVENTS requires invocation.invocation_mode === 'headless' AND the observation artifact must contain >= 2 events. The canonical single-event session header is not sufficient evidence of streaming behavior. Until Factory wires up multi-event capture, STREAMING_EVENTS stays LIVE_UNQUALIFIED."
+      "rationale": "CORRECTION07 C07-03: STREAMING_EVENTS requires derived.headless=true AND derived.protocol in {json, rpc} AND the observation artifact contains >= 2 events. The canonical single-event session header is not sufficient. Until Factory wires up multi-event capture, STREAMING_EVENTS stays LIVE_UNQUALIFIED."
     },
     "JSONL": {
       "probe_kind": "SESSION_ENVELOPE",
@@ -147,7 +147,12 @@
       "ALL_ORACLE_INPUTS_DERIVED_FROM_REVERIFIABLE_ARTIFACTS (CORRECTION06): verifier re-reads invocation.json and recomputes expected for every per-capability oracle",
       "INVOCATION_EVIDENCE_PATH_REQUIRED for every LIVE_QUALIFIED axis (CORRECTION06 C06-06)",
       "VALIDATOR_REJECTS_LIVE_QUALIFIED_WITHOUT_INVOCATION_EVIDENCE_PATH (CORRECTION06 C06-07)",
-      "EVALUATE_CAPABILITY_ORACLE is the per-axis oracle function (CORRECTION06 C06-08)"
+      "EVALUATE_CAPABILITY_ORACLE is the per-axis oracle function (CORRECTION06 C06-08)",
+      "INVOCATION_SHA_BIND_EXTERNAL (CORRECTION07 C07-01): axis.invocation_evidence_sha256 must equal sha256(actual invocation bytes)",
+      "RAW_INVOCATION_FACTS_ONLY_ON_DISK (CORRECTION07 C07-04): invocation artifact may contain ONLY executable/argv/spawn_cwd/env_subset/recorded_at/capability; protocol/invocation_mode/session_dir/no_session/derived/artifact_sha256 fields are refused on disk and computed from raw",
+      "DERIVE_INVOCATION_SEMANTICS_FROM_RAW (CORRECTION07 C07-03): protocol derived from --mode; headless derived from -p/--print/json/rpc; session_dir derived from --session-dir or PI_CODING_AGENT_SESSION_DIR",
+      "CONTRADICTION_ORACLES (CORRECTION07 C07-06): --mode headless refused; --no-session + session_dir refused",
+      "VALIDATOR_REJECTS_LIVE_QUALIFIED_WITHOUT_INVOCATION_SHA (CORRECTION07 C07-07)"
     ],
     "invocation_artifacts": {
       "JSONL": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
@@ -157,15 +162,15 @@
       "ISOLATED_DATA_DIR": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/ISOLATED_DATA_DIR.invocation.json",
       "CANCELLATION": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/CANCELLATION.invocation.json"
     },
-    "is_isolated_data_dir_oracle": "captured_artifact_path under invocation.session_dir (CORRECTION06 C06-05, supersedes C05-01)",
+    "is_isolated_data_dir_oracle": "captured_artifact_path under invocation.derived.session_dir (CORRECTION07 C07-03; session_dir is derived from raw argv/env)",
     "is_halt_oracle": "expected === recomputed_observed (CORRECTION05 C05-02, retained)",
     "is_explicit_cwd_oracle": "expected := invocation.spawn_cwd (CORRECTION06 C06-02)",
-    "is_headless_oracle": "expected := invocation.invocation_mode (CORRECTION06 C06-03)",
-    "is_streaming_events_oracle": "invocation.invocation_mode === 'headless' AND observation has >= 2 events (CORRECTION06 C06-04)",
+    "is_headless_oracle": "expected := invocation.derived.headless (CORRECTION07 C07-03; headless is derived from raw argv)",
+    "is_streaming_events_oracle": "invocation.derived.headless && invocation.derived.protocol in {json,rpc} && observation has >= 2 events (CORRECTION07 C07-03)",
     "is_cancellation_oracle": "expected := parsed.halt_disposition (CORRECTION06 C06-08)",
     "path_policy": "isAbsolute(artifact_path) rejected outright (CORRECTION05 C05-03)",
-    "invocation_policy": "invocation_evidence_path is mandatory on every LIVE_QUALIFIED axis (CORRECTION06 C06-06)",
-    "validator_policy": "validateLiveQualification refuses LIVE_QUALIFIED without invocation_evidence_path (CORRECTION06 C06-07)",
+    "invocation_policy": "invocation_evidence_path AND invocation_evidence_sha256 are mandatory on every LIVE_QUALIFIED axis (CORRECTION06 C06-06 + CORRECTION07 C07-01)",
+    "validator_policy": "validateLiveQualification refuses LIVE_QUALIFIED without invocation_evidence_path OR without invocation_evidence_sha256 (CORRECTION06 C06-07 + CORRECTION07 C07-07)",
     "pinned_fixture_result": "PASS",
     "qualification_matrix_result": "PASS"
   },

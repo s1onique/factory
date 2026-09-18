@@ -756,6 +756,7 @@ export function defaultClineCapabilities(
       probe_evidence: null,
       probe_evidence_path: null,
       invocation_evidence_path: null,
+      invocation_evidence_sha256: null,
     };
   }
   return {

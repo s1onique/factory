@@ -270,19 +270,33 @@ export type CapabilityAxis = {
   /**
    * CORRECTION06 C06-06: durable, repo-relative path to
    * the invocation evidence artifact that records the
-   * executable, argv, spawn cwd, protocol, invocation
-   * mode, session-dir setting, and a sanitized env
-   * subset used by Factory to invoke the harness. The
-   * verifier re-reads this artifact and uses it as the
+   * raw launch facts Factory used to invoke the harness
+   * (executable, argv, spawn cwd, sanitized env subset).
+   * The verifier re-reads this artifact, recomputes the
+   * SHA256 of its on-disk bytes, and uses it as the
    * authoritative source for the oracle's `expected`
-   * value (C06-02..C06-05). Required for every
-   * LIVE_QUALIFIED and LIVE_HALT axis.
+   * value (C07-03). Required for every LIVE_QUALIFIED
+   * and LIVE_HALT axis.
    *
    * `null` is the typed default for axes that have not
    * been probed. The validator refuses LIVE_QUALIFIED
    * axes with a null invocation_evidence_path.
    */
   readonly invocation_evidence_path: string | null;
+  /**
+   * CORRECTION07 C07-01: SHA256 of the invocation
+   * artifact's on-disk bytes, bound on the axis. The
+   * verifier enforces
+   * `sha256(actual invocation bytes) ===
+   *  axis.invocation_evidence_sha256`. The SHA lives
+   * OUTSIDE the artifact being hashed, so a mutated
+   * artifact cannot self-validate.
+   *
+   * `null` is the typed default. The validator refuses
+   * LIVE_QUALIFIED / LIVE_HALT axes whose
+   * invocation_evidence_sha256 is null OR empty.
+   */
+  readonly invocation_evidence_sha256: string | null;
 };
 
 /**
@@ -361,6 +375,7 @@ export function emptyCapabilities(
       probe_evidence: null,
       probe_evidence_path: null,
       invocation_evidence_path: null,
+      invocation_evidence_sha256: null,
     };
   }
   return {
@@ -489,6 +504,19 @@ export type LiveQualificationViolation =
       readonly key: CapabilityKey;
     }
   | {
+      /**
+       * CORRECTION07 C07-01: LIVE_QUALIFIED / LIVE_HALT
+       * axes must carry the SHA256 of the invocation
+       * artifact's bytes, bound externally on the axis.
+       */
+      readonly kind: "live_qualified_without_invocation_sha";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_without_invocation_sha";
+      readonly key: CapabilityKey;
+    }
+  | {
       readonly kind: "axis_views_disagree";
       readonly key: CapabilityKey;
       readonly axes_axis: LiveQualificationState;
@@ -598,6 +626,19 @@ export function validateLiveQualification(
           key: k,
         });
       }
+      // CORRECTION07 C07-01: the axis must also carry the
+      // SHA256 of the invocation artifact's bytes, bound
+      // externally so a mutated artifact cannot self-
+      // validate.
+      if (
+        axis.invocation_evidence_sha256 === null ||
+        axis.invocation_evidence_sha256 === ""
+      ) {
+        violations.push({
+          kind: "live_qualified_without_invocation_sha",
+          key: k,
+        });
+      }
     }
     if (axis.live_qualification === "LIVE_HALT") {
       if (axis.probe_evidence === null) {
@@ -637,6 +678,17 @@ export function validateLiveQualification(
       if (axis.invocation_evidence_path === null) {
         violations.push({
           kind: "live_halt_without_invocation_evidence",
+          key: k,
+        });
+      }
+      // CORRECTION07 C07-01: halt axes must also bind
+      // the invocation SHA externally.
+      if (
+        axis.invocation_evidence_sha256 === null ||
+        axis.invocation_evidence_sha256 === ""
+      ) {
+        violations.push({
+          kind: "live_halt_without_invocation_sha",
           key: k,
         });
       }

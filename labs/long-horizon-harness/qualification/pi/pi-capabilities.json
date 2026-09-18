@@ -56,21 +56,24 @@
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "STREAMING_EVENTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "FINAL_JSON": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "JSONL": {
       "harness_capability": "SUPPORTED",
@@ -87,28 +90,32 @@
         "disposition": "PASS"
       },
       "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
-      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+      "invocation_evidence_sha256": "de8461206034e31257fc5c73a9afb6f19eb04d167f365f21f68729a2bb4f7b20"
     },
     "RPC": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "SESSION_RESUME": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "SESSION_FORK": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "EXPLICIT_CWD": {
       "harness_capability": "SUPPORTED",
@@ -125,35 +132,40 @@
         "disposition": "PASS"
       },
       "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
-      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/EXPLICIT_CWD.invocation.json"
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/EXPLICIT_CWD.invocation.json",
+      "invocation_evidence_sha256": "b668398c2426aa94954c6f043242b4934582d07cb82dbe39a677042184c391f8"
     },
     "ISOLATED_DATA_DIR": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "MODEL_SELECTION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "PROVIDER_SELECTION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "TIMEOUT": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "NOT_APPLICABLE",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "CANCELLATION": {
       "harness_capability": "SUPPORTED",
@@ -170,42 +182,48 @@
         "disposition": "HALT"
       },
       "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
-      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/CANCELLATION.invocation.json"
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/CANCELLATION.invocation.json",
+      "invocation_evidence_sha256": "3fc7db14dd5ae3e4bbf5867eee0d79f3fe00201a06957bf61017ce51574c8e9e"
     },
     "AUTO_APPROVAL": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "NOT_APPLICABLE",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "TOOL_EVENT_VISIBILITY": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "TOKEN_USAGE": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "RESOURCE_USAGE": {
       "harness_capability": "UNAVAILABLE",
       "live_qualification": "NOT_APPLICABLE",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     },
     "SESSION_ARTIFACTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
       "probe_evidence_path": null,
-      "invocation_evidence_path": null
+      "invocation_evidence_path": null,
+      "invocation_evidence_sha256": null
     }
   }
 }

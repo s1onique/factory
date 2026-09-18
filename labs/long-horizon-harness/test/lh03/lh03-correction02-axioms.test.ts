@@ -55,6 +55,7 @@ test("C02-01a: validateLiveQualification rejects LIVE_QUALIFIED with null eviden
         probe_evidence: null,
         probe_evidence_path: null,
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -82,6 +83,7 @@ test("C02-01b: validateLiveQualification rejects LIVE_HALT with null evidence", 
         probe_evidence: null,
         probe_evidence_path: null,
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -166,7 +168,7 @@ test("C02-02a: qualification/lh03-emit.json exists and is non-empty", () => {
   assert.ok(text.length > 0, "lh03-emit.json must not be empty");
   const parsed = JSON.parse(text) as Record<string, unknown>;
   assert.equal(parsed.lh03_emit_kind, "DETERMINISTIC_CONSOLIDATED_EMIT");
-  assert.equal(parsed.lh03_correction, "CORRECTION06");
+  assert.equal(parsed.lh03_correction, "CORRECTION07");
   assert.ok(parsed.input_evidence, "must reference real input evidence");
   assert.ok(parsed.evidence_paths, "must list real evidence paths");
   const ep = parsed.evidence_paths as Record<string, unknown>;

@@ -902,4 +902,175 @@ This SHA is the subject the Factory qualification binds to. Any
 rebase / amend invalidates this binding and forces a fresh
 qualification emit.
 
+---
+
+## CORRECTION07 - invocation evidence is bound by SHA, semantics derived mechanically from raw argv/env
+
+### Motivation
+
+CORRECTION06 closed the conceptual hole where the
+oracle's `expected` value came from caller-asserted
+arguments rather than from a durable artifact. But the
+reviewer (post-CORRECTION06) identified one deeper
+provenance layer:
+
+```text
+DURABLE ASSERTION != AUTHENTIC CAPTURE
+INVOCATION_ARTIFACT_REVERIFIED != INVOCATION_ARTIFACT_AUTHENTIC
+```
+
+Two specific defects:
+
+1. **Invocation SHA was self-asserted.** The artifact
+   could record `artifact_sha256` inline, and the
+   verifier compared the on-disk bytes' SHA to that
+   self-recorded field. The writer intentionally omitted
+   the field, but nothing external said what SHA the
+   axis was bound to. A mutated artifact (whose bytes
+   still satisfy the oracle) could re-PASS.
+
+2. **Raw launch tuple and derived semantics were both
+   author-supplied.** The artifact had separately
+   author-supplied `protocol`, `invocation_mode`,
+   `session_dir`, `no_session` fields. The verifier
+   trusted those fields directly. A pathological
+   record could claim `--mode json` in argv AND
+   `protocol: "rpc"` AND `invocation_mode: "headless"`
+   simultaneously. The previous fixture even did this
+   in `CANCELLATION.invocation.json`:
+
+   ```text
+   argv:            ["--mode", "headless"]
+   protocol:        "headless"
+   invocation_mode: "rpc"
+   session_dir:     "test/fixtures/..."
+   ```
+
+   And the `ISOLATED_DATA_DIR` fixture recorded a
+   `session_dir` that no argv or env entry actually
+   claimed (Pi's `--session-dir` flag, not
+   `PI_CODING_AGENT_DIR`).
+
+CORRECTION07 is the final deterministic hardening ACT.
+
+### What changed
+
+| Layer | Change |
+|---|---|
+| `RawInvocationLaunch` | New typed schema. ONLY raw launch facts (`executable`, `argv`, `spawn_cwd`, `env_subset`, `capability`, `recorded_at`) are authoritatively on disk. |
+| `DerivedInvocationSemantics` | New typed view. `protocol`, `headless`, `session_dir`, `no_session` are computed by `deriveInvocationSemantics(raw)` from argv/env. NEVER on disk. |
+| `deriveInvocationSemantics(...)` | Pure function. Parses `--mode json|rpc|text`; rejects `--mode headless` and unknown modes; derives `headless` from `-p`/`--print` or json/rpc; derives `session_dir` from `--session-dir X` or `PI_CODING_AGENT_SESSION_DIR`; refuses `--no-session` + session_dir. |
+| `readInvocationEvidence(...)` | Refuses any on-disk artifact carrying authoritative non-raw fields (`protocol`, `invocation_mode`, `session_dir`, `no_session`, `derived`, `artifact_sha256`). |
+| `CapabilityAxis.invocation_evidence_sha256` | New required field. SHA256 of the invocation artifact's on-disk bytes, bound externally. Verifier enforces `sha256(actual bytes) === axis.invocation_evidence_sha256`. |
+| Validator | New violation kinds `live_qualified_without_invocation_sha`, `live_halt_without_invocation_sha`. |
+| Fixtures | `--mode headless` removed everywhere. JSONL uses `--mode json`; HEADLESS uses `-p ping`; STREAMING_EVENTS uses `--mode json`; RPC would use `--mode rpc`; ISOLATED_DATA_DIR records a real `--session-dir` argv entry. |
+
+### Per-capability oracle (CORRECTION07)
+
+```text
+JSONL              : observed == "session"                                          C07-05
+HEADLESS           : invocation.derived.headless AND observed == "session"           C07-03
+STREAMING_EVENTS   : invocation.derived.headless AND
+                     invocation.derived.protocol in {json, rpc} AND
+                     observation has >= 2 events                                     C07-03
+EXPLICIT_CWD       : invocation.spawn_cwd === observed                               C07-02 (raw fact)
+ISOLATED_DATA_DIR  : invocation.derived.session_dir != null AND
+                     invocation.derived.no_session === false AND
+                     captured_artifact_path under invocation.derived.session_dir     C07-03
+CANCELLATION       : parsed.halt_disposition === observed                            C07-05
+LIVE_HALT          : recorded expected === observed (C05-02 retained)                C05-02
+```
+
+### Contradiction oracles (C07-06)
+
+The verifier refuses any artifact whose raw launch
+facts are internally inconsistent:
+
+```text
+--mode headless       => REFUSED (Pi has no such flag)
+--mode <unknown>      => REFUSED (Pi's modes are json | rpc | text)
+--no-session + (--session-dir X | env PI_CODING_AGENT_SESSION_DIR)
+                     => REFUSED (contradiction)
+```
+
+### Reviewer-driven hardening items (CORRECTION07)
+
+| ID | Reviewer defect | CORRECTION07 fix |
+|---|---|---|
+| C07-01 | Invocation artifact SHA was self-asserted; nothing external bound the expected SHA. | New `axis.invocation_evidence_sha256` field. Verifier enforces `sha256(actual invocation bytes) === axis.invocation_evidence_sha256`. Negative test: `C07-01`. |
+| C07-02 | `InvocationEvidence` was a freely authored struct; raw facts and derived semantics were both caller-asserted. | New `RawInvocationLaunch` schema carries ONLY raw facts. New `DerivedInvocationSemantics` is computed by `deriveInvocationSemantics(raw)` and never authoritatively on disk. Negative test: `C07-02`. |
+| C07-03 | Headless / noninteractive status was caller-asserted via `invocation_mode`. | `headless` is derived: true iff argv contains `-p`/`--print` or `--mode json|rpc`. `protocol` is derived from `--mode json|rpc|text`. `session_dir` is derived from `--session-dir X` or env `PI_CODING_AGENT_SESSION_DIR`. `no_session` is derived from `--no-session`. |
+| C07-04 | Author-supplied `protocol`/`invocation_mode`/`session_dir`/`no_session`/`derived`/`artifact_sha256` on disk were trusted. | `readInvocationEvidence` refuses any of those fields on disk. Only `RawInvocationLaunch` is permitted. |
+| C07-05 | `STREAMING_EVENTS` did not require a json/rpc protocol; `-p` noninteractive qualified. | `STREAMING_EVENTS` requires `derived.protocol in {json, rpc}` AND `derived.headless === true` AND observation has >= 2 events. |
+| C07-06 | Contradiction in the artifact was not detected. | `deriveInvocationSemantics` throws on `--mode headless`, `--mode <unknown>`, and `--no-session + session_dir`. The verifier returns `EVIDENCE_PARSE_FAILED`. Negative tests: `C07-03`, `C07-04`. |
+| C07-07 | Validator did not require `invocation_evidence_sha256`. | New violation kinds `live_qualified_without_invocation_sha` and `live_halt_without_invocation_sha`. Negative test: `C07-07`. |
+| C07-08 | Cumulative post-CORRECTION07 fixture/qualification matrix must pass. | `C07-08` re-runs `verifyLiveQualificationEvidence` end-to-end on both the fixture matrix and the qualification matrix. Both PASS. |
+
+### Frame-level findings (CORRECTION07 additions)
+
+```text
+INVOCATION_ARTIFACT_MUTATION_AFTER_BIND_ACCEPTED = IMPOSSIBLE   (C07-01)
+CALLER_ASSERTED_DERIVED_FIELD_ACCEPTED           = IMPOSSIBLE   (C07-02, C07-04)
+INVOCATION_SEMANTICS_AUTHENTIC                   = TRUE         (C07-03, deriveInvocationSemantics)
+FICTIONAL_PI_LAUNCH_ACCEPTED                     = IMPOSSIBLE   (C07-05, C07-06)
+SELF_CONTRADICTORY_INVOCATION_ACCEPTED           = IMPOSSIBLE   (C07-06)
+LIVE_QUALIFIED_WITHOUT_INVOCATION_SHA            = IMPOSSIBLE   (C07-07)
+```
+
+### Total regression (post-CORRECTION07)
+
+```text
+test/run/*.test.ts        = 86  (Phase E - frozen, unchanged)
+test/metrics/*.test.ts    = 61  (LH-02 - frozen, unchanged)
+test:lh03                 = 166 (was 158; +8 C07-* axiom tests)
+test/fake-adapter.test.ts = 3
+check:trust-boundary      = 2
+check:domain-purity       = 3
+TOTAL                     = 321 tests, all passing
+```
+
+### Exit of CORRECTION07 (axiom-by-axiom)
+
+```text
+C07-01 invocation SHA bound externally on capability axis                  ENFORCED
+C07-02 on-disk invocation artifact carries ONLY raw facts                  ENFORCED
+C07-03 semantics derived from raw argv (protocol/headless/session_dir)     ENFORCED
+C07-04 author-supplied derived fields on disk refused                      ENFORCED
+C07-05 STREAMING_EVENTS requires derived.protocol in {json, rpc}           ENFORCED
+C07-06 contradiction oracles refuse --mode headless, --no-session + dir    ENFORCED
+C07-07 validator refuses LIVE_QUALIFIED without invocation SHA             ENFORCED
+C07-08 cumulative post-C07 fixture/qualification matrix passes verifier    PROVEN
+```
+
+### Verdict after CORRECTION07
+
+```text
+LH_03_DETERMINISTIC_SUBSTRATE = GREEN_FROZEN
+LH_03 = INVARIANT_BINDING_AUTHENTIC
+PI_LIVE = HALT_CREDENTIALS
+CLINE_LIVE = HALT_NOT_INSTALLED
+READY_FOR_LH_04 = NO (halt disposition remains first-class
+                     evidence; LH-04 was NOT started in
+                     this correction)
+
+The reviewer-supplied FRAME-LEVEL FINDINGS:
+
+FORGED_HASH_ACCEPTED                          = IMPOSSIBLE   (C04-02, C04-HASH01, C04-HASH02, C04-HASH03, C04-ACCEPTANCE01)
+ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED       = IMPOSSIBLE   (C04-02, C04-ACCEPTANCE02)
+CWD_MATCH_IMPLIES_ISOLATED_DATA_DIR           = FALSE        (C04-04 + C05-01, C04-ISOLATED01, C05-01a)
+MACHINE_LOCAL_ABSOLUTE_PATH_REQUIRED          = FALSE        (C04-03, C05-03, C04-PATH01, C04-PATH02, C04-ACCEPTANCE04, C05-03a, C05-03b)
+LIVE_QUALIFIED_WITHOUT_REVERIFIABLE_ARTIFACT  = IMPOSSIBLE   (C04-01, C04-ACCEPTANCE05)
+FORGED_HALT_REASON_ACCEPTED                   = IMPOSSIBLE   (C05-02)
+ABSOLUTE_INSIDE_ROOT_PATH_ACCEPTED            = IMPOSSIBLE   (C05-03, C05-03a, C05-03b)
+CALLER_ASSERTED_EXPECTED_ACCEPTED             = IMPOSSIBLE   (C06-02, C06-03, C06-04, C06-05, C06-08)
+INVOCATION_PREMISE_RECOVERABLE                = TRUE         (C06-01, typed schema)
+LIVE_QUALIFIED_WITHOUT_INVOCATION             = IMPOSSIBLE   (C06-06, C06-07)
+INVOCATION_ARTIFACT_MUTATION_AFTER_BIND_ACCEPTED = IMPOSSIBLE (C07-01)
+CALLER_ASSERTED_DERIVED_FIELD_ACCEPTED        = IMPOSSIBLE   (C07-02, C07-04)
+INVOCATION_SEMANTICS_AUTHENTIC                = TRUE         (C07-03)
+FICTIONAL_PI_LAUNCH_ACCEPTED                  = IMPOSSIBLE   (C07-05, C07-06)
+SELF_CONTRADICTORY_INVOCATION_ACCEPTED        = IMPOSSIBLE   (C07-06)
+LIVE_QUALIFIED_WITHOUT_INVOCATION_SHA         = IMPOSSIBLE   (C07-07)
+```
+
 CLOSED.

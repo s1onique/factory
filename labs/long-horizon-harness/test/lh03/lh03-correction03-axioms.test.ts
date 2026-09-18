@@ -54,6 +54,9 @@ import {
   buildProbeEvidence,
 } from "../../src/adapter-common/evidence-reader.js";
 import {
+  deriveInvocationSemantics,
+} from "../../src/adapter-common/invocation-evidence.js";
+import {
   verifyLiveQualificationEvidence,
 } from "../../src/adapter-common/evidence-verifier.js";
 import { redactJsonRecord, RedactionError } from "../../src/redaction/secret-redaction.js";
@@ -70,15 +73,26 @@ import {
 } from "./_invocation_helper.js";
 
 /**
- * CORRECTION06 helper: inject invocation evidence into
+ * CORRECTION07 helper: inject invocation evidence into
  * a defaultPiCapabilities argument bundle.
+ *
+ * The canonical fixture loaded here is the JSONL one
+ * (--mode json): its derived `protocol = json` and
+ * `headless = true` cover JSONL + EXPLICIT_CWD without
+ * bumping STREAMING_EVENTS / HEADLESS to LIVE_QUALIFIED
+ * (STREAMING_EVENTS additionally requires >=2 events
+ * which the single-event session header does not
+ * satisfy; HEADLESS would actually qualify here, so
+ * individual tests must pass an argument bundle without
+ * a `-p` headless trigger when they expect HEADLESS to
+ * be LIVE_UNQUALIFIED).
  */
 function withInvocation(
   base: Record<string, unknown>,
 ): Parameters<typeof defaultPiCapabilities>[2] {
   const inv = loadInvocationFixture({
     repoRoot: REPO_ROOT,
-    capability: "HEADLESS",
+    capability: "JSONL",
   });
   return {
     ...(base as Parameters<typeof defaultPiCapabilities>[2]),
@@ -92,19 +106,21 @@ function withInvocation(
  * ------------------------------------------------------------------ */
 
 test("C03-01a: defaultPiCapabilities binds typed probe_evidence (not just a path) to LIVE_QUALIFIED axes", () => {
-  // CORRECTION04: HEADLESS/STREAMING_EVENTS/ISOLATED_DATA_DIR
-  // require additional evidence (invocation_mode,
-  // --session-dir). Without that evidence they are
-  // LIVE_UNQUALIFIED, not LIVE_QUALIFIED. JSONL is
-  // LIVE_QUALIFIED (canonical Factory name for the
-  // upstream JSON Event Stream Mode) and EXPLICIT_CWD
-  // is LIVE_QUALIFIED (cwd match).
+  // CORRECTION04 / CORRECTION07: HEADLESS becomes
+  // LIVE_QUALIFIED iff the derived `headless` flag is
+  // true (the canonical JSONL fixture uses `--mode
+  // json`, which derives `headless=true`). STREAMING_EVENTS
+  // additionally requires >=2 events which the
+  // single-event session header does not satisfy.
+  // ISOLATED_DATA_DIR additionally requires
+  // `--session-dir` (the canonical JSONL fixture does
+  // not have one).
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
   }));
-  for (const k of ["JSONL", "EXPLICIT_CWD"] as const) {
+  for (const k of ["JSONL", "EXPLICIT_CWD", "HEADLESS"] as const) {
     const ev = caps.capability_axes[k].probe_evidence;
     assert.ok(ev !== null, `${k} must have probe_evidence`);
     assert.equal(ev.capability, k, "probe_evidence.capability must equal axis key");
@@ -115,9 +131,9 @@ test("C03-01a: defaultPiCapabilities binds typed probe_evidence (not just a path
       `${k} expected === observed`,
     );
   }
-  // HEADLESS / STREAMING_EVENTS / ISOLATED_DATA_DIR are
+  // STREAMING_EVENTS / ISOLATED_DATA_DIR are
   // SUPPORTED + LIVE_UNQUALIFIED in this campaign.
-  for (const k of ["HEADLESS", "STREAMING_EVENTS", "ISOLATED_DATA_DIR"] as const) {
+  for (const k of ["STREAMING_EVENTS", "ISOLATED_DATA_DIR"] as const) {
     const axis = caps.capability_axes[k];
     assert.equal(axis.live_qualification, "LIVE_UNQUALIFIED", `${k} must be LIVE_UNQUALIFIED`);
     assert.equal(axis.probe_evidence, null, `${k} must have probe_evidence=null`);
@@ -144,6 +160,7 @@ test("C03-01b: validateLiveQualification rejects LIVE_QUALIFIED with disposition
         }),
         probe_evidence_path: FIXTURE_SESSION,
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -184,6 +201,7 @@ test("C03-01c: validateLiveQualification rejects LIVE_QUALIFIED with probe_kind 
         },
         probe_evidence_path: null,
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -218,6 +236,7 @@ test("C03-01d: validateLiveQualification rejects probe_evidence.capability misma
         }),
         probe_evidence_path: FIXTURE_SESSION,
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -252,6 +271,7 @@ test("C03-01e: validateLiveQualification rejects probe_evidence_path vs probe_ev
         }),
         probe_evidence_path: "/some/other/path.jsonl",
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -341,21 +361,17 @@ test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION
     null,
     "ISOLATED_DATA_DIR must have probe_evidence=null without isolated_session_dir",
   );
-  // CORRECTION05 C05-01 + CORRECTION06 C06-05:
-  // passing a caller-supplied isolated_session_dir that
-  // does NOT match the invocation-recorded session_dir
-  // is still LIVE_UNQUALIFIED — the artifact must live
-  // under the invocation-recorded session-storage
-  // directory. The caller-supplied isolated_session_dir
-  // argument is no longer authoritative on its own.
+  // CORRECTION05 C05-01 + CORRECTION07 C07-03: forging
+  // an argv `--session-dir` that does NOT contain the
+  // artifact path still produces LIVE_UNQUALIFIED. The
+  // session_dir must mechanically contain the artifact.
   const baseForCwdOnly = withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-    isolated_session_dir: "/private/tmp/pi-live",
   }) as Record<string, unknown>;
-  const invCwdOnly = baseForCwdOnly.invocation_evidence as {
-    session_dir: string | null;
+  const inv0 = baseForCwdOnly.invocation_evidence as {
+    argv: readonly string[];
   };
   const cwdOnly = defaultPiCapabilities(
     QUALIFIED_PI_IDENTITY,
@@ -364,24 +380,54 @@ test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION
       ...(baseForCwdOnly as Parameters<typeof defaultPiCapabilities>[2]),
       invocation_evidence: {
         ...(baseForCwdOnly.invocation_evidence as Record<string, unknown>),
-        session_dir: "/private/tmp/pi-live",
+        argv: [...inv0.argv, "--session-dir", "/private/tmp/pi-live"],
       },
     } as unknown as Parameters<typeof defaultPiCapabilities>[2],
   );
-  void invCwdOnly;
   assert.equal(
     cwdOnly.capability_axes.ISOLATED_DATA_DIR.live_qualification,
     "LIVE_UNQUALIFIED",
-    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when invocation-recorded session_dir does not contain artifact path (C06-05)",
+    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when derived.session_dir does not contain artifact path (CORRECTION07 C07-03)",
   );
   // The artifact_path lives under the parent of the
-  // fixture directory; with that as isolated_session_dir
-  // the axis qualifies.
-  const isoCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
+  // fixture directory; with that as `--session-dir` argv
+  // entry the axis qualifies.
+  const baseForIso = withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
-    isolated_session_dir: "test/fixtures/harnesses/pi/pi-v0_85_1",
-  }));
+  }) as Record<string, unknown>;
+  const inv1 = baseForIso.invocation_evidence as {
+    argv: readonly string[];
+    capability: string;
+    executable: string;
+    spawn_cwd: string;
+    env_subset: Readonly<Record<string, string>>;
+    recorded_at: string;
+  };
+  // CORRECTION07: forge a proper derived view by
+  // re-running `deriveInvocationSemantics` on the
+  // forged argv.
+  const forgedIso: Record<string, unknown> = {
+    ...(baseForIso.invocation_evidence as Record<string, unknown>),
+    argv: [...inv1.argv, "--session-dir", "test/fixtures/harnesses/pi/pi-v0_85_1"],
+  };
+  const forgedIsoDerived = deriveInvocationSemantics({
+    capability: inv1.capability,
+    executable: inv1.executable,
+    argv: forgedIso.argv as string[],
+    spawn_cwd: inv1.spawn_cwd,
+    env_subset: inv1.env_subset,
+    recorded_at: inv1.recorded_at,
+  });
+  forgedIso["derived"] = forgedIsoDerived;
+  const isoCaps = defaultPiCapabilities(
+    QUALIFIED_PI_IDENTITY,
+    0,
+    {
+      ...(baseForIso as Parameters<typeof defaultPiCapabilities>[2]),
+      invocation_evidence: forgedIso,
+    } as unknown as Parameters<typeof defaultPiCapabilities>[2],
+  );
   assert.equal(
     isoCaps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
     "LIVE_QUALIFIED",
@@ -552,6 +598,7 @@ test("C03-05c: artifact hash drift fails closed (CORRECTION04 verifyLiveQualific
         }),
         probe_evidence_path: FIXTURE_SESSION,
         invocation_evidence_path: null,
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {

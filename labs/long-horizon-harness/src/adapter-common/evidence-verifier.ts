@@ -376,11 +376,23 @@ export function evaluateCapabilityOracle(args: {
     case "JSONL":
       return observed === "session";
     case "HEADLESS":
-      return (
-        invocation.invocation_mode === "headless" && observed === "session"
-      );
+      // CORRECTION07 C07-03: headless is derived from raw
+      // argv/env, not caller-asserted. Pi's `--mode json`,
+      // `--mode rpc`, and `-p/--print` all produce a
+      // headless (noninteractive) launch.
+      return invocation.derived.headless && observed === "session";
     case "STREAMING_EVENTS": {
-      if (invocation.invocation_mode !== "headless") return false;
+      // CORRECTION07: headless is now a derived bool.
+      if (!invocation.derived.headless) return false;
+      // CORRECTION07 C07-03: streaming requires a json or
+      // rpc protocol. Plain `-p/--print` noninteractive
+      // without a protocol does not stream.
+      if (
+        invocation.derived.protocol !== "json" &&
+        invocation.derived.protocol !== "rpc"
+      ) {
+        return false;
+      }
       const lines = readJsonlAllLines(observationArtifactAbsolute);
       if (lines === null) return false;
       if (lines.length < 2) return false;
@@ -389,9 +401,13 @@ export function evaluateCapabilityOracle(args: {
     case "EXPLICIT_CWD":
       return invocation.spawn_cwd === observed;
     case "ISOLATED_DATA_DIR":
-      if (invocation.session_dir === null) return false;
-      if (invocation.no_session) return false;
-      return isUnder(observed, invocation.session_dir);
+      // CORRECTION07: session_dir + no_session are derived
+      // from argv/env, not caller-asserted. If a record
+      // contradicts itself (--no-session + session_dir),
+      // the derivation has already failed closed.
+      if (invocation.derived.session_dir === null) return false;
+      if (invocation.derived.no_session) return false;
+      return isUnder(observed, invocation.derived.session_dir);
     case "CANCELLATION": {
       if (
         parsedObservation !== null &&
@@ -617,48 +633,41 @@ export function verifyLiveQualificationEvidence(
       });
       continue;
     }
-    let invocationSha: string;
-    try {
-      invocationSha = recomputeSha256(invocationAbsolute);
-    } catch (err) {
-      errors.push({
-        kind: "EVIDENCE_ARTIFACT_MISSING",
-        key: k,
-        message: `Failed to read invocation artifact '${invocationAbsolute}': ${(err as Error).message}`,
-        artifact_path: invocationAbsolute,
-      });
-      continue;
-    }
+    // CORRECTION07: the invocation artifact's SHA is
+    // computed by readInvocationEvidence itself from the
+    // raw on-disk bytes (no separate recomputeSha256 call
+    // needed here).
     const invocationRel = relative(pathResolve(repoRoot), invocationAbsolute);
     const invocation = readInvocationEvidence(invocationRel, repoRoot);
     if (invocation === null) {
       errors.push({
         kind: "EVIDENCE_PARSE_FAILED",
         key: k,
-        message: `Invocation artifact at '${invocationRel}' is missing or malformed.`,
+        message: `Invocation artifact at '${invocationRel}' is missing or malformed (CORRECTION07).`,
         artifact_path: invocationAbsolute,
       });
       continue;
     }
+    // CORRECTION07 C07-01: the SHA256 of the invocation
+    // bytes is bound externally on the capability axis
+    // (`axis.invocation_evidence_sha256`). The SHA must
+    // live OUTSIDE the artifact being hashed, so a
+    // mutated artifact cannot self-validate. The
+    // recorded sha in the artifact itself is no longer
+    // consulted (the on-disk record no longer carries
+    // that field).
     if (
-      typeof invocation.artifact_sha256 === "string" &&
-      invocation.artifact_sha256 !== "" &&
-      invocation.artifact_sha256 !== invocationSha
+      axis.invocation_evidence_sha256 !== null &&
+      axis.invocation_evidence_sha256 !== "" &&
+      axis.invocation_evidence_sha256 !== invocation.artifact_sha256
     ) {
-      // The recorded sha (if non-empty) must agree with
-      // the on-disk bytes' sha. The on-disk artifact
-      // does not embed the sha field (see
-      // writeInvocationEvidence), so this check is
-      // normally a no-op; if a malicious adapter writes
-      // a sha field that disagrees with the bytes, the
-      // verifier refuses the document.
       errors.push({
         kind: "EVIDENCE_HASH_MISMATCH",
         key: k,
-        message: `Invocation artifact hash drift on '${invocationAbsolute}'.`,
+        message: `Invocation artifact hash drift on '${invocationAbsolute}' (CORRECTION07 C07-01).`,
         artifact_path: invocationAbsolute,
-        recorded_sha256: invocation.artifact_sha256,
-        recomputed_sha256: invocationSha,
+        recorded_sha256: axis.invocation_evidence_sha256,
+        recomputed_sha256: invocation.artifact_sha256,
       });
       continue;
     }
@@ -727,7 +736,7 @@ export function verifyLiveQualificationEvidence(
         errors.push({
           kind: "EVIDENCE_ORACLE_FAILED",
           key: k,
-          message: `Capability ${k} is LIVE_QUALIFIED but invocation-aware oracle recomputation says FAIL (recorded expected='${ev.evidence_relation.expected}', observed='${observed}', recorded disposition='${ev.disposition}', invocation_mode='${invocation.invocation_mode}', session_dir=${invocation.session_dir}).`,
+          message: `Capability ${k} is LIVE_QUALIFIED but invocation-aware oracle recomputation says FAIL (recorded expected='${ev.evidence_relation.expected}', observed='${observed}', recorded disposition='${ev.disposition}', derived.headless='${invocation.derived.headless}', derived.protocol='${invocation.derived.protocol}', derived.session_dir=${invocation.derived.session_dir}).`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,
@@ -755,7 +764,7 @@ export function verifyLiveQualificationEvidence(
         errors.push({
           kind: "EVIDENCE_OBSERVATION_MISMATCH",
           key: k,
-          message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the recomputed observed halt reason '${observed}' (invocation-aware oracle rejected; invocation_mode='${invocation.invocation_mode}').`,
+          message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the recomputed observed halt reason '${observed}' (invocation-aware oracle rejected; derived.headless='${invocation.derived.headless}').`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,

@@ -151,6 +151,19 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // specific oracle. This is the trust boundary for
     // record-once + re-verify-on-demand semantics.
     "src/adapter-common/evidence-verifier.ts",
+    // LH-03 CORRECTION07: the typed invocation-evidence
+    // reader (C07-01..C07-07). Re-parses the on-disk
+    // invocation artifact to recover raw launch facts
+    // and to verify that the artifact carries ONLY
+    // raw facts (authoritative derived fields on disk
+    // are refused). This is the trust boundary for
+    // raw-bytes -> typed `InvocationEvidence`
+    // conversion; candidate-specific adapters MUST
+    // route their launch-tuple assertions through it.
+    // JSON.parse here is bounded to the closed-world
+    // raw-launch schema that the validator inspects
+    // downstream.
+    "src/adapter-common/invocation-evidence.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

@@ -1609,8 +1609,17 @@ export function defaultPiCapabilities(
   // build the evidence record.
   const _requestedCwd = evidence.requested_cwd ?? null;
   void _requestedCwd;
-  const isolatedDir = evidence.isolated_session_dir ?? null;
-  const invocationMode = evidence.invocation_mode ?? null;
+  const _legacyIsolatedDir = evidence.isolated_session_dir ?? null;
+  void _legacyIsolatedDir;
+  // CORRECTION07: `invocation_mode` is no longer a
+  // caller-supplied parameter. The headless / non-
+  // interactive status is derived from argv/env by
+  // `deriveInvocationSemantics`. The legacy
+  // `evidence.invocation_mode` argument is kept for
+  // backwards compatibility with test callers but is
+  // intentionally unused.
+  const _legacyInvocationMode = evidence.invocation_mode ?? null;
+  void _legacyInvocationMode;
   // CORRECTION06 C06-06: durable invocation evidence is
   // required for every LIVE_QUALIFIED axis. When the
   // adapter is built from a fixture / unit test, the
@@ -1621,19 +1630,23 @@ export function defaultPiCapabilities(
   // passes the parsed object here.
   const invocationEvidence = evidence.invocation_evidence ?? null;
   const invocationEvidencePath = evidence.invocation_evidence_path ?? null;
-  // CORRECTION06 C06-02: derive expected values from
-  // the invocation artifact (NOT from the caller-supplied
-  // requested_cwd / isolated_session_dir /
-  // invocation_mode arguments). The recorded
-  // `evidence_relation.expected` is still set, but the
-  // verifier recomputes it from the artifact and
-  // refuses any document where the two disagree.
+  // CORRECTION07: derivation of expected values lives
+  // inside the artifact itself
+  // (`invocation.derived.*`). The pi-adapter no longer
+  // reaches into `invocation.invocation_mode` etc. —
+  // those fields no longer exist on the typed artifact.
+  // Spawn cwd, by contrast, is a raw fact the artifact
+  // carries authoritatively.
   const invocationExpectedCwd =
     invocationEvidence !== null ? invocationEvidence.spawn_cwd : null;
   const invocationSessionDir =
-    invocationEvidence !== null ? invocationEvidence.session_dir : null;
+    invocationEvidence !== null ? invocationEvidence.derived.session_dir : null;
   const invocationNoSession =
-    invocationEvidence !== null ? invocationEvidence.no_session : false;
+    invocationEvidence !== null ? invocationEvidence.derived.no_session : false;
+  const invocationHeadless =
+    invocationEvidence !== null ? invocationEvidence.derived.headless : false;
+  const invocationSha256 =
+    invocationEvidence !== null ? invocationEvidence.artifact_sha256 : null;
   type AxisEntry = {
     readonly lq: LiveQualificationState;
     readonly probe: CapabilityProbeEvidence | null;
@@ -1676,8 +1689,11 @@ export function defaultPiCapabilities(
     return child.startsWith(parent + "/");
   }
   function isolatedDataDirEntry(): AxisEntry {
+    // CORRECTION07: session_dir is now derived from
+    // raw argv/env, not caller-supplied
+    // `isolated_session_dir`. The caller-supplied
+    // `isolatedDir` argument is no longer authoritative.
     if (
-      isolatedDir === null ||
       observedSession === null ||
       invocationSessionDir === null
     ) {
@@ -1721,14 +1737,13 @@ export function defaultPiCapabilities(
   // single-event session header is not sufficient
   // evidence of streaming behavior.
   const headlessQualified =
-    invocationMode === "headless" &&
-    invocationEvidence !== null &&
-    invocationEvidence.invocation_mode === "headless" &&
+    invocationHeadless &&
     observedSession !== null;
   const streamingQualified =
-    invocationMode === "headless" &&
+    invocationHeadless &&
     invocationEvidence !== null &&
-    invocationEvidence.invocation_mode === "headless" &&
+    (invocationEvidence.derived.protocol === "json" ||
+      invocationEvidence.derived.protocol === "rpc") &&
     observedSession !== null &&
     // Read the observation artifact and count lines.
     // If there are >= 2 events, streaming qualifies.
@@ -1849,12 +1864,18 @@ export function defaultPiCapabilities(
     // test tmpdir and pass the parsed object via the
     // `invocation_evidence` argument.
     let invocationEvidencePathForAxis: string | null = null;
+    let invocationEvidenceShaForAxis: string | null = null;
     if (
       (entry.lq === "LIVE_QUALIFIED" || entry.lq === "LIVE_HALT") &&
       invocationEvidence !== null &&
       invocationEvidencePath !== null
     ) {
       invocationEvidencePathForAxis = invocationEvidencePath;
+      // CORRECTION07 C07-01: bind the invocation SHA on
+      // the axis. The verifier recomputes the SHA from
+      // the on-disk bytes and compares against this
+      // value.
+      invocationEvidenceShaForAxis = invocationSha256;
     }
     axes[k] = {
       harness_capability: capabilities[k],
@@ -1862,6 +1883,7 @@ export function defaultPiCapabilities(
       probe_evidence: entry.probe,
       probe_evidence_path: entry.probe?.artifact_path ?? null,
       invocation_evidence_path: invocationEvidencePathForAxis,
+      invocation_evidence_sha256: invocationEvidenceShaForAxis,
     };
   }
   if (Object.keys(capabilities).length !== Object.keys(empty.capabilities).length) {

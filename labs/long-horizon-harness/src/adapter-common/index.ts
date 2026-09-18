@@ -46,11 +46,14 @@ export {
 export {
   writeInvocationEvidence,
   readInvocationEvidence,
+  deriveInvocationSemantics,
   isInvocationProtocol,
-  isInvocationMode,
+  isLaunchForm,
   INVOCATION_PROTOCOLS,
-  INVOCATION_MODES,
+  LAUNCH_FORMS,
   type InvocationEvidence,
+  type RawInvocationLaunch,
   type InvocationProtocol,
-  type InvocationMode,
+  type LaunchForm,
+  type DerivedInvocationSemantics,
 } from "./invocation-evidence.js";

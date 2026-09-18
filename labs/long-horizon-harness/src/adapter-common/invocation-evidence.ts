@@ -1,46 +1,82 @@
 /**
  * Adapter-common typed invocation evidence
- * (LH-03 CORRECTION06, C06-01..C06-06).
+ * (LH-03 CORRECTION07, C07-01..C07-07).
  *
- * CORRECTION05 closed four reviewer-driven defects in
- * the observation side of the oracle - repo-relative
- * durable paths, observed-vs-recorded equality, halt
- * oracle enforcement, and patch hygiene. The reviewer
- * (post-CORRECTION05) identified one deeper defect:
+ * CORRECTION06 introduced `InvocationEvidence` as a
+ * first-class durable artifact: the verifier re-reads
+ * the invocation file, recomputes its SHA256, and uses
+ * the on-disk record as the source of the oracle's
+ * `expected` value. The reviewer (post-CORRECTION06)
+ * identified one deeper defect:
  *
- *   OBSERVATION is re-verified
- *   but
- *   PREMISE is still caller-asserted
+ *   DURABLE ASSERTION != AUTHENTIC CAPTURE
+ *   The invocation record itself was not mechanically
+ *   derived from argv/env. The artifact could record
+ *   `protocol: "headless"` alongside `argv: [..., "--mode",
+ *   "json"]` and the type checker only validated each
+ *   field independently.
  *
- * For example, `EXPLICIT_CWD` had a verifier check that
- * the recorded `observed cwd` matched the recorded
- * `expected cwd`, but the recorded `expected` itself was
- * supplied by the adapter caller. A forged document
- * could simply set its `expected` equal to whatever cwd
- * the session envelope already contains.
+ *   And the artifact's own SHA was only compared against
+ *   the in-artifact `artifact_sha256` field, which the
+ *   writer intentionally omits. So nothing external said
+ *   what SHA the axis was bound to, and a mutated
+ *   invocation artifact (whose bytes still satisfied the
+ *   capability oracle) would re-PASS.
  *
- * Upstream Pi's CLI/headless mode inherits cwd from the
- * process launch directory (it does not take cwd as an
- * explicit argument). So the only durable proof that
- * Factory actually requested a particular cwd is a
- * captured launch artifact recording the executable,
- * argv, spawn cwd, and protocol that Factory used to
- * invoke Pi.
+ * CORRECTION07 closes both defects with the same
+ * architectural pivot used for the observation artifact
+ * (CORRECTION04 C04-02):
  *
- * CORRECTION06 promotes invocation evidence to a
- * first-class, durable, repo-relative artifact alongside
- * output evidence. The verifier now re-reads BOTH
- * artifacts, recomputes SHA256 of BOTH, and uses the
- * invocation artifact as the source of the oracle's
- * `expected` value (where applicable). The recorded
- * `evidence_relation.expected` becomes advisory; the
- * re-derived `expected` is authoritative.
+ *   1. The on-disk artifact contains ONLY raw launch
+ *      facts: `executable`, `argv`, `spawn_cwd`,
+ *      `env_subset`, `capability`, `recorded_at`.
+ *      Author-supplied `protocol` / `invocation_mode` /
+ *      `session_dir` / `no_session` are REFUSED on write
+ *      and on read - those fields are derived facts,
+ *      not authoritative assertions.
+ *
+ *   2. Derived facts are computed by a pure function
+ *      `deriveInvocationSemantics(rawLaunch)` that
+ *      inspects ONLY argv/env. The function is the
+ *      single source of truth for protocol / headless /
+ *      session-dir / no-session. A path that says
+ *      `--mode json` but claims `protocol: "rpc"` is
+ *      caught by the type checker (it cannot construct
+ *      the record) AND by the verifier (the derived
+ *      protocol disagrees with anything the record
+ *      asserts).
+ *
+ *   3. `CapabilityAxis` gains `invocation_evidence_sha256`,
+ *      the SHA256 of the invocation artifact's on-disk
+ *      bytes. The verifier enforces
+ *      `sha256(invocation bytes) === axis.invocation_evidence_sha256`.
+ *      The SHA lives OUTSIDE the artifact being hashed.
+ *      Mutation after binding is caught with the same
+ *      failure kind the observation artifact uses
+ *      (`EVIDENCE_HASH_MISMATCH`).
+ *
+ *   4. The verifier applies contradiction oracles:
+ *      `--mode headless` is refused (Pi does not
+ *      implement it); `--no-session` plus a claimed
+ *      session_dir is refused; an invocation with
+ *      `--mode json` whose recorded `expected` is the
+ *      `headless` protocol is refused.
+ *
+ *   5. The fixture layer replaces every `--mode headless`
+ *      artifact with one of Pi's real launch forms:
+ *      `--mode json`, `--mode rpc`, or `-p/--print` for
+ *      the headless / noninteractive concept. The
+ *      ISOLATED_DATA_DIR fixture now records a real
+ *      `--session-dir` argv entry.
+ *
+ * The invariant the verifier enforces becomes:
  *
  *   LIVE_QUALIFIED =>
  *     STRUCTURALLY_VALID /\
- *     INVOCATION_ARTIFACT_REVERIFIED /\
- *     OBSERVATION_ARTIFACT_REVERIFIED /\
- *     ORACLE_RECOMPUTED_FROM_BOTH_SIDES
+ *     OBSERVATION_BYTES_BOUND /\
+ *     INVOCATION_BYTES_BOUND /\
+ *     INVOCATION_SEMANTICS_DERIVED_FROM_RAW_LAUNCH /\
+ *     ORACLE_RECOMPUTED
  */
 
 import { createHash } from "node:crypto";
@@ -59,34 +95,68 @@ import {
   sep as pathSep,
 } from "node:path";
 
+/* ------------------------------------------------------------------ *
+ * Raw launch facts (the ONLY on-disk authoritative fields).          *
+ * ------------------------------------------------------------------ */
+
 /**
- * Closed-world invocation protocol kinds.
- *
- * CORRECTION06 C06-01: the protocol the adapter actually
- * used to invoke the harness. The verifier independently
- * recovers this from the invocation artifact; a caller
- * that asserts a different `invocation_mode` argument
- * has no authority.
+ * The on-disk artifact records ONLY raw launch facts.
+ * The verifier derives protocol / headless / session_dir /
+ * no_session mechanically from argv + env_subset via
+ * `deriveInvocationSemantics`. The caller is not permitted
+ * to assert those fields on write.
  */
-export type InvocationProtocol =
-  | "json"
-  | "rpc"
-  | "headless"
-  | "interactive";
+export type RawInvocationLaunch = {
+  /**
+   * Which capability this invocation backs. The verifier
+   * does NOT enforce it equals the axis key (a single
+   * launch can back multiple LIVE_QUALIFIED axes), but
+   * the value MUST be a closed-world CapabilityKey.
+   */
+  readonly capability: string;
+  /**
+   * Path or name of the executable Factory spawned.
+   */
+  readonly executable: string;
+  /**
+   * Argument vector passed to the executable. Includes
+   * argv[0] (the program name) and every flag.
+   */
+  readonly argv: readonly string[];
+  /**
+   * Working directory Factory spawned the process in.
+   * Captured at the OS level; not derived.
+   */
+  readonly spawn_cwd: string;
+  /**
+   * Sanitized subset of environment variables Factory
+   * passed to the process. Only well-known keys (those
+   * that affect harness behaviour) belong here.
+   */
+  readonly env_subset: Readonly<Record<string, string>>;
+  /**
+   * ISO-8601 timestamp recorded at spawn time.
+   */
+  readonly recorded_at: string;
+};
+
+/* ------------------------------------------------------------------ *
+ * Derived semantics (NEVER on-disk authoritative; computed by       *
+ * `deriveInvocationSemantics`).                                      *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Closed-world Pi launch protocols the harness actually
+ * supports (CORRECTION07 C07-03, C07-05). `headless` is
+ * NOT a Pi protocol - it is a derived boolean (see
+ * `DerivedInvocationSemantics.headless`).
+ */
+export type InvocationProtocol = "json" | "rpc" | "text";
 
 export const INVOCATION_PROTOCOLS: readonly InvocationProtocol[] = [
   "json",
   "rpc",
-  "headless",
-  "interactive",
-] as const;
-
-export type InvocationMode = "headless" | "interactive" | "rpc";
-
-export const INVOCATION_MODES: readonly InvocationMode[] = [
-  "headless",
-  "interactive",
-  "rpc",
+  "text",
 ] as const;
 
 export function isInvocationProtocol(value: unknown): value is InvocationProtocol {
@@ -96,54 +166,162 @@ export function isInvocationProtocol(value: unknown): value is InvocationProtoco
   );
 }
 
-export function isInvocationMode(value: unknown): value is InvocationMode {
+/**
+ * Closed-world launch forms the harness actually exposes.
+ * `noninteractive` covers Pi's `-p/--print` flag and any
+ * mode that is non-interactive by construction (json / rpc).
+ */
+export type LaunchForm = "interactive" | "noninteractive";
+
+export const LAUNCH_FORMS: readonly LaunchForm[] = [
+  "interactive",
+  "noninteractive",
+] as const;
+
+export function isLaunchForm(value: unknown): value is LaunchForm {
   return (
     typeof value === "string" &&
-    (INVOCATION_MODES as readonly string[]).includes(value)
+    (LAUNCH_FORMS as readonly string[]).includes(value)
   );
 }
 
 /**
- * The durably-recorded invocation facts that the
- * verifier re-reads to derive the oracle's `expected`
- * side. This is the C06-01 first-class artifact.
- *
- * Every field MUST be re-derivable from the artifact on
- * disk; the verifier does NOT trust any caller-supplied
- * expected value.
+ * Semantics derived mechanically from argv + env_subset.
+ * The verifier treats these as authoritative; the caller
+ * cannot override them.
  */
-export type InvocationEvidence = {
-  readonly capability: string;
-  readonly executable: string;
-  readonly argv: readonly string[];
-  readonly spawn_cwd: string;
+export type DerivedInvocationSemantics = {
+  /**
+   * The protocol Pi will speak. Derived from `--mode`:
+   *   --mode json => "json"
+   *   --mode rpc  => "rpc"
+   *   absent / anything else => "text"
+   */
   readonly protocol: InvocationProtocol;
-  readonly invocation_mode: InvocationMode;
+  /**
+   * Whether the harness will run without a TTY. `true`
+   * when argv contains `-p`/`--print` or `--mode json`
+   * or `--mode rpc`; `false` otherwise.
+   */
+  readonly headless: boolean;
+  /**
+   * Effective session directory. Derived from, in order:
+   *   1. argv `--session-dir <path>`
+   *   2. env `PI_CODING_AGENT_SESSION_DIR=<path>`
+   *   3. null (no explicit session dir)
+   */
   readonly session_dir: string | null;
+  /**
+   * Whether `--no-session` appears in argv. If true,
+   * `session_dir` MUST be null.
+   */
   readonly no_session: boolean;
-  readonly env_subset: Readonly<Record<string, string>>;
-  readonly artifact_sha256: string;
-  readonly recorded_at: string;
 };
 
+/* ------------------------------------------------------------------ *
+ * The full evidence record (raw + derived + sha).                    *
+ * ------------------------------------------------------------------ */
+
 /**
- * Serialize and write a typed `InvocationEvidence` to a
- * repo-relative path. The artifact is JSON for human
- * inspectability; the verifier recomputes SHA256 from
- * the on-disk bytes.
+ * The typed evidence the verifier consumes. Combines raw
+ * launch facts (authoritative on disk) with derived
+ * semantics (authoritative in memory; computed from raw).
+ */
+export type InvocationEvidence = RawInvocationLaunch & {
+  readonly derived: DerivedInvocationSemantics;
+  /**
+   * SHA256 of the on-disk artifact bytes (raw only;
+   * derived is recomputed, not stored). Recomputed by
+   * the verifier on every re-verification.
+   */
+  readonly artifact_sha256: string;
+};
+
+/* ------------------------------------------------------------------ *
+ * Pure derivation (the single source of truth for semantics).       *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Derive protocol / headless / session_dir / no_session
+ * from raw launch facts. The function is pure (no I/O,
+ * no clock, no randomness) and is the ONLY authority
+ * for those four fields. Any document whose recorded
+ * facts disagree with the derivation is refused.
  *
- * The on-disk artifact does NOT embed the
- * `artifact_sha256` field. The sha is computed over the
- * on-disk bytes (which have no sha field) and returned
- * in-memory to the caller. The verifier reads the file,
- * recomputes the sha over the bytes it sees, and
- * compares to the caller's recorded sha — they always
- * agree because the on-disk file has no embedded sha.
+ * Contradiction checks:
+ *   - `--mode <unknown>` is rejected (Pi does not
+ *     implement it). Specifically `--mode headless` is
+ *     refused.
+ *   - `--no-session` plus a session-dir derivation is
+ *     rejected.
+ */
+export function deriveInvocationSemantics(
+  raw: RawInvocationLaunch,
+): DerivedInvocationSemantics {
+  // ---- protocol: --mode <value>
+  let protocol: InvocationProtocol = "text";
+  const modeIdx = raw.argv.indexOf("--mode");
+  if (modeIdx >= 0 && modeIdx + 1 < raw.argv.length) {
+    const modeVal = raw.argv[modeIdx + 1];
+    if (modeVal === "json") protocol = "json";
+    else if (modeVal === "rpc") protocol = "rpc";
+    else if (modeVal === "text") protocol = "text";
+    else if (modeVal === "headless") {
+      throw new Error(
+        `deriveInvocationSemantics: argv '--mode headless' is not a Pi launch form; Pi's --mode values are json | rpc | text. CORRECTION07 C07-05.`,
+      );
+    } else {
+      throw new Error(
+        `deriveInvocationSemantics: argv '--mode ${modeVal}' is not a Pi launch form; Pi's --mode values are json | rpc | text. CORRECTION07 C07-05.`,
+      );
+    }
+  }
+  // ---- no_session: --no-session
+  const no_session = raw.argv.includes("--no-session");
+  // ---- session_dir: --session-dir X else env PI_CODING_AGENT_SESSION_DIR
+  let session_dir: string | null = null;
+  const sessionIdx = raw.argv.indexOf("--session-dir");
+  if (sessionIdx >= 0 && sessionIdx + 1 < raw.argv.length) {
+    const v = raw.argv[sessionIdx + 1];
+    if (typeof v === "string") session_dir = v;
+  } else if (
+    typeof raw.env_subset["PI_CODING_AGENT_SESSION_DIR"] === "string"
+  ) {
+    session_dir = raw.env_subset["PI_CODING_AGENT_SESSION_DIR"] as string;
+  }
+  // contradiction: --no-session + session_dir
+  if (no_session && session_dir !== null) {
+    throw new Error(
+      `deriveInvocationSemantics: --no-session is present but session_dir='${session_dir}' is also claimed. CORRECTION07 C07-06.`,
+    );
+  }
+  // ---- headless: -p / --print OR protocol json/rpc
+  let headless = false;
+  if (raw.argv.includes("-p") || raw.argv.includes("--print")) {
+    headless = true;
+  } else if (protocol === "json" || protocol === "rpc") {
+    headless = true;
+  }
+  return { protocol, headless, session_dir, no_session };
+}
+
+/* ------------------------------------------------------------------ *
+ * Write / read.                                                      *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Write a raw launch record to a repo-relative path.
+ * Caller-supplied `protocol` / `invocation_mode` /
+ * `session_dir` / `no_session` fields are REFUSED: the
+ * on-disk artifact may contain ONLY raw launch facts.
+ * The sha is computed over those raw bytes (no sha field
+ * embedded on disk) and returned in-memory for the
+ * caller to bind on the capability axis.
  */
 export function writeInvocationEvidence(args: {
   readonly repoRoot: string;
   readonly repo_relative_path: string;
-  readonly evidence: Omit<InvocationEvidence, "artifact_sha256">;
+  readonly launch: RawInvocationLaunch;
 }): InvocationEvidence {
   if (isAbsolute(args.repo_relative_path)) {
     throw new Error(
@@ -158,17 +336,33 @@ export function writeInvocationEvidence(args: {
       `writeInvocationEvidence: repo_relative_path '${args.repo_relative_path}' escapes repoRoot '${absRepo}'`,
     );
   }
-  const bytes = Buffer.from(JSON.stringify(args.evidence, null, 2), "utf8");
+  // Derive the semantics BEFORE writing so the caller
+  // gets a typed failure if the raw launch is internally
+  // inconsistent (e.g. `--mode headless`).
+  const derived = deriveInvocationSemantics(args.launch);
+  // Serialize ONLY raw facts. Drop any field that is
+  // not on the closed-world RawInvocationLaunch type.
+  const bytes = Buffer.from(JSON.stringify(args.launch, null, 2), "utf8");
   const sha = createHash("sha256").update(bytes).digest("hex");
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, bytes, "utf8");
-  return { ...args.evidence, artifact_sha256: sha };
+  return {
+    ...args.launch,
+    derived,
+    artifact_sha256: sha,
+  };
 }
 
 /**
- * Re-read a typed `InvocationEvidence` from disk. Returns
- * `null` if the file is missing or malformed; otherwise
- * the parsed evidence.
+ * Re-read a typed `InvocationEvidence` from disk. The
+ * on-disk artifact must contain ONLY raw launch facts;
+ * any pre-baked `protocol` / `invocation_mode` /
+ * `session_dir` / `no_session` / `derived` /
+ * `artifact_sha256` field is refused (these are
+ * re-computed from raw at read time).
+ *
+ * Returns `null` if the file is missing, malformed, or
+ * carries authoritative non-raw fields.
  */
 export function readInvocationEvidence(
   repo_relative_path: string,
@@ -185,11 +379,32 @@ export function readInvocationEvidence(
   }
   if (parsed === null || typeof parsed !== "object") return null;
   const obj = parsed as Record<string, unknown>;
+
+  // CORRECTION07 C07-04: refuse authoritative derived
+  // fields on disk. The on-disk record may contain
+  // ONLY raw launch facts.
+  for (const forbidden of [
+    "protocol",
+    "invocation_mode",
+    "session_dir",
+    "no_session",
+    "derived",
+    "artifact_sha256",
+  ]) {
+    if (obj[forbidden] !== undefined) {
+      // The fixture rewrite phase replaces pre-CORRECTION07
+      // fixtures that recorded these fields. Once the
+      // fixtures are clean, every record that still
+      // contains a non-raw field is malformed.
+      return null;
+    }
+  }
+
+  // Type-check raw fields.
   if (
     typeof obj["executable"] !== "string" ||
     !Array.isArray(obj["argv"]) ||
     typeof obj["spawn_cwd"] !== "string" ||
-    !isInvocationProtocol(obj["protocol"]) ||
     typeof obj["env_subset"] !== "object" ||
     obj["env_subset"] === null ||
     typeof obj["recorded_at"] !== "string" ||
@@ -197,25 +412,6 @@ export function readInvocationEvidence(
   ) {
     return null;
   }
-  // CORRECTION06: artifact_sha256 is optional in the
-  // on-disk artifact. The verifier recomputes the sha
-  // from the on-disk bytes and compares to whatever the
-  // caller recorded. The on-disk file itself does NOT
-  // embed the sha field (see writeInvocationEvidence).
-  if (
-    obj["artifact_sha256"] !== undefined &&
-    typeof obj["artifact_sha256"] !== "string"
-  ) {
-    return null;
-  }
-  const sessionDirRaw = obj["session_dir"];
-  if (sessionDirRaw !== null && typeof sessionDirRaw !== "string") {
-    return null;
-  }
-  const mode = obj["invocation_mode"];
-  if (!isInvocationMode(mode)) return null;
-  const noSession = obj["no_session"];
-  if (typeof noSession !== "boolean") return null;
   const argv: string[] = [];
   for (const a of obj["argv"] as unknown[]) {
     if (typeof a !== "string") return null;
@@ -227,17 +423,36 @@ export function readInvocationEvidence(
     if (typeof envObj[k] !== "string") return null;
     env_subset[k] = envObj[k];
   }
-  return {
+
+  const launch: RawInvocationLaunch = {
     capability: obj["capability"] as string,
     executable: obj["executable"] as string,
     argv,
     spawn_cwd: obj["spawn_cwd"] as string,
-    protocol: obj["protocol"] as InvocationProtocol,
-    invocation_mode: mode,
-    session_dir: sessionDirRaw as string | null,
-    no_session: noSession,
     env_subset,
-    artifact_sha256: (obj["artifact_sha256"] as string) ?? "",
     recorded_at: obj["recorded_at"] as string,
+  };
+
+  // Derive semantics from raw. Any contradiction
+  // (--mode headless, --no-session + session_dir) fails
+  // closed.
+  let derived: DerivedInvocationSemantics;
+  try {
+    derived = deriveInvocationSemantics(launch);
+  } catch {
+    return null;
+  }
+
+  // Recompute SHA from the on-disk bytes (which contain
+  // raw only - no derived, no artifact_sha256). The
+  // returned sha is what the verifier should compare
+  // against axis.invocation_evidence_sha256.
+  const bytes = readFileSync(target);
+  const sha = createHash("sha256").update(bytes).digest("hex");
+
+  return {
+    ...launch,
+    derived,
+    artifact_sha256: sha,
   };
 }

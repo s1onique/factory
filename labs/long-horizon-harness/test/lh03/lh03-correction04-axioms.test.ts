@@ -94,6 +94,9 @@ import {
 import {
   loadInvocationFixture,
 } from "./_invocation_helper.js";
+import {
+  readInvocationEvidence,
+} from "../../src/adapter-common/invocation-evidence.js";
 
 const FIXTURE_SESSION =
   "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl";
@@ -103,25 +106,39 @@ const FIXTURE_PROCESS =
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 /**
- * CORRECTION06 helper: build a `defaultPiCapabilities`
+ * CORRECTION06/07 helper: build a `defaultPiCapabilities`
  * argument bundle that includes typed invocation
- * evidence for the listed capabilities (all sharing one
- * headless invocation that points at the canonical Pi
- * fixture directory). Tests that expect LIVE_QUALIFIED
- * MUST use this helper.
+ * evidence for the listed capabilities.
+ *
+ * CORRECTION07: the canonical fixture loaded here is the
+ * JSONL one (--mode json), because its derived semantics
+ * cover every capability except ISOLATED_DATA_DIR:
+ *
+ *   protocol = json   (STREAMING_EVENTS, JSONL)
+ *   headless = true   (HEADLESS, JSONL, STREAMING_EVENTS)
+ *   spawn_cwd present (EXPLICIT_CWD)
+ *
+ * ISOLATED_DATA_DIR requires a `--session-dir` argv
+ * entry, so tests that exercise that axis call this
+ * helper with `capabilities` containing "ISOLATED_DATA_DIR"
+ * and pass `isolated_session_dir` in `base` — the helper
+ * transparently swaps in the ISOLATED_DATA_DIR fixture,
+ * whose argv records the real `--session-dir`.
  */
 function withInvocation(
   base: Record<string, unknown>,
   capabilities: readonly string[],
 ): Parameters<typeof defaultPiCapabilities>[2] {
-  // Use HEADLESS invocation as the canonical one (it
-  // carries spawn_cwd, session_dir, no_session, etc.,
-  // that EXPLICIT_CWD and ISOLATED_DATA_DIR will read).
+  // CORRECTION07: pick the right fixture. The
+  // ISOLATED_DATA_DIR fixture has the real
+  // `--session-dir` argv entry.
+  const wantsIsolated =
+    capabilities.includes("ISOLATED_DATA_DIR");
+  const fixtureKey = wantsIsolated ? "ISOLATED_DATA_DIR" : "JSONL";
   const inv = loadInvocationFixture({
     repoRoot: REPO_ROOT,
-    capability: "HEADLESS",
+    capability: fixtureKey,
   });
-  void capabilities;
   return {
     ...(base as Parameters<typeof defaultPiCapabilities>[2]),
     invocation_evidence: inv.evidence,
@@ -176,8 +193,8 @@ test("C04-HASH01: mutate artifact bytes after probe record created -> FAIL", () 
   // re-read it under the fresh checkout root.
   mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
   copyFileSync(
-    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
-    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
   );
   // Build a real document from the copies; the SHA256 is
   // recorded against the unchanged bytes. Artifact paths
@@ -188,7 +205,6 @@ test("C04-HASH01: mutate artifact bytes after probe record created -> FAIL", () 
     session_capture: sessionRel,
     cancellation_halt: cancelRel,
     requested_cwd: "/private/tmp/pi-live",
-    invocation_mode: "headless",
   }, ["JSONL", "EXPLICIT_CWD", "HEADLESS", "STREAMING_EVENTS"]));
   // Mutate the session bytes AFTER the record was made.
   writeFileSync(sessionCopy, '{"type":"session","mutated":true}\n', "utf8");
@@ -291,8 +307,8 @@ test("C04-PATH02: checkout root B (different absolute path) -> PASS", () => {
     { recursive: true },
   );
   copyFileSync(
-    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
-    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
   );
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: join(fixtureRel, "raw-artifacts/pi.session.jsonl"),
@@ -736,7 +752,7 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
   const invRelPath = "test/fixtures/invocations/JSONL.invocation.json";
   mkdirSync(join(tmp, "test/fixtures/invocations"), { recursive: true });
   copyFileSync(
-    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
     join(tmp, invRelPath),
   );
   const id = QUALIFIED_PI_IDENTITY;
@@ -758,6 +774,11 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
         }),
         probe_evidence_path: "session.jsonl",
         invocation_evidence_path: invRelPath,
+        // CORRECTION07 C07-01: explicitly null so the
+        // verifier does NOT trip the new SHA binding
+        // check (the test is about oracle
+        // recomputation, not invocation binding).
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -828,8 +849,8 @@ test("C04-ACCEPTANCE02: ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED = IMPOSSIBLE", (
   // re-read it under the fresh checkout root.
   mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
   copyFileSync(
-    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
-    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
   );
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: sessionCopy,
@@ -858,7 +879,7 @@ test("C04-ACCEPTANCE02: ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED = IMPOSSIBLE", (
           : null,
         probe_evidence_path: relativeSession,
         invocation_evidence_path:
-          "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json",
+          "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
       },
     },
   };
@@ -1025,7 +1046,7 @@ test("C05-02: forged expected halt reason fails verification", () => {
   const invRelPath = "test/fixtures/invocations/CANCELLATION.invocation.json";
   mkdirSync(join(tmp, "test/fixtures/invocations"), { recursive: true });
   copyFileSync(
-    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
     join(tmp, invRelPath),
   );
   const realSha = artifactSha256(cancelCopy);
@@ -1054,6 +1075,11 @@ test("C05-02: forged expected halt reason fails verification", () => {
         },
         probe_evidence_path: "process-result.json",
         invocation_evidence_path: invRelPath,
+        // CORRECTION07 C07-01: explicitly null so the
+        // verifier does NOT trip the new SHA binding
+        // check (the test is about forged expected,
+        // not invocation binding).
+        invocation_evidence_sha256: null,
       },
     },
     live_qualification_by_key: {
@@ -1199,19 +1225,31 @@ test("C05-05: cumulative post-CORRECTION05 fixture/qualification matrix passes v
  *   C06-01..C06-08                                                    *
  * ------------------------------------------------------------------ */
 
-test("C06-01: InvocationEvidence is a typed structure with required fields", () => {
+test("C06-01: InvocationEvidence is a typed structure with required raw fields", () => {
   const ev = loadInvocationFixture({
     repoRoot: REPO_ROOT,
-    capability: "HEADLESS",
+    capability: "JSONL",
   });
   assert.ok(ev.evidence !== undefined);
+  // CORRECTION07: only raw launch facts are
+  // authoritatively stored on the artifact. Derived
+  // semantics (protocol / headless / session_dir /
+  // no_session) are computed by the verifier from
+  // argv/env.
   assert.equal(typeof ev.evidence.executable, "string");
   assert.ok(Array.isArray(ev.evidence.argv));
   assert.equal(typeof ev.evidence.spawn_cwd, "string");
-  assert.equal(typeof ev.evidence.protocol, "string");
-  assert.equal(typeof ev.evidence.invocation_mode, "string");
-  assert.equal(typeof ev.evidence.no_session, "boolean");
   assert.ok(typeof ev.evidence.env_subset === "object");
+  assert.equal(typeof ev.evidence.recorded_at, "string");
+  // Derived semantics (still present in the typed
+  // shape, but computed).
+  assert.equal(typeof ev.evidence.derived.protocol, "string");
+  assert.equal(typeof ev.evidence.derived.headless, "boolean");
+  assert.ok(
+    ev.evidence.derived.session_dir === null ||
+      typeof ev.evidence.derived.session_dir === "string",
+  );
+  assert.equal(typeof ev.evidence.derived.no_session, "boolean");
   assert.equal(typeof ev.evidence.recorded_at, "string");
 });
 
@@ -1230,37 +1268,48 @@ test("C06-02: EXPLICIT_CWD expected value is invocation.spawn_cwd", () => {
   );
 });
 
-test("C06-03: HEADLESS is LIVE_QUALIFIED iff invocation.invocation_mode === headless", () => {
+test("C06-03: HEADLESS is LIVE_QUALIFIED iff derived.headless === true", () => {
+  // CORRECTION07: headless is derived from raw argv
+  // (--mode json / --mode rpc / -p). The JSONL fixture
+  // has --mode json, so derived.headless === true.
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
-    invocation_mode: "headless",
   }, ["HEADLESS"]));
   assert.equal(
     caps.capability_axes.HEADLESS.live_qualification,
     "LIVE_QUALIFIED",
-    "HEADLESS is LIVE_QUALIFIED iff invocation.invocation_mode === 'headless' (CORRECTION06 C06-03)",
+    "HEADLESS is LIVE_QUALIFIED iff derived.headless === true (CORRECTION07 C07-03)",
   );
 });
 
 test("C06-04: STREAMING_EVENTS requires >=2 events; fixture has 1 -> LIVE_UNQUALIFIED", () => {
+  // CORRECTION07: STREAMING_EVENTS additionally requires
+  // derived.protocol in {json, rpc}. The canonical
+  // fixture (JSONL: --mode json) satisfies the protocol
+  // requirement; the count-of-events check then
+  // disqualifies the single-event fixture.
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
-    invocation_mode: "headless",
   }, ["STREAMING_EVENTS"]));
   assert.equal(
     caps.capability_axes.STREAMING_EVENTS.live_qualification,
     "LIVE_UNQUALIFIED",
-    "STREAMING_EVENTS requires >=2 events (CORRECTION06 C06-04)",
+    "STREAMING_EVENTS requires derived.protocol in {json,rpc} AND >=2 events (CORRECTION06 C06-04 / CORRECTION07 C07-03)",
   );
 });
 
-test("C06-05: ISOLATED_DATA_DIR oracle = artifact under invocation session_dir", () => {
+test("C06-05: ISOLATED_DATA_DIR oracle = artifact under derived.session_dir", () => {
+  // CORRECTION07: session_dir is now derived from raw
+  // argv (`--session-dir X`) or env
+  // (`PI_CODING_AGENT_SESSION_DIR`). The fixture argv
+  // carries `--session-dir test/fixtures/harnesses/pi/pi-v0_85_1`,
+  // and the captured session artifact lives under that
+  // directory.
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
-    isolated_session_dir: "test/fixtures/harnesses/pi/pi-v0_85_1",
   }, ["ISOLATED_DATA_DIR"]));
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
@@ -1373,6 +1422,213 @@ test("C06-08: cumulative post-CORRECTION06 fixture/qualification matrix passes v
     assert.fail(`qualification verifier failed: ${JSON.stringify(r2.errors)}`);
   }
 });
+/* ------------------------------------------------------------------ *
+ * CORRECTION07 - invocation evidence is bound by SHA, semantics     *
+ *   derived mechanically from raw argv/env. C07-01..C07-08.          *
+ * ------------------------------------------------------------------ */
+
+test("C07-01: invocation SHA is bound externally on the capability axis", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c07-sha-"));
+  const sessionCopy = join(tmp, "session.jsonl");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
+  const cancelCopy = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+  );
+  const realSha = artifactSha256(sessionCopy);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "LIVE_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: "session.jsonl",
+          artifact_sha256: realSha,
+          expected: "session",
+          observed: "session",
+        }),
+        probe_evidence_path: "session.jsonl",
+        invocation_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+        // Forged invocation SHA.
+        invocation_evidence_sha256:
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "LIVE_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(r.ok, false, "verifier must reject forged invocation SHA");
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_HASH_MISMATCH"),
+    `verifier must report EVIDENCE_HASH_MISMATCH; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C07-02: on-disk invocation artifact may contain ONLY raw launch facts", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c07-raw-"));
+  const dir = join(tmp, "invocations");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "BAD.invocation.json"),
+    JSON.stringify({
+      capability: "BAD",
+      executable: "x",
+      argv: ["x"],
+      spawn_cwd: "/x",
+      env_subset: {},
+      recorded_at: "2026-01-01T00:00:00Z",
+      protocol: "rpc",
+    }),
+  );
+  const r = readInvocationEvidence("invocations/BAD.invocation.json", tmp);
+  assert.equal(r, null, "readInvocationEvidence must refuse author-supplied protocol");
+});
+
+test("C07-03: --mode headless in argv is refused (Pi has no such flag)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c07-headless-"));
+  const dir = join(tmp, "invocations");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "HEADLESS.invocation.json"),
+    JSON.stringify({
+      capability: "HEADLESS",
+      executable: "x",
+      argv: ["pi", "--mode", "headless"],
+      spawn_cwd: "/x",
+      env_subset: {},
+      recorded_at: "2026-01-01T00:00:00Z",
+    }),
+  );
+  const r = readInvocationEvidence("invocations/HEADLESS.invocation.json", tmp);
+  assert.equal(r, null, "readInvocationEvidence must refuse --mode headless");
+});
+
+test("C07-04: --no-session + a claimed session_dir is refused", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c07-nosession-"));
+  const dir = join(tmp, "invocations");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "CONTRADICTION.invocation.json"),
+    JSON.stringify({
+      capability: "X",
+      executable: "x",
+      argv: ["pi", "--no-session", "--session-dir", "/tmp/some-dir"],
+      spawn_cwd: "/x",
+      env_subset: {},
+      recorded_at: "2026-01-01T00:00:00Z",
+    }),
+  );
+  const r = readInvocationEvidence("invocations/CONTRADICTION.invocation.json", tmp);
+  assert.equal(r, null, "readInvocationEvidence must refuse --no-session + --session-dir");
+});
+
+test("C07-05: derived semantics are computed from raw, never caller-asserted", () => {
+  const ev = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "JSONL",
+  });
+  assert.equal(ev.evidence.derived.protocol, "json");
+  assert.equal(ev.evidence.derived.headless, true);
+  assert.equal(ev.evidence.derived.session_dir, null);
+  assert.equal(ev.evidence.derived.no_session, false);
+});
+
+test("C07-06: STREAMING_EVENTS requires derived.protocol in {json,rpc}", () => {
+  const headlessEv = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "HEADLESS",
+  });
+  assert.equal(
+    headlessEv.evidence.derived.protocol,
+    "text",
+    "HEADLESS fixture must have derived.protocol = text (no --mode flag)",
+  );
+  assert.equal(
+    headlessEv.evidence.derived.headless,
+    true,
+    "HEADLESS fixture must have derived.headless = true (-p flag)",
+  );
+});
+
+test("C07-07: validateLiveQualification refuses LIVE_QUALIFIED without invocation_evidence_sha256", () => {
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const forged = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "LIVE_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: "session.jsonl",
+          artifact_sha256:
+            "0000000000000000000000000000000000000000000000000000000000000000",
+          expected: "session",
+          observed: "session",
+        }),
+        probe_evidence_path: "session.jsonl",
+        invocation_evidence_path: "invocations/x.invocation.json",
+        invocation_evidence_sha256: null,
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "LIVE_QUALIFIED" as const,
+    },
+  };
+  const v = validateLiveQualification(forged as unknown as HarnessCapabilities);
+  assert.equal(v.ok, false);
+  if (v.ok) return;
+  const violation = v.violations.find(
+    (x) => x.kind === "live_qualified_without_invocation_sha",
+  );
+  assert.ok(violation, "expected live_qualified_without_invocation_sha violation");
+});
+
+test("C07-08: cumulative post-CORRECTION07 fixture/qualification matrix passes verifier", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+      "utf8",
+    ),
+  );
+  const qualification = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "qualification/pi/pi-capabilities.json"),
+      "utf8",
+    ),
+  );
+  const r1 = verifyLiveQualificationEvidence(fixture, REPO_ROOT);
+  if (r1.ok !== true) {
+    assert.fail(`fixture verifier failed: ${JSON.stringify(r1.errors)}`);
+  }
+  const r2 = verifyLiveQualificationEvidence(qualification, REPO_ROOT);
+  if (r2.ok !== true) {
+    assert.fail(`qualification verifier failed: ${JSON.stringify(r2.errors)}`);
+  }
+});
+
+
 
 const _coveredKeys = new Set<CapabilityKey>([
   "JSONL",
