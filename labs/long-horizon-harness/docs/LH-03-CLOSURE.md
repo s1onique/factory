@@ -24,7 +24,7 @@ DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
 LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
 CLOSURE_RECORD_COMMIT     = 961a6c8d9e6f09487d6561c436de25bc258f1256
-CURRENT_HEAD              = 961a6c8d9e6f09487d6561c436de25bc258f1256 (= CLOSURE_RECORD_COMMIT; cosmetic rebinds stop here)
+CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION01; cosmetic rebinds stop here, no further self-referential edit>
 
 The closure-of-record binds three immutable SHAs:
 
