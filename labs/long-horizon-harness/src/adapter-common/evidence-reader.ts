@@ -128,3 +128,37 @@ export function haltProbeEvidence(args: {
     disposition: "HALT",
   };
 }
+
+/**
+ * CORRECTION05 C05-01: build typed `ISOLATED_DATA_DIR`
+ * probe evidence whose oracle is "captured session
+ * artifact_path lives under isolated_session_dir" rather
+ * than exact equality. The relation is `isUnder(observed,
+ * expected)`. The verifier must use the same rule
+ * (see `evaluateOracle` in `evidence-verifier.ts`).
+ */
+export function buildIsolatedDataDirEvidence(args: {
+  readonly artifact_path: string;
+  readonly artifact_sha256: string;
+  readonly isolated_session_dir: string;
+  readonly observed_artifact_path: string;
+}): CapabilityProbeEvidence {
+  const observed = args.observed_artifact_path;
+  const expected = args.isolated_session_dir;
+  const passes = isUnderPath(observed, expected);
+  return {
+    capability: "ISOLATED_DATA_DIR",
+    probe_kind: "SESSION_ENVELOPE",
+    artifact_path: args.artifact_path,
+    artifact_sha256: args.artifact_sha256,
+    evidence_relation: { expected, observed },
+    disposition: passes ? "PASS" : "FAIL",
+  };
+}
+
+function isUnderPath(child: string, parent: string): boolean {
+  if (child === parent) return true;
+  if (parent === "") return false;
+  if (parent.endsWith("/")) return child.startsWith(parent);
+  return child.startsWith(parent + "/");
+}

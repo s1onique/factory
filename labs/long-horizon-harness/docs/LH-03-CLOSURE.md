@@ -30,8 +30,9 @@ LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
 LH03_CORRECTION02_COMMIT  = f5524f012c0ec1747b19b54ff724ada05ab4e7ab
 LH03_CORRECTION03_COMMIT  = 73dc4979a6290a0048fdfac0ae47d42e661ecb22
 LH03_CORRECTION04_COMMIT  = 35c733a3b02cdd8533b054cf22d987699b38b35a
+LH03_CORRECTION05_COMMIT  = <recorded at commit time>
 CLOSURE_RECORD_COMMIT     = 961a6c8d9e6f09487d6561c436de25bc258f1256
-CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION04; cosmetic rebinds stop here, no further self-referential edit>
+CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION05; cosmetic rebinds stop here, no further self-referential edit>
 
 The closure-of-record binds three immutable SHAs:
 
@@ -697,5 +698,74 @@ evidence machinery.
 READY_FOR_LH_04_FAULT_LABORATORY = NO (halt disposition
 remains first-class evidence; LH-04 was NOT started in
 this correction).
+
+CLOSED.
+
+## CORRECTION05 corrections (reviewer-driven, post-CORRECTION04)
+
+The reviewer re-examined CORRECTION04 and identified
+four remaining defects, three semantic and one closure
+hygiene. Each is closed by a bounded architectural
+correction, each pinned to an oracle test in
+`lh03-correction04-axioms.test.ts` (the file is the
+single canonical LH-03 axiom-test surface).
+
+| ID | Reviewer defect | CORRECTION05 fix |
+|---|---|---|
+| C05-01 | The `ISOLATED_DATA_DIR` oracle was `cwd-under-isolated_session_dir`. Upstream Pi defines `--session-dir` as the directory where session files are stored; the captured session artifact (pi.session.jsonl) is a session file, NOT a cwd. Cwd match is a different unrelated Pi concept. | The oracle is now `captured_session_artifact_path lives under isolated_session_dir`. The builder uses a new typed helper `buildIsolatedDataDirEvidence` (in `src/adapter-common/evidence-reader.ts`) which records `expected = isolated_session_dir` and `observed = artifact_path`. The verifier's new `evaluateOracle(k, expected, observed)` returns `isUnder(observed, expected)` for ISOLATED_DATA_DIR. |
+| C05-02 | For `LIVE_HALT` the verifier checked only `disposition === "HALT"`, not `expected === observed`. A forged document with the right observed halt reason but a forged `expected` field would pass. | The verifier now enforces `evaluateOracle(k, expected, observed)` for LIVE_HALT as well. A forged expected halt reason fails with `EVIDENCE_OBSERVATION_MISMATCH`. Negative test: `C05-02`. |
+| C05-03 | `resolveEvidencePath` rejected only paths that *escaped* `repoRoot`. An absolute path *inside* the root still resolved and passed, which is the whole class of portability defect CORRECTION04 set out to close. | `resolveEvidencePath` now rejects `isAbsolute(artifact_path)` outright before any other resolution step. The verifier's contract is: **the recorded path MUST be repo-relative**. Negative test: `C05-03a` (verifier-level) and `C05-03b` (`resolveEvidencePath`-level). |
+| C05-04 | The CORRECTION04 patch introduced a trailing blank line at EOF in `lh03-correction04-axioms.test.ts` (`git diff --check = fail`). | Trailing blank line stripped; `git diff --check` reports clean. Invariant pinned by `C05-04` (every recorded probe_evidence path is repo-relative). |
+| C05-05 | Regression: cumulative post-C05 matrix must pass. | `C05-05` re-runs `verifyLiveQualificationEvidence` end-to-end on both the fixture matrix and the qualification matrix. Both PASS. |
+
+### Total regression (post-CORRECTION05)
+
+```text
+test/run/*.test.ts        = 86  (Phase E — frozen, unchanged)
+test/metrics/*.test.ts    = 61  (LH-02 — frozen, unchanged)
+test:lh03                 = 150 (was 143; +7 C05-* axiom tests)
+test/fake-adapter.test.ts = 3
+check:trust-boundary      = 2
+check:domain-purity       = 3
+TOTAL                     = 305 tests, all passing
+```
+
+### Exit of CORRECTION05 (axiom-by-axiom)
+
+```text
+C05-01 ISOLATED_DATA_DIR oracle = captured_artifact_path under isolated_session_dir   ENFORCED
+C05-01 C05-01a cwd match alone is not enough                                            ENFORCED
+C05-01 C05-01b artifact under isolated_session_dir qualifies                            ENFORCED
+C05-02 LIVE_HALT enforces expected === observed                                          ENFORCED
+C05-02 C05-02 forged expected halt reason -> EVIDENCE_OBSERVATION_MISMATCH              ENFORCED
+C05-03 C05-03a absolute artifact_path inside repoRoot -> EVIDENCE_PATH_ESCAPE            ENFORCED
+C05-03 C05-03b resolveEvidencePath itself rejects absolute paths                        ENFORCED
+C05-04 every recorded probe_evidence path is repo-relative                               ENFORCED
+C05-05 post-C05 fixture/qualification matrix passes verifier end-to-end                  PROVEN
+```
+
+### Verdict after CORRECTION05
+
+```text
+LH_03_DETERMINISTIC_SUBSTRATE = GREEN_FROZEN
+LH_03 = PARTIAL_WITH_HALT_DISPOSITION
+PI_LIVE = HALT_CREDENTIALS
+CLINE_LIVE = HALT_NOT_INSTALLED
+READY_FOR_LH_04 = NO (halt disposition remains first-class
+                     evidence; LH-04 was NOT started in
+                     this correction)
+```
+
+The reviewer-supplied FRAME-LEVEL FINDINGS:
+
+```text
+FORGED_HASH_ACCEPTED                       = IMPOSSIBLE   (C04-02, C04-HASH01, C04-HASH02, C04-HASH03, C04-ACCEPTANCE01)
+ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED    = IMPOSSIBLE   (C04-02, C04-ACCEPTANCE02)
+CWD_MATCH_IMPLIES_ISOLATED_DATA_DIR        = FALSE        (C04-04 + C05-01, C04-ISOLATED01, C05-01a)
+MACHINE_LOCAL_ABSOLUTE_PATH_REQUIRED       = FALSE        (C04-03, C05-03, C04-PATH01, C04-PATH02, C04-ACCEPTANCE04, C05-03a, C05-03b)
+LIVE_QUALIFIED_WITHOUT_REVERIFIABLE_ARTIFACT = IMPOSSIBLE (C04-01, C04-ACCEPTANCE05)
+FORGED_HALT_REASON_ACCEPTED                = IMPOSSIBLE   (C05-02)
+ABSOLUTE_INSIDE_ROOT_PATH_ACCEPTED         = IMPOSSIBLE   (C05-03, C05-03a, C05-03b)
+```
 
 CLOSED.

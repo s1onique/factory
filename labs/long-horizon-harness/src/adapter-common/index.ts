@@ -31,6 +31,7 @@ export {
   buildProbeEvidence,
   notRunProbeEvidence,
   haltProbeEvidence,
+  buildIsolatedDataDirEvidence,
 } from "./evidence-reader.js";
 
 export {

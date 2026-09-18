@@ -1,12 +1,13 @@
 {
   "lh03_emit_kind": "DETERMINISTIC_CONSOLIDATED_EMIT",
   "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
-  "lh03_correction": "CORRECTION04",
+  "lh03_correction": "CORRECTION05",
   "lh03_correction_history": [
     "CORRECTION01",
     "CORRECTION02",
     "CORRECTION03",
-    "CORRECTION04"
+    "CORRECTION04",
+    "CORRECTION05"
   ],
   "generated_at_iso": "2026-09-18T01:00:00.000Z",
   "input_evidence": {
@@ -94,7 +95,7 @@
     "ISOLATED_DATA_DIR": {
       "probe_kind": "NOT_RUN",
       "harness_capability": "SUPPORTED",
-      "rationale": "CORRECTION04 C04-04: cwd match alone is not sufficient evidence of session/state isolation. Until isolated_session_dir (a dedicated --session-dir directory) is captured by the adapter and the captured session cwd lives under it, ISOLATED_DATA_DIR stays LIVE_UNQUALIFIED."
+      "rationale": "CORRECTION04 C04-04 + CORRECTION05 C05-01: cwd match alone is not sufficient evidence of session/state isolation. Upstream Pi defines --session-dir as the directory where session files are stored; the captured session artifact (pi.session.jsonl) is a session file. ISOLATED_DATA_DIR qualifies only when an explicit isolated_session_dir is captured AND the captured session artifact_path lives under it. Until then ISOLATED_DATA_DIR stays LIVE_UNQUALIFIED."
     },
     "CANCELLATION": {
       "probe_kind": "CANCELLATION_HALT",
@@ -121,13 +122,18 @@
   "evidence_verification": {
     "verifier": "verifyLiveQualificationEvidence(caps, repoRoot)",
     "checks": [
-      "EVIDENCE_PATH_ESCAPE refused for ../ and absolute escapes",
-      "EVIDENCE_HASH_MISMATCH raised on byte mutation",
-      "EVIDENCE_OBSERVATION_MISMATCH raised on observed drift",
-      "EVIDENCE_ORACLE_FAILED raised on impossible oracle",
-      "EVIDENCE_PARSE_FAILED raised on malformed JSON",
-      "EVIDENCE_ARTIFACT_MISSING raised on missing file"
+      "EVIDENCE_PATH_ESCAPE refused for ../ and absolute escapes (CORRECTION04)",
+      "EVIDENCE_PATH_ESCAPE refused for absolute artifact_path even inside repoRoot (CORRECTION05 C05-03)",
+      "EVIDENCE_HASH_MISMATCH raised on byte mutation (CORRECTION04)",
+      "EVIDENCE_OBSERVATION_MISMATCH raised on observed drift (CORRECTION04)",
+      "EVIDENCE_OBSERVATION_MISMATCH raised on LIVE_HALT where expected disagrees with recomputed observed (CORRECTION05 C05-02)",
+      "EVIDENCE_ORACLE_FAILED raised on impossible oracle (CORRECTION04)",
+      "EVIDENCE_PARSE_FAILED raised on malformed JSON (CORRECTION04)",
+      "EVIDENCE_ARTIFACT_MISSING raised on missing file (CORRECTION04)"
     ],
+    "is_isolated_data_dir_oracle": "captured_artifact_path under isolated_session_dir (CORRECTION05 C05-01)",
+    "is_halt_oracle": "expected === recomputed_observed (CORRECTION05 C05-02)",
+    "path_policy": "isAbsolute(artifact_path) rejected outright (CORRECTION05 C05-03)",
     "pinned_fixture_result": "PASS",
     "qualification_matrix_result": "PASS"
   },

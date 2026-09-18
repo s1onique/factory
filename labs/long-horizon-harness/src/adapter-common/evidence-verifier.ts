@@ -62,7 +62,12 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
-import { resolve as pathResolve, sep as pathSep, relative } from "node:path";
+import {
+  isAbsolute,
+  resolve as pathResolve,
+  sep as pathSep,
+  relative,
+} from "node:path";
 import type {
   CapabilityKey,
   CapabilityProbeKind,
@@ -112,19 +117,17 @@ export type EvidenceVerificationResult =
 
 /**
  * Normalize a recorded artifact path against a trusted
- * repo root. Refuses:
+ * repo root. Refuses (CORRECTION05 C05-03):
  *
+ *   - absolute recorded paths (even when inside the root).
+ *     The verifier mandates canonical repo-relative
+ *     durable evidence paths so committed qualification
+ *     matrices are portable across checkout roots.
  *   - any ".." segment that would escape the root;
- *   - symlinks whose target escapes the root;
- *   - absolute paths recorded outside the root that
- *     pretend to be repo-relative.
+ *   - symlinks whose target escapes the root.
  *
  * On success, returns the canonical realpath. On
  * failure, returns an `EVIDENCE_PATH_ESCAPE` error.
- *
- * NOTE: the recorded path MUST be repo-relative; the
- * verifier resolves it against `repoRoot` and refuses
- * absolute paths that escape.
  */
 export function resolveEvidencePath(
   artifact_path: string,
@@ -133,6 +136,22 @@ export function resolveEvidencePath(
 ):
   | { readonly ok: true; readonly absolute: string }
   | { readonly ok: false; readonly error: EvidenceVerificationError } {
+  // CORRECTION05 C05-03: reject absolute recorded paths
+  // outright. The verifier requires repo-relative
+  // committed evidence; an absolute path inside the
+  // repo is not portable across checkouts and is the
+  // whole class of defect we are trying to close.
+  if (isAbsolute(artifact_path)) {
+    return {
+      ok: false,
+      error: {
+        kind: "EVIDENCE_PATH_ESCAPE",
+        key: capability,
+        message: `Recorded artifact_path '${artifact_path}' is absolute; verifier requires a repo-relative path resolved against repoRoot '${repoRoot}'.`,
+        artifact_path,
+      },
+    };
+  }
   const absRepo = pathResolve(repoRoot);
   const absCandidate = pathResolve(absRepo, artifact_path);
   const rel = relative(absRepo, absCandidate);
@@ -239,14 +258,37 @@ function parseArtifact(
 }
 
 /**
+ * Repo-relative recomputed artifact path, used by
+ * `recomputeObserved` for `ISOLATED_DATA_DIR` (the
+ * captured session file IS the session storage).
+ */
+function repoRelativeArtifactPath(
+  absolute: string,
+  repoRoot: string,
+): string {
+  const absRepo = pathResolve(repoRoot);
+  const rel = relative(absRepo, pathResolve(absolute));
+  return rel;
+}
+
+/**
  * Recompute the observed value from a parsed artifact
  * for the given capability. The capability-specific
  * oracle logic MUST live here so that the verifier
  * uses the exact same rule the builder used.
+ *
+ * For `ISOLATED_DATA_DIR` (CORRECTION05 C05-01) the
+ * oracle is "the captured session artifact lives under
+ * isolated_session_dir", so the recomputed observed
+ * value is the repo-relative artifact path itself —
+ * not the cwd. The verifier separately checks
+ * `isUnder(recomputed, expected)` for that capability.
  */
 function recomputeObserved(
   capability: CapabilityKey,
   parsed: unknown,
+  absolute: string,
+  repoRoot: string,
 ): string | null {
   if (parsed === null || typeof parsed !== "object") return null;
   const obj = parsed as Record<string, unknown>;
@@ -256,8 +298,9 @@ function recomputeObserved(
     case "STREAMING_EVENTS":
       return typeof obj["type"] === "string" ? (obj["type"] as string) : null;
     case "EXPLICIT_CWD":
-    case "ISOLATED_DATA_DIR":
       return typeof obj["cwd"] === "string" ? (obj["cwd"] as string) : null;
+    case "ISOLATED_DATA_DIR":
+      return repoRelativeArtifactPath(absolute, repoRoot);
     case "CANCELLATION":
       return typeof obj["halt_disposition"] === "string"
         ? (obj["halt_disposition"] as string)
@@ -265,6 +308,34 @@ function recomputeObserved(
     default:
       return null;
   }
+}
+
+/**
+ * Capability-specific oracle that uses BOTH the
+ * `expected` and the recomputed `observed` value. For
+ * ISOLATED_DATA_DIR the relation is "observed lives
+ * under expected" (the artifact_path lives under the
+ * isolated_session_dir). For every other capability the
+ * relation is exact equality.
+ */
+function isUnder(child: string, parent: string): boolean {
+  if (child === parent) return true;
+  if (parent === "") return false;
+  if (parent.endsWith("/")) {
+    return child.startsWith(parent);
+  }
+  return child.startsWith(parent + "/");
+}
+
+function evaluateOracle(
+  capability: CapabilityKey,
+  expected: string,
+  observed: string,
+): boolean {
+  if (capability === "ISOLATED_DATA_DIR") {
+    return isUnder(observed, expected);
+  }
+  return expected === observed;
 }
 
 /**
@@ -367,7 +438,7 @@ export function verifyLiveQualificationEvidence(
       errors.push(parsed.error);
       continue;
     }
-    const observed = recomputeObserved(k, parsed.parsed);
+    const observed = recomputeObserved(k, parsed.parsed, absolute, repoRoot);
     if (observed === null) {
       errors.push({
         kind: "EVIDENCE_PARSE_FAILED",
@@ -388,12 +459,13 @@ export function verifyLiveQualificationEvidence(
       });
       continue;
     }
-    // Oracle re-check (PASS iff expected === observed AND
-    // recorded disposition matches).
+    // Oracle re-check (PASS iff oracle agrees with the
+    // recorded observed value AND the recorded
+    // disposition matches).
     const expected = ev.evidence_relation.expected;
-    const expectedDisposition: "PASS" | "FAIL" = expected === observed ? "PASS" : "FAIL";
+    const expectedMatches = evaluateOracle(k, expected, observed);
     if (axis.live_qualification === "LIVE_QUALIFIED") {
-      if (ev.disposition !== "PASS" || expectedDisposition !== "PASS") {
+      if (ev.disposition !== "PASS" || !expectedMatches) {
         errors.push({
           kind: "EVIDENCE_ORACLE_FAILED",
           key: k,
@@ -404,14 +476,28 @@ export function verifyLiveQualificationEvidence(
         });
       }
     } else {
-      // LIVE_HALT: the recorded disposition must be
-      // HALT; we do not require expected === observed
-      // because HALT records the actual halt reason.
+      // CORRECTION05 C05-02: LIVE_HALT must enforce the
+      // same oracle relation as LIVE_QUALIFIED —
+      // `evaluateOracle(k, expected, observed)` — with
+      // the meaning that the recorded `expected` is the
+      // canonical halt reason the artifact must prove.
+      // A forged document that disagrees on `expected`
+      // no longer passes. The recorded disposition must
+      // be HALT.
       if (ev.disposition !== "HALT") {
         errors.push({
           kind: "EVIDENCE_ORACLE_FAILED",
           key: k,
           message: `Capability ${k} is LIVE_HALT but recorded disposition is '${ev.disposition}', not 'HALT'.`,
+          artifact_path: absolute,
+          recorded_observed: ev.evidence_relation.observed,
+          recomputed_observed: observed,
+        });
+      } else if (!expectedMatches) {
+        errors.push({
+          kind: "EVIDENCE_OBSERVATION_MISMATCH",
+          key: k,
+          message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${expected}' disagrees with the recomputed observed halt reason '${observed}'.`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,

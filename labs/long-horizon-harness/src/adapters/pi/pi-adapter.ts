@@ -84,6 +84,7 @@ import {
   readJsonObject,
   buildProbeEvidence,
   haltProbeEvidence,
+  buildIsolatedDataDirEvidence,
 } from "../../adapter-common/index.js";
 
 
@@ -1606,32 +1607,41 @@ export function defaultPiCapabilities(
       }),
     };
   }
-  // CORRECTION04 C04-04: ISOLATED_DATA_DIR requires
-  // isolation evidence (a dedicated --session-dir
-  // directory or --no-session). Cwd match alone is NOT
-  // sufficient. Until isolatedDir is provided AND the
-  // observed session cwd lives under it, demote to
-  // LIVE_UNQUALIFIED.
+  // CORRECTION04 C04-04 + CORRECTION05 C05-01:
+  // ISOLATED_DATA_DIR requires isolation evidence: a
+  // dedicated `--session-dir <dir>` (or equivalent)
+  // under which the captured session artifact actually
+  // lives. Cwd match alone is NOT sufficient — upstream
+  // Pi's `--session-dir` is the directory where session
+  // files are stored, and the captured artifact is a
+  // session file. Until isolatedDir is provided AND the
+  // captured session artifact_path lives under it, the
+  // axis stays LIVE_UNQUALIFIED.
+  function isUnder(child: string, parent: string): boolean {
+    if (child === parent) return true;
+    if (parent === "") return false;
+    if (parent.endsWith("/")) {
+      return child.startsWith(parent);
+    }
+    return child.startsWith(parent + "/");
+  }
   function isolatedDataDirEntry(): AxisEntry {
-    if (
-      isolatedDir === null ||
-      observedSession === null ||
-      observedSession.cwd === null
-    ) {
+    if (isolatedDir === null || observedSession === null) {
       return emptyEntry;
     }
-    // Use path-style "starts with isolatedDir + sep" to
-    // avoid /tmp matching /tmp-other. We compare the
-    // exact cwd to the dedicated dir; Factory's
-    // definition is that the captured session/state
-    // storage belongs under the dedicated directory.
-    const cwd = observedSession.cwd;
-    if (cwd === isolatedDir || cwd.startsWith(isolatedDir + "/")) {
-      return sessionProbe("ISOLATED_DATA_DIR", isolatedDir);
+    const artifactPath = observedSession.artifact_path;
+    if (!isUnder(artifactPath, isolatedDir)) {
+      return emptyEntry;
     }
-    // Isolation evidence disagrees with cwd: refuse to
-    // fabricate ISOLATED_DATA_DIR qualification.
-    return emptyEntry;
+    return {
+      lq: "LIVE_QUALIFIED",
+      probe: buildIsolatedDataDirEvidence({
+        artifact_path: observedSession.artifact_path,
+        artifact_sha256: observedSession.artifact_sha256,
+        isolated_session_dir: isolatedDir,
+        observed_artifact_path: artifactPath,
+      }),
+    };
   }
   // CORRECTION04 C04-05: HEADLESS / STREAMING_EVENTS
   // require invocation facts proving non-interactive

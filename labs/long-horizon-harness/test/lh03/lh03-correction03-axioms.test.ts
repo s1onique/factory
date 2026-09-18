@@ -272,14 +272,15 @@ test("C03-02a: EXPLICIT_CWD oracle PASSes iff requested_cwd === observed session
   );
 });
 
-test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION04)", () => {
-  // CORRECTION04 C04-04: cwd match alone is no longer
-  // sufficient evidence of ISOLATED_DATA_DIR. The
-  // builder now requires an explicit
-  // `isolated_session_dir` argument (e.g. the value
-  // passed via `--session-dir <dir>`); without it, the
-  // axis is demoted to LIVE_UNQUALIFIED even when
-  // requested_cwd happens to match the observed cwd.
+test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION04 + CORRECTION05 C05-01)", () => {
+  // CORRECTION04 C04-04 + CORRECTION05 C05-01: cwd match
+  // alone is NOT sufficient evidence of
+  // ISOLATED_DATA_DIR. The builder requires an explicit
+  // `isolated_session_dir` argument AND the captured
+  // session artifact_path must live under that
+  // directory. Without it, the axis is demoted to
+  // LIVE_UNQUALIFIED even when requested_cwd happens
+  // to match the observed cwd.
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
@@ -295,15 +296,33 @@ test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION
     null,
     "ISOLATED_DATA_DIR must have probe_evidence=null without isolated_session_dir",
   );
-  // With isolated_session_dir set AND observed cwd
-  // living under it, the axis qualifies.
-  const isoCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  // CORRECTION05 C05-01: passing an isolated_session_dir
+  // that only matches cwd (not artifact path) is still
+  // LIVE_UNQUALIFIED — the artifact must live under the
+  // dedicated session-storage directory.
+  const cwdOnly = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
     isolated_session_dir: "/private/tmp/pi-live",
   });
-  assert.equal(isoCaps.capability_axes.ISOLATED_DATA_DIR.live_qualification, "LIVE_QUALIFIED");
+  assert.equal(
+    cwdOnly.capability_axes.ISOLATED_DATA_DIR.live_qualification,
+    "LIVE_UNQUALIFIED",
+    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when isolated_session_dir matches cwd but not artifact path (C05-01)",
+  );
+  // The artifact_path lives under the parent of the
+  // fixture directory; with that as isolated_session_dir
+  // the axis qualifies.
+  const isoCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    session_capture: FIXTURE_SESSION,
+    cancellation_halt: FIXTURE_PROCESS,
+    isolated_session_dir: "test/fixtures/harnesses/pi/pi-v0_85_1",
+  });
+  assert.equal(
+    isoCaps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
+    "LIVE_QUALIFIED",
+  );
   assert.equal(
     isoCaps.capability_axes.ISOLATED_DATA_DIR.probe_evidence?.disposition,
     "PASS",

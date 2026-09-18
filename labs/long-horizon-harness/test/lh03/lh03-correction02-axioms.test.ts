@@ -164,7 +164,7 @@ test("C02-02a: qualification/lh03-emit.json exists and is non-empty", () => {
   assert.ok(text.length > 0, "lh03-emit.json must not be empty");
   const parsed = JSON.parse(text) as Record<string, unknown>;
   assert.equal(parsed.lh03_emit_kind, "DETERMINISTIC_CONSOLIDATED_EMIT");
-  assert.equal(parsed.lh03_correction, "CORRECTION04");
+  assert.equal(parsed.lh03_correction, "CORRECTION05");
   assert.ok(parsed.input_evidence, "must reference real input evidence");
   assert.ok(parsed.evidence_paths, "must list real evidence paths");
   const ep = parsed.evidence_paths as Record<string, unknown>;

@@ -68,7 +68,7 @@ import {
   mkdirSync,
   symlinkSync,
 } from "node:fs";
-import { resolve, join } from "node:path";
+import { isAbsolute, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
@@ -132,15 +132,21 @@ test("C04-01b: verifyLiveQualificationEvidence re-reads disk and recomputes SHA2
 
 test("C04-HASH01: mutate artifact bytes after probe record created -> FAIL", () => {
   const tmp = mkdtempSync(join(tmpdir(), "lh03-c04-hash01-"));
-  const sessionCopy = join(tmp, "pi.session.jsonl");
+  const fixtureRel = "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts";
+  mkdirSync(join(tmp, fixtureRel), { recursive: true });
+  const sessionCopy = join(tmp, fixtureRel, "pi.session.jsonl");
   copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
-  const cancelCopy = join(tmp, "process-result.json");
+  const cancelCopy = join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json");
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1"), { recursive: true });
   copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
   // Build a real document from the copies; the SHA256 is
-  // recorded against the unchanged bytes.
+  // recorded against the unchanged bytes. Artifact paths
+  // must be repo-relative (CORRECTION05 C05-03).
+  const sessionRel = join(fixtureRel, "pi.session.jsonl");
+  const cancelRel = "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json";
   const realCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
-    session_capture: sessionCopy,
-    cancellation_halt: cancelCopy,
+    session_capture: sessionRel,
+    cancellation_halt: cancelRel,
     requested_cwd: "/private/tmp/pi-live",
     invocation_mode: "headless",
   });
@@ -388,12 +394,18 @@ test("C04-ISOLATED01: cwd match alone is not enough (LIVE_UNQUALIFIED)", () => {
   );
 });
 
-test("C04-ISOLATED02: isolated_session_dir + cwd-under-dir qualifies", () => {
+test("C04-ISOLATED02: isolated_session_dir contains the captured session artifact -> LIVE_QUALIFIED", () => {
+  // CORRECTION05 C05-01: the oracle is that the captured
+  // session artifact_path lives under isolated_session_dir,
+  // NOT that the session.cwd lives under it. The session
+  // file IS the session storage; --session-dir IS the
+  // directory where session files live.
+  const isolatedDir = "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts";
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-    isolated_session_dir: "/private/tmp/pi-live",
+    isolated_session_dir: isolatedDir,
   });
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
@@ -405,17 +417,20 @@ test("C04-ISOLATED02: isolated_session_dir + cwd-under-dir qualifies", () => {
   );
 });
 
-test("C04-ISOLATED03: isolated_session_dir but cwd NOT under it -> LIVE_UNQUALIFIED", () => {
+test("C04-ISOLATED03: isolated_session_dir does NOT contain artifact -> LIVE_UNQUALIFIED", () => {
+  // CORRECTION05 C05-01: the artifact_path must live
+  // under isolated_session_dir. cwd match alone does
+  // NOT qualify.
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-    isolated_session_dir: "/var/isolated",
+    isolated_session_dir: "test/fixtures/harnesses/some/other/dir",
   });
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
     "LIVE_UNQUALIFIED",
-    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when cwd is not under isolated_session_dir",
+    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when the captured artifact is not under isolated_session_dir",
   );
 });
 
@@ -854,6 +869,212 @@ test("C04-ACCEPTANCE06: pinned fixture matrix passes verifier end-to-end", () =>
   }
 });
 
+/* ================================================================== *
+ * LH-03 CORRECTION05 — five small reviewer-driven hardening items.   *
+ * ================================================================== */
+
+test("C05-01a: ISOLATED_DATA_DIR does NOT qualify on cwd==isolated_session_dir alone", () => {
+  // CORRECTION05 C05-01: cwd match is not the oracle.
+  // The artifact_path-under-dir check is the oracle.
+  // We pass an isolated_session_dir that the cwd
+  // happens to match but the captured artifact does
+  // NOT live under; ISOLATED_DATA_DIR must stay
+  // LIVE_UNQUALIFIED.
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    session_capture: FIXTURE_SESSION,
+    cancellation_halt: FIXTURE_PROCESS,
+    isolated_session_dir: "/private/tmp/pi-live",
+  });
+  assert.equal(
+    caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
+    "LIVE_UNQUALIFIED",
+    "cwd match alone must NOT qualify ISOLATED_DATA_DIR (C05-01)",
+  );
+});
+
+test("C05-01b: ISOLATED_DATA_DIR qualifies when captured artifact lives under isolated_session_dir", () => {
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    session_capture: FIXTURE_SESSION,
+    cancellation_halt: FIXTURE_PROCESS,
+    isolated_session_dir: "test/fixtures/harnesses/pi/pi-v0_85_1",
+  });
+  assert.equal(
+    caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
+    "LIVE_QUALIFIED",
+  );
+});
+
+test("C05-02: forged expected halt reason fails verification", () => {
+  // CORRECTION05 C05-02: HALT evidence must enforce the
+  // same expected===observed oracle as PASS evidence.
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c05-halt-"));
+  const sessionCopy = join(tmp, "session.jsonl");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
+  const cancelCopy = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  const realSha = artifactSha256(cancelCopy);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      CANCELLATION: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "LIVE_HALT" as const,
+        probe_evidence: {
+          capability: "CANCELLATION" as const,
+          probe_kind: "CANCELLATION_HALT" as const,
+          artifact_path: "process-result.json",
+          artifact_sha256: realSha,
+          // Forged expected reason — actual artifact
+          // observed halt reason is
+          // HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE.
+          evidence_relation: {
+            expected: "FORGED_HALT_REASON",
+            observed: "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+          },
+          disposition: "HALT" as const,
+        },
+        probe_evidence_path: "process-result.json",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      CANCELLATION: "LIVE_HALT" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(r.ok, false, "forged expected halt reason must fail verification");
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_OBSERVATION_MISMATCH"),
+    `verifier must report EVIDENCE_OBSERVATION_MISMATCH for forged expected; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C05-03a: absolute artifact_path that happens to be inside repoRoot -> FAIL", () => {
+  // CORRECTION05 C05-03: isAbsolute(artifact_path) is
+  // rejected outright. The verifier mandates repo-relative
+  // paths so committed matrices are portable across
+  // checkout roots.
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const realSha = artifactSha256(resolve(REPO_ROOT, FIXTURE_SESSION));
+  const insideRoot = resolve(REPO_ROOT, FIXTURE_SESSION);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "LIVE_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: insideRoot,
+          artifact_sha256: realSha,
+          expected: "session",
+          observed: "session",
+        }),
+        probe_evidence_path: insideRoot,
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "LIVE_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    REPO_ROOT,
+  );
+  assert.equal(
+    r.ok,
+    false,
+    "verifier must reject absolute artifact_path even when inside repoRoot",
+  );
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_PATH_ESCAPE"),
+    `verifier must report EVIDENCE_PATH_ESCAPE; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C05-03b: resolveEvidencePath itself rejects absolute paths", () => {
+  const r = resolveEvidencePath(
+    "/absolute/inside/root.jsonl",
+    REPO_ROOT,
+    "JSONL",
+  );
+  assert.equal(r.ok, false);
+  if (r.ok === false) {
+    assert.equal(r.error.kind, "EVIDENCE_PATH_ESCAPE");
+  }
+});
+
+test("C05-04: every recorded probe_evidence path is repo-relative", () => {
+  // The verifier-level C05-04 invariant that drives the
+  // patch hygiene requirement: every recorded
+  // artifact_path and probe_evidence_path is
+  // repo-relative.
+  const fixture = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+      "utf8",
+    ),
+  );
+  const qualification = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "qualification/pi/pi-capabilities.json"),
+      "utf8",
+    ),
+  );
+  for (const doc of [fixture, qualification]) {
+    for (const k of Object.keys(doc.capability_axes)) {
+      const ev = doc.capability_axes[k].probe_evidence;
+      if (ev !== null) {
+        assert.ok(
+          !isAbsolute(ev.artifact_path),
+          `probe_evidence.artifact_path for ${k} must be repo-relative; got '${ev.artifact_path}'`,
+        );
+      }
+      const pep = doc.capability_axes[k].probe_evidence_path;
+      if (pep !== null && pep !== "") {
+        assert.ok(
+          !isAbsolute(pep),
+          `probe_evidence_path for ${k} must be repo-relative; got '${pep}'`,
+        );
+      }
+    }
+  }
+});
+
+test("C05-05: cumulative post-CORRECTION05 fixture/qualification matrix passes verifier", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+      "utf8",
+    ),
+  );
+  const qualification = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "qualification/pi/pi-capabilities.json"),
+      "utf8",
+    ),
+  );
+  const r1 = verifyLiveQualificationEvidence(fixture, REPO_ROOT);
+  if (r1.ok !== true) {
+    assert.fail(`fixture verifier failed: ${JSON.stringify(r1.errors)}`);
+  }
+  const r2 = verifyLiveQualificationEvidence(qualification, REPO_ROOT);
+  if (r2.ok !== true) {
+    assert.fail(`qualification verifier failed: ${JSON.stringify(r2.errors)}`);
+  }
+});
 const _coveredKeys = new Set<CapabilityKey>([
   "JSONL",
   "HEADLESS",
@@ -863,4 +1084,3 @@ const _coveredKeys = new Set<CapabilityKey>([
   "CANCELLATION",
 ]);
 void _coveredKeys;
-
