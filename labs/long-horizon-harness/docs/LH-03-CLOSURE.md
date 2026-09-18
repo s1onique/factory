@@ -888,4 +888,18 @@ INVOCATION_PREMISE_RECOVERABLE             = TRUE         (C06-01, typed schema)
 LIVE_QUALIFIED_WITHOUT_INVOCATION          = IMPOSSIBLE   (C06-06, C06-07)
 ```
 
+
+Terminal commit binding (CORRECTION06)
+-------------------------------------
+
+The CORRECTION06 patch was committed as:
+
+  ```text
+  TERMINAL_CORRECTION06_COMMIT = be6d5d675793a66ade3f5a5b7d382ac1fb9e55cb
+  ```
+
+This SHA is the subject the Factory qualification binds to. Any
+rebase / amend invalidates this binding and forces a fresh
+qualification emit.
+
 CLOSED.
