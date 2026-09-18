@@ -113,7 +113,12 @@ const TEXT_TOKEN_PATTERNS: readonly RegExp[] = [
   /\bghp_[A-Za-z0-9]{20,}\b/g,
   /\bglpat-[A-Za-z0-9_\-]{20,}\b/g,
   /\bxoxb-[A-Za-z0-9\-]{20,}\b/g,
-  /\bsk-[A-Za-z0-9]{20,}\b/g,
+  // OpenAI keys are `sk-...` where the suffix is
+  // alphanumeric and may include `_` and `-` (project-
+  // scoped keys like `sk-proj-...`).
+  /\bsk-[A-Za-z0-9_\-]{20,}\b/g,
+  // Custom canary used by the live-capture tests.
+  /\bCANARY-[A-Za-z0-9_\-]{4,}\b/g,
 ];
 
 /**
@@ -184,6 +189,11 @@ export function redactArgv(argv: ReadonlyArray<string>): string[] {
 /**
  * Redact sensitive fields inside a JSON record (recursive).
  * Returns a new object; never mutates the input.
+ *
+ * Every STRING value (regardless of key) is also scrubbed
+ * for token-shaped substrings; this is the durable layer
+ * defence that catches tokens embedded in message.text,
+ * tool args, or any other free-text field.
  */
 export function redactJsonRecord(
   record: Readonly<Record<string, unknown>>,
@@ -192,6 +202,8 @@ export function redactJsonRecord(
   for (const [k, v] of Object.entries(record)) {
     if (SENSITIVE_JSON_FIELDS.has(k) || SENSITIVE_JSON_FIELDS.has(k.toLowerCase())) {
       out[k] = REDACTION_TOKEN;
+    } else if (typeof v === "string") {
+      out[k] = redactText(v);
     } else if (v !== null && typeof v === "object" && !Array.isArray(v)) {
       out[k] = redactJsonRecord(v as Record<string, unknown>);
     } else if (Array.isArray(v)) {
@@ -247,4 +259,34 @@ export function redactPreparedRunArgv(
   argv: ReadonlyArray<string>,
 ): string[] {
   return redactArgv(argv);
+}
+
+/**
+ * Redact a line of harness-native output (stdout/stderr/raw).
+ * Returns a new string; never mutates input.
+ *
+ * Used by the durable live-capture path (LH-03 H-C05).
+ */
+export function redactNativeLine(line: string): string {
+  return redactText(line);
+}
+
+/**
+ * Redact a parsed native event record (post-parse, pre-store).
+ * Returns a new object; never mutates the input.
+ *
+ * Used by the durable live-capture path (LH-03 H-C05).
+ */
+export function redactNativeEvent(
+  event: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  return redactJsonRecord(event);
+}
+
+/**
+ * Redact a single string value that flows through the
+ * capture path (selected_session_file path, env values, etc).
+ */
+export function redactStringValue(value: string): string {
+  return redactText(value);
 }

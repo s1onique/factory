@@ -239,9 +239,10 @@ test("ADAPTER07: unknown native event does not silently disappear", async () => 
 test("ADAPTER08: harness self-report 'done' is non-authoritative (H7)", async () => {
   // Pi adapter: an agent_end maps to candidate_reported_completion.
   // The adapter NEVER emits a terminal 'SUCCESS' event.
+  // Real Pi 0.85.1 agent_end shape: { type, messages?, willRetry? }.
   const a = piAdapter();
   const rawEvents = [
-    JSON.stringify({ type: "agent_end", summary: "all done" }),
+    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: "all done" }], willRetry: false }),
   ];
   const handle = a.injectCapturedRun({
     handle: "h-done",
@@ -252,7 +253,7 @@ test("ADAPTER08: harness self-report 'done' is non-authoritative (H7)", async ()
     process_exit_signal: null,
     started_at_ms: 0,
     exit_at_ms: 1,
-    native_events: [{ type: "agent_end", summary: "all done" }],
+    native_events: [{ type: "agent_end", messages: [{ role: "assistant", content: "all done" }], willRetry: false }],
   });
   const evs = await collect(a.events(handle));
   let foundCompletion = false;

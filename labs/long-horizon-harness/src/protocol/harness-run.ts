@@ -67,6 +67,13 @@ export type HarnessProcessResult = {
 /**
  * Raw artifact kind. Closed-world so adapters cannot smuggle
  * candidate-specific kinds past Phase E.
+ *
+ * CORRECTION01 (H-C05): added `RAW_ARGV` and `RAW_ENV`
+ * kinds so the durable live-capture path can surface the
+ * redacted argv/env material to the artifact collector.
+ * Without these kinds, argv/env live in the private
+ * `run.command` / `run.env` and the live-capture
+ * secret-leak oracle cannot inspect them.
  */
 export type HarnessRawArtifactKind =
   | "STDOUT_BYTES"
@@ -74,7 +81,9 @@ export type HarnessRawArtifactKind =
   | "STDOUT_LINES"
   | "STDERR_LINES"
   | "NATIVE_EVENT"
-  | "SELECTED_SESSION_FILE";
+  | "SELECTED_SESSION_FILE"
+  | "RAW_ARGV"
+  | "RAW_ENV";
 
 export type HarnessRawArtifact = {
   readonly kind: HarnessRawArtifactKind;
@@ -83,6 +92,8 @@ export type HarnessRawArtifact = {
   readonly bytes?: Uint8Array;
   readonly text?: string;
   readonly record?: Readonly<Record<string, unknown>>;
+  readonly argv?: ReadonlyArray<string>;
+  readonly env?: Readonly<Record<string, string>>;
   readonly sha256?: string;
 };
 

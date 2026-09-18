@@ -13,3 +13,13 @@ export {
   stableStringify,
   type SchemaFingerprintInput,
 } from "./schema-fingerprint.js";
+
+export {
+  inspectOwnProperties,
+  isPlainString,
+  isNonNegativeInt,
+  isFiniteNumber,
+  isBoolean,
+  type HostileFieldViolation,
+  type HostileObjectReport,
+} from "./hostile-object.js";

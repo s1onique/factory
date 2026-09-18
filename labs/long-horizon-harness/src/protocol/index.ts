@@ -39,13 +39,17 @@ export {
 export {
   CAPABILITY_STATES,
   CAPABILITY_KEYS,
+  LIVE_QUALIFICATION_STATES,
   isCapabilityState,
   isCapabilityKey,
+  isLiveQualificationState,
   emptyCapabilities,
   assertCapabilitiesComplete,
   type HarnessCapabilities,
   type CapabilityKey,
   type CapabilityState,
+  type LiveQualificationState,
+  type CapabilityAxis,
 } from "./harness-capabilities.js";
 
 export {

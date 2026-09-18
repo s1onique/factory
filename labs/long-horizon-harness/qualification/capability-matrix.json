@@ -1,6 +1,7 @@
 {
+  "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
   "generated_at_iso": "2026-09-17T22:30:00.000Z",
-  "rows": [
+  "capability_matrix": [
     {
       "candidate": "pi",
       "qualification_identity": {
@@ -11,7 +12,7 @@
         "executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
         "reported_cli_version": "0.85.1",
         "protocol_mode": "JSONL_EVENTS",
-        "native_schema_fingerprint": "af78efa6a0f5ccf8649c4f39d94b42d7501ff16289b9a4c3e2cacf4f18cdee3d"
+        "native_schema_fingerprint": "411f371861a4a564052194e954efb52d0ab891add3398285a640edac4bde7cf1"
       },
       "protocol": "JSONL_EVENTS",
       "headless": "SUPPORTED",
@@ -19,8 +20,8 @@
       "final_json": "SUPPORTED",
       "jsonl": "SUPPORTED",
       "rpc": "SUPPORTED",
-      "session_resume": "UNSUPPORTED",
-      "session_fork": "UNSUPPORTED",
+      "session_resume": "SUPPORTED",
+      "session_fork": "SUPPORTED",
       "explicit_cwd": "SUPPORTED",
       "isolated_state": "SUPPORTED",
       "model_selection": "SUPPORTED",
@@ -28,8 +29,8 @@
       "timeout": "UNSUPPORTED",
       "cancellation": "SUPPORTED",
       "tool_visibility": "SUPPORTED",
-      "token_visibility": "UNQUALIFIED",
-      "resource_visibility": "UNQUALIFIED",
+      "token_visibility": "SUPPORTED",
+      "resource_visibility": "UNAVAILABLE",
       "replay_fixture": "test/fixtures/harnesses/pi/pi-v0_85_1",
       "qualification_status": "QUALIFIED_WITH_LIMITATIONS"
     },
@@ -64,6 +65,92 @@
       "resource_visibility": "UNQUALIFIED",
       "replay_fixture": "test/fixtures/harnesses/cline/cline-discovery-only",
       "qualification_status": "UNQUALIFIED"
+    }
+  ],
+  "discovery_records": [
+    {
+      "candidate": "Qwen Code",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://github.com/QwenLM/Qwen3-Coder",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    },
+    {
+      "candidate": "OpenCode",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://opencode.ai/docs/",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    },
+    {
+      "candidate": "Hermes",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://github.com/NousResearch/hermes",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
+    },
+    {
+      "candidate": "mini-swe-agent",
+      "observed_version_or_revision": null,
+      "installation_or_package_identity": null,
+      "headless_interface": null,
+      "machine_readable_output": null,
+      "streaming": null,
+      "rpc": null,
+      "session_isolation": null,
+      "cancellation": null,
+      "tool_visibility": null,
+      "resource_visibility": null,
+      "artifact_surface": [],
+      "discovery_timestamp": "2026-09-17T22:25:00.000Z",
+      "source_provenance": {
+        "kind": "OFFICIAL_DOCS",
+        "url": "https://github.com/SWE-agent/mini-SWE-agent",
+        "retrieved_iso": "2026-09-17T22:25:00.000Z"
+      },
+      "qualification_status": "DISCOVERY_ONLY"
     }
   ]
 }

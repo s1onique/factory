@@ -50,8 +50,16 @@ import type {
   HarnessRawArtifact,
   HarnessCancellationResult,
   HarnessAdapterError,
+  CapabilityState,
+  CapabilityAxis,
+  LiveQualificationState,
 } from "../../protocol/index.js";
-import { adapterError, emptyCapabilities, qualificationIdentityEquals } from "../../protocol/index.js";
+import {
+  adapterError,
+  emptyCapabilities,
+  qualificationIdentityEquals,
+  CAPABILITY_KEYS,
+} from "../../protocol/index.js";
 import type { HarnessHandle } from "../../domain/ids.js";
 import { makeHarnessHandle } from "../../domain/ids.js";
 import { computeSchemaFingerprint } from "../../adapter-common/schema-fingerprint.js";
@@ -713,19 +721,46 @@ export function makeClineAdapter(args: {
  * absent (UNAVAILABLE) — this prevents a "discovered" Cline
  * capability document from silently carrying SUPPORTED
  * flags without a probe having actually run.
+ *
+ * CORRECTION01 (H-C06, H-C07): Cline's HARNESS_CAPABILITY
+ * axis is also UNQUALIFIED for every key until a real
+ * binary is on disk; the LIVE_QUALIFICATION_STATE axis is
+ * LIVE_HALT (HALT_CLINE_NOT_INSTALLED) for every key.
  */
 export function defaultClineCapabilities(
   identity: HarnessQualificationIdentity,
   discovered_at_ms: number,
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
-  // For Cline we default UNQUALIFIED for everything and
-  // let the discover / probe layer upgrade individual
-  // keys once a binary is actually on disk.
-  const capabilities = { ...empty.capabilities };
+  // For Cline we default UNQUALIFIED for every
+  // HARNESS_CAPABILITY and LIVE_HALT for every
+  // LIVE_QUALIFICATION_STATE because the binary is not
+  // installed; the discover / probe layer upgrades
+  // individual keys once a real binary is on disk.
+  const capabilities: Record<keyof typeof empty.capabilities, CapabilityState> = {
+    ...empty.capabilities,
+  };
+  const liveMap: Record<keyof typeof empty.live_qualification_by_key, LiveQualificationState> = {
+    ...empty.live_qualification_by_key,
+  };
+  for (const k of CAPABILITY_KEYS) {
+    liveMap[k] = "LIVE_HALT";
+  }
+  const axes: Record<keyof typeof empty.capability_axes, CapabilityAxis> = {
+    ...empty.capability_axes,
+  };
+  for (const k of CAPABILITY_KEYS) {
+    axes[k] = {
+      harness_capability: capabilities[k],
+      live_qualification: "LIVE_HALT",
+      probe_evidence_path: null,
+    };
+  }
   return {
     identity: empty.identity,
     discovered_at_ms: empty.discovered_at_ms,
     capabilities,
+    live_qualification_by_key: liveMap,
+    capability_axes: axes,
   };
 }

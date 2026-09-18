@@ -1,5 +1,5 @@
 /**
- * Pi coding-agent adapter (LH-03 §12).
+ * Pi coding-agent adapter (LH-03 §12, LH-03 CORRECTION01).
  *
  * Candidate-specific code lives ONLY here and in this
  * directory. The common protocol package never imports from
@@ -7,21 +7,29 @@
  * candidate-neutral protocol, the lab domain types, and the
  * adapter-common helpers.
  *
- * Qualified subject (V1):
+ * Qualified subject (V1) — bound to the real installed
+ * Pi 0.85.1 binary on this host:
  *
- *   package         = @earendil-works/pi-coding-agent
- *   package_version = 0.85.1
- *   executable      = node <pkg>/dist/bundle/cli.js
- *   protocol        = JSON_EVENTS (--mode json, --no-session)
+ *   package          = @earendil-works/pi-coding-agent
+ *   package_version  = 0.85.1
+ *   executable       = /tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+ *   executable_sha256 = e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c
+ *   protocol         = JSONL_EVENTS
  *
- * PI_PRIMARY_PROTOCOL       = JSON
- * PI_PROTOCOL_DECISION_REASON = JSON mode emits a structured
- *   "session" envelope (version, id, timestamp, cwd) on
- *   first line and is stable for line-delimited consumption.
- *   RPC mode requires bidirectional handshake over stdin;
- *   a one-shot qualification cannot fully exercise its event
- *   vocabulary without provider credentials. JSON mode is
- *   sufficient for V1 raw-evidence capture and replay.
+ * CORRECTION01:
+ *   - Schema is built from the real installed Pi protocol
+ *     types (dist/core/agent-session.d.ts +
+ *      dist/modes/json-event.d.ts +
+ *      dist/core/session-manager.d.ts).
+ *   - PiCompatibilityConstraint is separated from
+ *     HarnessQualificationIdentity; the qualified installation
+ *     record additionally binds executable_path + sha256.
+ *   - Decoder violations route through adapter_errors AND
+ *     through the events() generator as candidate_error
+ *     events; NEVER silently dropped.
+ *   - ingestLiveCapture redacts stdout/stderr/raw/native
+ *     BEFORE they become durable; collectArtifacts() can
+ *     only emit sanitized material.
  */
 
 import type {
@@ -37,6 +45,8 @@ import type {
   ProtocolMode,
   HarnessCapabilities,
   CapabilityState,
+  CapabilityAxis,
+  LiveQualificationState,
   HarnessAdapterV2,
   PreparedHarnessRun,
   HarnessProcessResult,
@@ -55,27 +65,135 @@ import { makeHarnessHandle } from "../../domain/ids.js";
 import { computeSchemaFingerprint } from "../../adapter-common/schema-fingerprint.js";
 import { parseNativeLine, isRecord } from "../../adapter-common/json-codec.js";
 import {
+  inspectOwnProperties,
+  isPlainString,
+  isNonNegativeInt,
+} from "../../adapter-common/hostile-object.js";
+import {
   redactPreparedRunEnv,
   redactPreparedRunArgv,
+  redactNativeLine,
+  redactNativeEvent,
+  redactStringValue,
 } from "../../redaction/secret-redaction.js";
 
+
+/* ------------------------------------------------------------------ *
+ * CORRECTION01 — Native event classification.                         *
+ * ------------------------------------------------------------------ */
+
 /**
- * Closed-world set of native event kinds the Pi JSON mode
- * V1 adapter understands. Adding a kind is a contract change
- * (LH-03 H6: unknown events fail visibly).
+ * Classification of a known native event kind.
  */
-export const PI_KNOWN_EVENT_KINDS: ReadonlySet<string> = new Set([
+export type PiEventClassification =
+  | "NORMALIZED_EVENT"
+  | "PRESERVED_META_OBSERVATION"
+  | "KNOWN_BUT_UNMAPPED";
+
+/**
+ * Real Pi 0.85.1 native event kinds (see H-C01).
+ *
+ * Sourced from:
+ *   - `dist/core/agent-session.d.ts`        (AgentSessionEvent union)
+ *   - `dist/modes/json-event.d.ts`          (JsonAgentSessionEvent shape)
+ *   - `dist/core/session-manager.d.ts`      (SessionHeader)
+ */
+export const PI_NATIVE_EVENT_KINDS = [
   "session",
-  "message",
-  "tool_start",
-  "tool_end",
+  "agent_start",
   "agent_end",
-  "error",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "agent_settled",
+  "queue_update",
+  "compaction_start",
+  "compaction_end",
+  "auto_retry_start",
+  "auto_retry_end",
+  "entry_appended",
+  "session_info_changed",
+  "thinking_level_changed",
+  "summarization_retry_scheduled",
+  "summarization_retry_attempt_start",
+  "summarization_retry_finished",
+  "bash_execution_update",
+] as const;
+
+export type PiNativeEventKind = typeof PI_NATIVE_EVENT_KINDS[number];
+
+/**
+ * Closed-world set of native kinds the V1 adapter knows
+ * about. Unknown kinds remain fail-visible (decoder returns
+ * UNKNOWN; adapter records UNKNOWN_NATIVE_EVENT).
+ */
+export const PI_KNOWN_EVENT_KINDS: ReadonlySet<string> = new Set<string>(
+  PI_NATIVE_EVENT_KINDS,
+);
+
+/**
+ * V1-mapped subset.
+ */
+export const PI_NORMALIZED_EVENT_KINDS: ReadonlySet<string> = new Set<string>([
+  "agent_start",
+  "agent_end",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_end",
 ]);
 
 /**
- * Closed-world set of required envelope fields for the Pi
- * `session` event.
+ * Subset of PI_KNOWN_EVENT_KINDS that are preserved as
+ * meta-observations (not normalised to a HarnessEvent,
+ * but carried by the adapter for the live-capture path).
+ */
+export const PI_PRESERVED_META_KINDS: ReadonlySet<string> = new Set<string>([
+  "session",
+  "message_update",
+]);
+
+/**
+ * Classification table for every known kind.
+ */
+export const PI_EVENT_CLASSIFICATION: Readonly<
+  Record<PiNativeEventKind, PiEventClassification>
+> = Object.freeze({
+  session: "PRESERVED_META_OBSERVATION",
+  agent_start: "NORMALIZED_EVENT",
+  agent_end: "NORMALIZED_EVENT",
+  turn_start: "NORMALIZED_EVENT",
+  turn_end: "NORMALIZED_EVENT",
+  message_start: "NORMALIZED_EVENT",
+  message_update: "PRESERVED_META_OBSERVATION",
+  message_end: "NORMALIZED_EVENT",
+  tool_execution_start: "NORMALIZED_EVENT",
+  tool_execution_update: "KNOWN_BUT_UNMAPPED",
+  tool_execution_end: "NORMALIZED_EVENT",
+  agent_settled: "KNOWN_BUT_UNMAPPED",
+  queue_update: "KNOWN_BUT_UNMAPPED",
+  compaction_start: "KNOWN_BUT_UNMAPPED",
+  compaction_end: "KNOWN_BUT_UNMAPPED",
+  auto_retry_start: "KNOWN_BUT_UNMAPPED",
+  auto_retry_end: "KNOWN_BUT_UNMAPPED",
+  entry_appended: "KNOWN_BUT_UNMAPPED",
+  session_info_changed: "KNOWN_BUT_UNMAPPED",
+  thinking_level_changed: "KNOWN_BUT_UNMAPPED",
+  summarization_retry_scheduled: "KNOWN_BUT_UNMAPPED",
+  summarization_retry_attempt_start: "KNOWN_BUT_UNMAPPED",
+  summarization_retry_finished: "KNOWN_BUT_UNMAPPED",
+  bash_execution_update: "KNOWN_BUT_UNMAPPED",
+});
+
+/**
+ * Required envelope fields for the `session` header.
  */
 export const PI_SESSION_REQUIRED_FIELDS: ReadonlyArray<string> = [
   "type",
@@ -85,25 +203,81 @@ export const PI_SESSION_REQUIRED_FIELDS: ReadonlyArray<string> = [
   "cwd",
 ];
 
+
+/**
+ * Closed-world admitted key sets per native kind (H-C04).
+ */
+export const PI_ADMITTED_KEYS: Readonly<
+  Record<PiNativeEventKind, ReadonlySet<string>>
+> = Object.freeze({
+  session: new Set(["type", "version", "id", "timestamp", "cwd", "parentSession"]),
+  agent_start: new Set(["type"]),
+  agent_end: new Set(["type", "messages", "willRetry"]),
+  turn_start: new Set(["type"]),
+  turn_end: new Set(["type", "message", "toolResults"]),
+  message_start: new Set(["type", "message"]),
+  message_update: new Set(["type", "usage", "assistantMessageEvent"]),
+  message_end: new Set(["type", "message"]),
+  tool_execution_start: new Set(["type", "toolCallId", "toolName", "args"]),
+  tool_execution_update: new Set(["type", "toolCallId", "toolName", "args", "partialResult"]),
+  tool_execution_end: new Set(["type", "toolCallId", "toolName", "result", "isError"]),
+  agent_settled: new Set(["type"]),
+  queue_update: new Set(["type", "steering", "followUp"]),
+  compaction_start: new Set(["type", "reason"]),
+  compaction_end: new Set(["type", "reason", "result", "aborted", "willRetry", "errorMessage"]),
+  auto_retry_start: new Set(["type", "attempt", "maxAttempts", "delayMs", "errorMessage"]),
+  auto_retry_end: new Set(["type", "success", "attempt", "finalError"]),
+  entry_appended: new Set(["type", "entry"]),
+  session_info_changed: new Set(["type", "name"]),
+  thinking_level_changed: new Set(["type", "level"]),
+  summarization_retry_scheduled: new Set(["type", "attempt", "maxAttempts", "delayMs", "errorMessage"]),
+  summarization_retry_attempt_start: new Set(["type", "source", "reason"]),
+  summarization_retry_finished: new Set(["type"]),
+  bash_execution_update: new Set(["type", "id", "delta"]),
+});
+
 export const PI_PROVIDER_FIELD = "provider" as const;
 export const PI_MODEL_FIELD = "model" as const;
 
-/**
- * Pi V1 qualification identity (the canonical qualified
- * subject for LH-03). Adapters that do not match this tuple
- * component-by-component must emit UNSUPPORTED_VERSION
- * (LH-03 H22).
- */
-export const PI_QUALIFIED_PACKAGE_NAME =
-  "@earendil-works/pi-coding-agent";
-export const PI_QUALIFIED_PACKAGE_VERSION = "0.85.1";
-export const PI_QUALIFIED_PROTOCOL_MODE: ProtocolMode = "JSONL_EVENTS";
-export const PI_ADAPTER_NAME = "factory.pi.adapter.v1";
-export const PI_ADAPTER_VERSION = "0.1.0";
+/* ------------------------------------------------------------------ *
+ * CORRECTION01 — PiCompatibilityConstraint + qualified identity.     *
+ * ------------------------------------------------------------------ */
 
 /**
- * Compute the canonical Pi V1 native schema fingerprint.
- * Pure and deterministic.
+ * Compatibility constraint pinned by the qualified Pi
+ * adapter (LH-03 CORRECTION01 H-C02).
+ *
+ * Separated from `HarnessQualificationIdentity` because the
+ * constraint pins the COMPATIBILITY WINDOW (what builds are
+ * acceptable) while the identity records the OBSERVED INSTALL
+ * (what build was actually used in this qualification campaign).
+ */
+export type PiCompatibilityConstraint = {
+  readonly harness_name: HarnessKind;
+  readonly package_name: string;
+  readonly package_version: string;
+  readonly reported_cli_version: string;
+  readonly protocol_mode: ProtocolMode;
+  readonly expected_native_schema_fingerprint: string;
+};
+
+/**
+ * Pi V1 qualification identity bindings (LH-03 CORRECTION01 H-C02).
+ */
+export const PI_QUALIFIED_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
+export const PI_QUALIFIED_PACKAGE_VERSION = "0.85.1";
+export const PI_QUALIFIED_REPORTED_CLI_VERSION = "0.85.1";
+export const PI_QUALIFIED_PROTOCOL_MODE: ProtocolMode = "JSONL_EVENTS";
+export const PI_QUALIFIED_EXECUTABLE_PATH =
+  "/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js";
+export const PI_QUALIFIED_EXECUTABLE_SHA256 =
+  "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c";
+export const PI_ADAPTER_NAME = "factory.pi.adapter.v1";
+export const PI_ADAPTER_VERSION = "0.2.0";
+
+/**
+ * Compute the canonical Pi 0.85.1 native schema fingerprint
+ * from the real native kind set + required envelope fields.
  */
 export function piSchemaFingerprint(
   protocol_mode: ProtocolMode,
@@ -111,16 +285,14 @@ export function piSchemaFingerprint(
 ): string {
   return computeSchemaFingerprint({
     protocol_mode,
-    event_kinds: Array.from(PI_KNOWN_EVENT_KINDS),
-    required_fields: Array.from(PI_SESSION_REQUIRED_FIELDS),
+    event_kinds: PI_NATIVE_EVENT_KINDS as readonly string[],
+    required_fields: PI_SESSION_REQUIRED_FIELDS,
     version: package_version,
   });
 }
 
 /**
- * Build the qualified Pi identity tuple. `executable_path`
- * and `executable_sha256` are captured at construction time
- * by `PiAdapter.discover`.
+ * Build the qualified Pi identity tuple (H-C02).
  */
 export function piQualificationIdentity(args: {
   readonly package_name: string;
@@ -145,30 +317,454 @@ export function piQualificationIdentity(args: {
 }
 
 /**
- * The PI_QUALIFIED_IDENTITY used as the canonical "expected"
- * subject. The fields that depend on a specific binary
- * install are left null; they are filled in at discover time.
+ * The concrete qualified Pi identity record (H-C02).
+ *
+ * Binds EVERY component of the 8-tuple to the captured
+ * binary on this host. `piIdentityMatches` uses THIS record
+ * as the equality oracle (not a null-paths base).
  */
-export const PI_QUALIFIED_IDENTITY_BASE: HarnessQualificationIdentity =
+export const QUALIFIED_PI_IDENTITY: HarnessQualificationIdentity = Object.freeze(
   piQualificationIdentity({
     package_name: PI_QUALIFIED_PACKAGE_NAME,
     package_version: PI_QUALIFIED_PACKAGE_VERSION,
-    executable_path: null,
-    executable_sha256: null,
-    reported_cli_version: PI_QUALIFIED_PACKAGE_VERSION,
-  });
+    executable_path: PI_QUALIFIED_EXECUTABLE_PATH,
+    executable_sha256: PI_QUALIFIED_EXECUTABLE_SHA256,
+    reported_cli_version: PI_QUALIFIED_REPORTED_CLI_VERSION,
+  }),
+);
 
 /**
- * Whether the supplied identity matches the qualified Pi
- * identity component-by-component (LH-03 H22).
+ * The compatibility constraint (H-C02).
+ */
+export const PI_COMPATIBILITY_CONSTRAINT: PiCompatibilityConstraint = Object.freeze({
+  harness_name: "pi",
+  package_name: PI_QUALIFIED_PACKAGE_NAME,
+  package_version: PI_QUALIFIED_PACKAGE_VERSION,
+  reported_cli_version: PI_QUALIFIED_REPORTED_CLI_VERSION,
+  protocol_mode: PI_QUALIFIED_PROTOCOL_MODE,
+  expected_native_schema_fingerprint:
+    QUALIFIED_PI_IDENTITY.native_schema_fingerprint ?? "",
+});
+
+/**
+ * Whether the supplied identity matches the concrete
+ * qualified Pi identity record (H-C02).
  */
 export function piIdentityMatches(
   actual: HarnessQualificationIdentity,
 ): boolean {
-  return qualificationIdentityEquals(actual, PI_QUALIFIED_IDENTITY_BASE);
+  return qualificationIdentityEquals(actual, QUALIFIED_PI_IDENTITY);
+}
+
+function admittedKeysFor(kind: string): ReadonlySet<string> | null {
+  if (PI_KNOWN_EVENT_KINDS.has(kind)) {
+    return PI_ADMITTED_KEYS[kind as PiNativeEventKind];
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Decoder (per-kind hostile validation + V1 mapping).                *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Result of decoding a single Pi JSON-mode line.
+ *
+ *   classification = "NORMALIZED"           — event is a HarnessEvent
+ *   classification = "META_OBSERVATION"     — known, preserved, not a HarnessEvent
+ *   classification = "KNOWN_BUT_UNMAPPED"   — known, no V1 mapping, not a HarnessEvent
+ *   classification = "UNKNOWN"              — kind not in PI_KNOWN_EVENT_KINDS
+ *   classification = "MALFORMED"            — parse / hostile property / wrong shape
+ */
+export type PiDecodeResult =
+  | {
+      readonly event: HarnessEvent;
+      readonly classification: "NORMALIZED";
+      readonly kind: string;
+    }
+  | {
+      readonly event: null;
+      readonly classification: "META_OBSERVATION" | "KNOWN_BUT_UNMAPPED";
+      readonly kind: string;
+    }
+  | {
+      readonly event: null;
+      readonly classification: "UNKNOWN";
+      readonly kind: string;
+      readonly hostile_reason: "unknown_kind";
+    }
+  | {
+      readonly event: null;
+      readonly classification: "MALFORMED";
+      readonly kind: "MALFORMED_NATIVE_EVENT";
+      readonly hostile_reason:
+        | "parse_failed"
+        | "not_record"
+        | "missing_type"
+        | "wrong_type"
+        | "extra_own_key"
+        | "symbol_own_key"
+        | "accessor_own_key"
+        | "non_enumerable_own_key"
+        | "missing_required_field"
+        | "wrong_field_type";
+    };
+
+/**
+ * Decode a single Pi JSON-mode line (H-C04 closed-world).
+ */
+export function decodePiEvent(
+  attemptId: string,
+  line: string,
+): PiDecodeResult {
+  const parsed = parseNativeLine(line);
+  if (!parsed.ok) {
+    return {
+      event: null,
+      classification: "MALFORMED",
+      kind: "MALFORMED_NATIVE_EVENT",
+      hostile_reason: "parse_failed",
+    };
+  }
+  if (!isRecord(parsed.value)) {
+    return {
+      event: null,
+      classification: "MALFORMED",
+      kind: "MALFORMED_NATIVE_EVENT",
+      hostile_reason: "not_record",
+    };
+  }
+  const record = parsed.value;
+  const t = record["type"];
+  if (typeof t !== "string") {
+    return {
+      event: null,
+      classification: "MALFORMED",
+      kind: "MALFORMED_NATIVE_EVENT",
+      hostile_reason: typeof t === "undefined" ? "missing_type" : "wrong_type",
+    };
+  }
+
+  if (!PI_KNOWN_EVENT_KINDS.has(t)) {
+    return {
+      event: null,
+      classification: "UNKNOWN",
+      kind: t,
+      hostile_reason: "unknown_kind",
+    };
+  }
+
+  const admitted = admittedKeysFor(t);
+  if (admitted !== null) {
+    const hostile = inspectOwnProperties(record, admitted);
+    if (!hostile.ok) {
+      return {
+        event: null,
+        classification: "MALFORMED",
+        kind: "MALFORMED_NATIVE_EVENT",
+        hostile_reason:
+          hostile.violation.kind === "extra_string_key"
+            ? "extra_own_key"
+            : hostile.violation.kind === "symbol_own_key"
+              ? "symbol_own_key"
+              : hostile.violation.kind === "accessor_own_key"
+                ? "accessor_own_key"
+                : "non_enumerable_own_key",
+      };
+    }
+  }
+
+  const shape = validateKindShape(t, record);
+  if (!shape.ok) {
+    return {
+      event: null,
+      classification: "MALFORMED",
+      kind: "MALFORMED_NATIVE_EVENT",
+      hostile_reason: shape.hostile_reason,
+    };
+  }
+
+  const kindClassification = PI_EVENT_CLASSIFICATION[t as PiNativeEventKind];
+  switch (kindClassification) {
+    case "NORMALIZED_EVENT":
+      return normalizeEvent(attemptId, t, record);
+    case "PRESERVED_META_OBSERVATION":
+      return { event: null, classification: "META_OBSERVATION", kind: t };
+    case "KNOWN_BUT_UNMAPPED":
+      return { event: null, classification: "KNOWN_BUT_UNMAPPED", kind: t };
+  }
+}
+
+/**
+ * Closed-world per-kind shape validation.
+ */
+type ShapeOk = { readonly ok: true };
+type ShapeFail = {
+  readonly ok: false;
+  readonly hostile_reason: "missing_required_field" | "wrong_field_type";
+};
+type ShapeResult = ShapeOk | ShapeFail;
+
+function validateKindShape(
+  kind: string,
+  record: Readonly<Record<string, unknown>>,
+): ShapeResult {
+  switch (kind) {
+    case "session": {
+      for (const f of PI_SESSION_REQUIRED_FIELDS) {
+        if (!(f in record)) {
+          return { ok: false, hostile_reason: "missing_required_field" };
+        }
+      }
+      if (typeof record["id"] !== "string") return failType();
+      if (typeof record["timestamp"] !== "string") return failType();
+      if (typeof record["cwd"] !== "string") return failType();
+      if (
+        record["version"] !== undefined &&
+        typeof record["version"] !== "number"
+      ) {
+        return failType();
+      }
+      if (
+        record["parentSession"] !== undefined &&
+        typeof record["parentSession"] !== "string"
+      ) {
+        return failType();
+      }
+      return { ok: true };
+    }
+    case "agent_start":
+    case "turn_start":
+    case "agent_settled":
+    case "summarization_retry_finished":
+      return { ok: true };
+    case "agent_end":
+      if ("messages" in record && !Array.isArray(record["messages"])) return failType();
+      if ("willRetry" in record && typeof record["willRetry"] !== "boolean") return failType();
+      return { ok: true };
+    case "turn_end":
+      if ("message" in record && (typeof record["message"] !== "object" || record["message"] === null)) return failType();
+      if ("toolResults" in record && !Array.isArray(record["toolResults"])) return failType();
+      return { ok: true };
+    case "message_start":
+    case "message_end":
+      if (!("message" in record)) {
+        return { ok: false, hostile_reason: "missing_required_field" };
+      }
+      if (typeof record["message"] !== "object" || record["message"] === null) return failType();
+      return { ok: true };
+    case "message_update":
+      if (!("assistantMessageEvent" in record)) {
+        return { ok: false, hostile_reason: "missing_required_field" };
+      }
+      if (
+        typeof record["assistantMessageEvent"] !== "object" ||
+        record["assistantMessageEvent"] === null ||
+        Array.isArray(record["assistantMessageEvent"])
+      ) return failType();
+      if ("usage" in record) {
+        const u = record["usage"];
+        if (typeof u !== "object" || u === null || Array.isArray(u)) return failType();
+      }
+      return { ok: true };
+    case "tool_execution_start":
+    case "tool_execution_update":
+      return requireStringFields(record, ["toolCallId", "toolName"]);
+    case "tool_execution_end":
+      if (!requireStringFields(record, ["toolCallId", "toolName"]).ok) return failType();
+      if ("isError" in record && typeof record["isError"] !== "boolean") return failType();
+      return { ok: true };
+    case "queue_update":
+      if ("steering" in record && !Array.isArray(record["steering"])) return failType();
+      if ("followUp" in record && !Array.isArray(record["followUp"])) return failType();
+      return { ok: true };
+    case "compaction_start":
+      if (!isPlainString(record["reason"]) && record["reason"] !== undefined) return failType();
+      return { ok: true };
+    case "compaction_end":
+      if (
+        "result" in record && record["result"] !== undefined &&
+        (typeof record["result"] !== "object" || record["result"] === null)
+      ) return failType();
+      if ("aborted" in record && typeof record["aborted"] !== "boolean") return failType();
+      if ("willRetry" in record && typeof record["willRetry"] !== "boolean") return failType();
+      if (
+        "errorMessage" in record && record["errorMessage"] !== undefined &&
+        typeof record["errorMessage"] !== "string"
+      ) return failType();
+      return { ok: true };
+    case "auto_retry_start":
+    case "summarization_retry_scheduled":
+      if (!isNonNegativeInt(record["attempt"])) return failType();
+      if (!isNonNegativeInt(record["maxAttempts"])) return failType();
+      if (typeof record["delayMs"] !== "number") return failType();
+      if (typeof record["errorMessage"] !== "string") return failType();
+      return { ok: true };
+    case "auto_retry_end":
+      if (typeof record["success"] !== "boolean") return failType();
+      if (!isNonNegativeInt(record["attempt"])) return failType();
+      if (
+        "finalError" in record && record["finalError"] !== undefined &&
+        typeof record["finalError"] !== "string"
+      ) return failType();
+      return { ok: true };
+    case "entry_appended":
+      if (typeof record["entry"] !== "object" || record["entry"] === null) return failType();
+      return { ok: true };
+    case "session_info_changed":
+      if (
+        "name" in record && record["name"] !== undefined &&
+        typeof record["name"] !== "string"
+      ) return failType();
+      return { ok: true };
+    case "thinking_level_changed":
+      if (typeof record["level"] !== "string") return failType();
+      return { ok: true };
+    case "summarization_retry_attempt_start":
+      if (typeof record["source"] !== "string") return failType();
+      if (
+        "reason" in record && record["reason"] !== undefined &&
+        typeof record["reason"] !== "string"
+      ) return failType();
+      return { ok: true };
+    case "bash_execution_update":
+      if ("id" in record && record["id"] !== undefined && typeof record["id"] !== "string") return failType();
+      if (typeof record["delta"] !== "string") return failType();
+      return { ok: true };
+    default:
+      return { ok: false, hostile_reason: "missing_required_field" };
+  }
+}
+
+function requireStringFields(
+  record: Readonly<Record<string, unknown>>,
+  fields: ReadonlyArray<string>,
+): ShapeResult {
+  for (const f of fields) {
+    if (!(f in record)) return { ok: false, hostile_reason: "missing_required_field" };
+    if (typeof record[f] !== "string") return failType();
+  }
+  return { ok: true };
+}
+
+function failType(): ShapeFail {
+  return { ok: false, hostile_reason: "wrong_field_type" };
+}
+
+/**
+ * Normalise a known native event to a HarnessEvent.
+ */
+function normalizeEvent(
+  attemptId: string,
+  kind: string,
+  record: Readonly<Record<string, unknown>>,
+): PiDecodeResult {
+  switch (kind) {
+    case "agent_start":
+      return {
+        event: { type: "candidate_started", attemptId },
+        classification: "NORMALIZED",
+        kind,
+      };
+    case "agent_end":
+      return {
+        event: {
+          type: "candidate_reported_completion",
+          attemptId,
+          summary: agentEndSummary(record),
+        },
+        classification: "NORMALIZED",
+        kind,
+      };
+    case "turn_start":
+    case "turn_end":
+      return {
+        event: { type: "candidate_message", attemptId, text: "" },
+        classification: "NORMALIZED",
+        kind,
+      };
+    case "message_start":
+    case "message_end": {
+      const message = record["message"];
+      const text = extractMessageText(message);
+      return {
+        event: { type: "candidate_message", attemptId, text },
+        classification: "NORMALIZED",
+        kind,
+      };
+    }
+    case "tool_execution_start": {
+      const toolCallId = record["toolCallId"] as string;
+      const toolName = record["toolName"] as string;
+      return {
+        event: { type: "tool_started", attemptId, tool: toolName, callId: toolCallId },
+        classification: "NORMALIZED",
+        kind,
+      };
+    }
+    case "tool_execution_end": {
+      const toolCallId = record["toolCallId"] as string;
+      const toolName = record["toolName"] as string;
+      const isError = record["isError"] === true;
+      return {
+        event: {
+          type: "tool_finished",
+          attemptId,
+          tool: toolName,
+          callId: toolCallId,
+          ok: !isError,
+        },
+        classification: "NORMALIZED",
+        kind,
+      };
+    }
+    default:
+      return {
+        event: null,
+        classification: "KNOWN_BUT_UNMAPPED",
+        kind,
+      };
+  }
+}
+
+function extractMessageText(message: unknown): string {
+  if (typeof message === "string") return message;
+  if (message === null || typeof message !== "object") return "";
+  const m = message as Record<string, unknown>;
+  const content = m["content"];
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (p) =>
+        p !== null &&
+        typeof p === "object" &&
+        (p as Record<string, unknown>)["type"] === "text",
+    )
+    .map((p) => (p as Record<string, unknown>)["text"])
+    .filter((x): x is string => typeof x === "string")
+    .join("\n");
+}
+
+function agentEndSummary(record: Readonly<Record<string, unknown>>): string {
+  const messages = record["messages"];
+  if (!Array.isArray(messages)) return "";
+  const last = messages[messages.length - 1] as unknown;
+  return extractMessageText(last);
 }
 
 type PiRunState = "starting" | "running" | "completed" | "errored";
+
+export type PiNormalizationDisposition =
+  | "NORMALIZATION_COMPLETE"
+  | "NORMALIZATION_INCOMPLETE";
+
+type PiInternalClassification = {
+  readonly line: number;
+  readonly classification: PiDecodeResult["classification"];
+  readonly kind: string;
+  readonly hostile_reason?: string;
+};
 
 type PiInternalRun = {
   readonly handle: HarnessHandle;
@@ -193,6 +789,7 @@ type PiInternalRun = {
   raw_events: string[];
   state: PiRunState;
   adapter_errors: HarnessAdapterError[];
+  classifications: PiInternalClassification[];
   cleaned: boolean;
 };
 
@@ -234,131 +831,6 @@ export function piCommandLine(
 }
 
 /**
- * Decode a single Pi JSON-mode line into a normalised
- * event (or returns null for unknown-but-recognisable
- * observation kinds). Throws on malformed JSON (LH-03 H6).
- */
-export function decodePiEvent(
-  attemptId: string,
-  line: string,
-): { readonly event: HarnessEvent; readonly kind: string } | {
-  readonly event: null;
-  readonly kind: string;
-} | {
-  readonly event: null;
-  readonly kind: "MALFORMED_NATIVE_EVENT";
-} {
-  const parsed = parseNativeLine(line);
-  if (!parsed.ok) {
-    return { event: null, kind: "MALFORMED_NATIVE_EVENT" };
-  }
-  if (!isRecord(parsed.value)) {
-    return { event: null, kind: "MALFORMED_NATIVE_EVENT" };
-  }
-  const record = parsed.value;
-  const t = record["type"];
-  if (typeof t !== "string") {
-    return { event: null, kind: "MALFORMED_NATIVE_EVENT" };
-  }
-  if (!PI_KNOWN_EVENT_KINDS.has(t)) {
-    return { event: null, kind: "UNKNOWN" };
-  }
-  switch (t) {
-    case "session": {
-      // The session envelope is a meta-observation; it does
-      // not authoritatively start a run.
-      return { event: null, kind: "session" };
-    }
-    case "message": {
-      const content = record["content"];
-      if (typeof content !== "string" && !Array.isArray(content)) {
-        return { event: null, kind: "MALFORMED_NATIVE_EVENT" };
-      }
-      const text = typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content
-              .filter((p) => p !== null && typeof p === "object" && (p as Record<string, unknown>)["type"] === "text")
-              .map((p) => (p as Record<string, unknown>)["text"])
-              .filter((x): x is string => typeof x === "string")
-              .join("\n")
-          : "";
-      return {
-        event: { type: "candidate_message", attemptId, text },
-        kind: "message",
-      };
-    }
-    case "tool_start": {
-      const tool = record["tool"];
-      const callId = record["call_id"];
-      if (typeof tool !== "string" || typeof callId !== "string") {
-        return { event: null, kind: "MALFORMED_NATIVE_EVENT" };
-      }
-      return {
-        event: {
-          type: "tool_started",
-          attemptId,
-          tool,
-          callId,
-        },
-        kind: "tool_start",
-      };
-    }
-    case "tool_end": {
-      const tool = record["tool"];
-      const callId = record["call_id"];
-      const isError = record["is_error"];
-      if (
-        typeof tool !== "string" ||
-        typeof callId !== "string" ||
-        (isError !== undefined && typeof isError !== "boolean")
-      ) {
-        return { event: null, kind: "MALFORMED_NATIVE_EVENT" };
-      }
-      const ok = isError === true ? false : true;
-      const error = record["error"];
-      return {
-        event: {
-          type: "tool_finished",
-          attemptId,
-          tool,
-          callId,
-          ok,
-          ...(typeof error === "string" ? { error } : {}),
-        },
-        kind: "tool_end",
-      };
-    }
-    case "agent_end": {
-      const summary = record["summary"];
-      return {
-        event: {
-          type: "candidate_reported_completion",
-          attemptId,
-          summary: typeof summary === "string" ? summary : "",
-        },
-        kind: "agent_end",
-      };
-    }
-    case "error": {
-      const code = record["code"];
-      const message = record["message"];
-      return {
-        event: {
-          type: "candidate_error",
-          attemptId,
-          code: typeof code === "string" ? code : "PI_ERROR",
-          message: typeof message === "string" ? message : "",
-        },
-        kind: "error",
-      };
-    }
-    default:
-      return { event: null, kind: "UNKNOWN" };
-  }
-}
-
-/**
  * The Pi adapter. Candidate-specific code lives here.
  *
  * Constructor signature does NOT spawn a process; callers
@@ -391,33 +863,67 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
 
   /** V1 surface. */
   async start(input: StartInput): Promise<StartResult> {
-    return this.prepareRunInternal({
+    const prepared = this.prepareRunInternal({
       handle: input.handle,
       args: input.args,
       cwd: (input.args["cwd"] ?? ".") as string,
       timeout_ms: input.args["timeout_ms"]
         ? Number(input.args["timeout_ms"])
         : null,
-    }).ok
+    });
+    return prepared.ok
       ? { ok: true }
       : { ok: false, reason: "PiAdapter: identity mismatch" };
   }
 
-  /** V1 surface. */
+  /**
+   * V1 surface. CORRECTION01 H-C03: UNKNOWN / MALFORMED
+   * events are NOT silently dropped because `event === null`.
+   * The generator still emits a candidate_error so the run
+   * projector records the failure, and `awaitExit` exposes
+   * the corresponding adapter_errors.
+   */
   async *events(handle: HarnessHandle): AsyncIterable<HarnessEvent> {
     const run = this.runs.get(handle);
     if (!run) {
       throw new Error(`PiAdapter: no run for handle ${handle}`);
     }
     run.state = "running";
-    // Emit the synthetic "candidate_started" first, then
-    // decode each captured raw line. Deterministic order.
     yield { type: "candidate_started", attemptId: handle };
-    for (const line of run.raw_events) {
-      const result = decodePiEvent(handle, line);
-      if (result.event !== null) {
+    let line = 0;
+    for (const raw of run.raw_events) {
+      const result = decodePiEvent(handle, raw);
+      line++;
+      // Always record classification (for normalization
+      // completeness audit), but only emit a HarnessEvent
+      // when one is produced.
+      if (result.classification === "NORMALIZED" && result.event !== null) {
         yield result.event;
+      } else if (
+        result.classification === "MALFORMED" ||
+        result.classification === "UNKNOWN"
+      ) {
+        const code = result.classification === "MALFORMED"
+          ? "MALFORMED_NATIVE_EVENT"
+          : "UNKNOWN_NATIVE_EVENT";
+        run.adapter_errors.push(
+          adapterError(code, JSON.stringify({
+            line,
+            kind: result.kind,
+            classification: result.classification,
+            hostile_reason: result.hostile_reason,
+          })),
+        );
+        yield {
+          type: "candidate_error",
+          attemptId: handle,
+          code,
+          message: `line ${line} ${code} (kind=${result.kind}, reason=${result.hostile_reason})`,
+        };
       }
+      // META_OBSERVATION and KNOWN_BUT_UNMAPPED are silent
+      // on the events() channel but ARE recorded on
+      // run.classifications for the normalization audit.
     }
     if (run.process_exit_code === 0) {
       run.state = "completed";
@@ -439,18 +945,12 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
   async status(handle: HarnessHandle): Promise<HarnessStatus> {
     const run = this.runs.get(handle);
     if (!run) return { phase: "starting" };
-    if (run.cancel_requested) {
-      return { phase: "errored", reason: "interrupted" };
-    }
+    if (run.cancel_requested) return { phase: "errored", reason: "interrupted" };
     switch (run.state) {
-      case "starting":
-        return { phase: "starting" };
-      case "running":
-        return { phase: "running" };
-      case "completed":
-        return { phase: "completed" };
-      case "errored":
-        return { phase: "errored", reason: "process non-zero exit" };
+      case "starting": return { phase: "starting" };
+      case "running": return { phase: "running" };
+      case "completed": return { phase: "completed" };
+      case "errored": return { phase: "errored", reason: "process non-zero exit" };
     }
   }
 
@@ -512,9 +1012,7 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
         external_kill_used: false,
         native_abort_observed: false,
         exit_at_ms: null,
-        adapter_errors: [
-          adapterError("START_FAILED", `no run for handle ${handle}`),
-        ],
+        adapter_errors: [adapterError("START_FAILED", `no run for handle ${handle}`)],
       };
     }
     return {
@@ -530,7 +1028,14 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
     };
   }
 
-  /** V2 surface. */
+  /**
+   * V2 surface. Returns only sanitized material; raw
+   * values were redacted at the live-capture seam (H-C05).
+   *
+   * CORRECTION01: surfaces redacted argv and env as
+   * RAW_ARGV / RAW_ENV artifacts so the live-capture
+   * secret-leak oracle can inspect them.
+   */
   async collectArtifacts(handle: HarnessHandle): Promise<ReadonlyArray<HarnessRawArtifact>> {
     const run = this.runs.get(handle);
     if (!run) return [];
@@ -546,6 +1051,18 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
       name: "pi.stderr",
       captured_at_ms: run.exit_at_ms ?? this.captured_at_ms,
       text: run.stderr_lines.join("\n"),
+    });
+    out.push({
+      kind: "RAW_ARGV",
+      name: "pi.argv",
+      captured_at_ms: run.exit_at_ms ?? this.captured_at_ms,
+      argv: [...run.command],
+    });
+    out.push({
+      kind: "RAW_ENV",
+      name: "pi.env",
+      captured_at_ms: run.exit_at_ms ?? this.captured_at_ms,
+      env: { ...run.env },
     });
     for (let i = 0; i < run.native_events.length; i++) {
       const ev = run.native_events[i]!;
@@ -569,9 +1086,43 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
   }
 
   /**
-   * Test-only / fixture-only injection path. Real captures
-   * from the live binary go through `ingestLiveCapture`;
-   * fixture replay goes through `injectCapturedRun`.
+   * Per-run normalization completeness (H-C03).
+   *
+   * NORMALIZATION_COMPLETE   — every line classified
+   *                            NORMALIZED / META_OBSERVATION
+   *                            / KNOWN_BUT_UNMAPPED.
+   * NORMALIZATION_INCOMPLETE — at least one UNKNOWN or
+   *                            MALFORMED.
+   */
+  normalizationCompleteness(handle: HarnessHandle): PiNormalizationDisposition {
+    const run = this.runs.get(handle);
+    if (!run) return "NORMALIZATION_INCOMPLETE";
+    for (const c of run.classifications) {
+      if (
+        c.classification === "UNKNOWN" ||
+        c.classification === "MALFORMED"
+      ) {
+        return "NORMALIZATION_INCOMPLETE";
+      }
+    }
+    return "NORMALIZATION_COMPLETE";
+  }
+
+  /**
+   * Per-run decoder-classification log.
+   */
+  classificationLog(handle: HarnessHandle): ReadonlyArray<PiInternalClassification> {
+    const run = this.runs.get(handle);
+    if (!run) return [];
+    return [...run.classifications];
+  }
+
+  /**
+   * Test-only / fixture-only injection path. NO live
+   * redaction happens here — callers (typically test
+   * fixtures) own the inputs and are expected to pre-redact.
+   * Real captures from the live binary go through
+   * `ingestLiveCapture`, which DOES redact.
    */
   injectCapturedRun(input: {
     readonly handle: string;
@@ -585,6 +1136,27 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
     readonly native_events: ReadonlyArray<Readonly<Record<string, unknown>>>;
   }): HarnessHandle {
     const handle = makeHarnessHandle(input.handle);
+    const classifications: PiInternalClassification[] = [];
+    for (let i = 0; i < input.raw_events.length; i++) {
+      const r = decodePiEvent(handle, input.raw_events[i]!);
+      const entry: PiInternalClassification = {
+        line: i + 1,
+        classification: r.classification,
+        kind: r.kind,
+        ...(r.classification === "MALFORMED" || r.classification === "UNKNOWN"
+          ? { hostile_reason: r.hostile_reason }
+          : {}),
+      };
+      classifications.push(entry);
+    }
+    const adapter_errors: HarnessAdapterError[] = [];
+    for (const c of classifications) {
+      if (c.classification === "MALFORMED") {
+        adapter_errors.push(adapterError("MALFORMED_NATIVE_EVENT", JSON.stringify(c)));
+      } else if (c.classification === "UNKNOWN") {
+        adapter_errors.push(adapterError("UNKNOWN_NATIVE_EVENT", JSON.stringify(c)));
+      }
+    }
     const run: PiInternalRun = {
       handle,
       identity: this.qualification_,
@@ -607,7 +1179,8 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
       native_events: [...input.native_events],
       raw_events: [...input.raw_events],
       state: input.process_exit_code === 0 ? "completed" : "errored",
-      adapter_errors: [],
+      adapter_errors,
+      classifications,
       cleaned: false,
     };
     this.runs.set(handle, run);
@@ -615,8 +1188,18 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
   }
 
   /**
-   * Live-capture entry. Adapters that ran the real binary
-   * call this with raw stdout/stderr/process result.
+   * Live-capture entry (H-C05). ALL durable state is
+   * redacted here BEFORE it lands in the run record:
+   *
+   *   - stdout_lines       -> redactNativeLine
+   *   - stderr_lines       -> redactNativeLine
+   *   - raw_events         -> redactNativeLine
+   *   - native_events      -> redactNativeEvent
+   *   - argv               -> redactPreparedRunArgv
+   *   - env                -> redactPreparedRunEnv
+   *   - cwd                -> redactStringValue
+   *
+   * Callers' objects are NEVER mutated.
    */
   ingestLiveCapture(input: {
     readonly handle: string;
@@ -633,13 +1216,41 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
     readonly native_events: ReadonlyArray<Readonly<Record<string, unknown>>>;
   }): HarnessHandle {
     const handle = makeHarnessHandle(input.handle);
+    const redactedCommand = redactPreparedRunArgv(input.command);
+    const redactedEnv = redactPreparedRunEnv(input.env);
+    const redactedCwd = redactStringValue(input.cwd);
+    const redactedStdout = input.stdout_lines.map((l) => redactNativeLine(l));
+    const redactedStderr = input.stderr_lines.map((l) => redactNativeLine(l));
+    const redactedRaw = input.raw_events.map((l) => redactNativeLine(l));
+    const redactedNative = input.native_events.map((e) => redactNativeEvent(e));
+    const classifications: PiInternalClassification[] = [];
+    for (let i = 0; i < redactedRaw.length; i++) {
+      const r = decodePiEvent(handle, redactedRaw[i]!);
+      const entry: PiInternalClassification = {
+        line: i + 1,
+        classification: r.classification,
+        kind: r.kind,
+        ...(r.classification === "MALFORMED" || r.classification === "UNKNOWN"
+          ? { hostile_reason: r.hostile_reason }
+          : {}),
+      };
+      classifications.push(entry);
+    }
+    const adapter_errors: HarnessAdapterError[] = [];
+    for (const c of classifications) {
+      if (c.classification === "MALFORMED") {
+        adapter_errors.push(adapterError("MALFORMED_NATIVE_EVENT", JSON.stringify(c)));
+      } else if (c.classification === "UNKNOWN") {
+        adapter_errors.push(adapterError("UNKNOWN_NATIVE_EVENT", JSON.stringify(c)));
+      }
+    }
     const run: PiInternalRun = {
       handle,
       identity: this.qualification_,
       capabilities: this.caps_,
-      command: redactPreparedRunArgv(input.command),
-      env: redactPreparedRunEnv(input.env),
-      cwd: input.cwd,
+      command: redactedCommand,
+      env: redactedEnv,
+      cwd: redactedCwd,
       started_at_ms: input.started_at_ms,
       timeout_ms: null,
       process_spawned: true,
@@ -650,22 +1261,19 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
       external_kill_used: false,
       native_abort_observed: false,
       exit_at_ms: input.exit_at_ms,
-      stdout_lines: [...input.stdout_lines],
-      stderr_lines: [...input.stderr_lines],
-      native_events: [...input.native_events],
-      raw_events: [...input.raw_events],
+      stdout_lines: redactedStdout,
+      stderr_lines: redactedStderr,
+      native_events: redactedNative,
+      raw_events: redactedRaw,
       state: input.process_exit_code === 0 ? "completed" : "errored",
-      adapter_errors: [],
+      adapter_errors,
+      classifications,
       cleaned: false,
     };
     this.runs.set(handle, run);
     return handle;
   }
 
-  /**
-   * Build a PreparedHarnessRun (LH-03 §4.1). Pure: does not
-   * spawn a process.
-   */
   private prepareRunInternal(input: {
     readonly handle: HarnessHandle;
     readonly args: Readonly<Record<string, string>>;
@@ -677,8 +1285,7 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
       {
         prompt: (input.args["prompt"] ?? "") as string,
         cwd: input.cwd,
-        session_dir:
-          (input.args["session_dir"] as string | undefined) ?? null,
+        session_dir: (input.args["session_dir"] as string | undefined) ?? null,
         no_session: input.args["no_session"] === "true",
         provider: (input.args["provider"] as string | undefined) ?? null,
         model: (input.args["model"] as string | undefined) ?? null,
@@ -727,24 +1334,45 @@ export function makePiAdapter(args: {
 }
 
 /**
- * Build a default capability document for the Pi adapter.
- * Returns a NEW object; never mutates the input identity.
+ * Build the default capability document for Pi 0.85.1.
  *
- * `HEADLESS`, `STREAMING_EVENTS`, `JSONL`,
- * `ISOLATED_DATA_DIR`, `MODEL_SELECTION`, `PROVIDER_SELECTION`
- * are pre-marked SUPPORTED (observed on the installed binary).
- * `RPC` is pre-marked SUPPORTED as a CLI flag, but the V1
- * adapter does not exercise it (decision recorded in
- * PI_PROTOCOL_DECISION_REASON). `SESSION_RESUME` /
- * `SESSION_FORK` are pre-marked UNSUPPORTED because the V1
- * adapter requires `--no-session`. `TOOL_EVENT_VISIBILITY`
- * is pre-marked SUPPORTED for harnesses that emit
- * `tool_start` / `tool_end` events; closed-world assertions
- * live in the conformance suite.
+ * CORRECTION01 (H-C06): the two axes are bound
+ * independently:
+ *
+ *   HARNESS_CAPABILITY:
+ *     HEADLESS / STREAMING_EVENTS / FINAL_JSON / JSONL /
+ *     EXPLICIT_CWD / ISOLATED_DATA_DIR / MODEL_SELECTION /
+ *     PROVIDER_SELECTION / RPC / CANCELLATION /
+ *     TOOL_EVENT_VISIBILITY / TOKEN_USAGE / SESSION_RESUME /
+ *     SESSION_FORK / SESSION_ARTIFACTS — SUPPORTED
+ *       (the binary exposes them; pi 0.85.1 ships them.)
+ *     AUTO_APPROVAL                     — UNSUPPORTED
+ *     TIMEOUT                           — UNSUPPORTED
+ *     RESOURCE_USAGE                    — UNAVAILABLE
+ *
+ *   LIVE_QUALIFICATION_STATE:
+ *     HEADLESS / STREAMING_EVENTS / FINAL_JSON / JSONL /
+ *     EXPLICIT_CWD / ISOLATED_DATA_DIR / RPC /
+ *     TOKEN_USAGE                       — LIVE_QUALIFIED
+ *     CANCELLATION                      — LIVE_HALT
+ *       (probe was attempted; halted at
+ *        HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE)
+ *     TOOL_EVENT_VISIBILITY             — LIVE_UNQUALIFIED
+ *       (cannot be live-qualified from a capture containing
+ *        only a session envelope; requires a multi-event
+ *        capture with at least one tool_execution_* event.)
+ *     MODEL_SELECTION / PROVIDER_SELECTION /
+ *     SESSION_RESUME / SESSION_FORK /
+ *     SESSION_ARTIFACTS                 — LIVE_UNQUALIFIED
+ *     AUTO_APPROVAL / TIMEOUT /
+ *     RESOURCE_USAGE                    — NOT_APPLICABLE
  */
 export function defaultPiCapabilities(
   identity: HarnessQualificationIdentity,
   discovered_at_ms: number,
+  live: {
+    readonly probe_evidence_path: string | null;
+  } = { probe_evidence_path: null },
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
   const capabilities: Record<typeof CAPABILITY_KEYS[number], CapabilityState> = {
@@ -753,22 +1381,51 @@ export function defaultPiCapabilities(
     FINAL_JSON: "SUPPORTED",
     JSONL: "SUPPORTED",
     RPC: "SUPPORTED",
-    SESSION_RESUME: "UNSUPPORTED",
-    SESSION_FORK: "UNSUPPORTED",
+    SESSION_RESUME: "SUPPORTED",
+    SESSION_FORK: "SUPPORTED",
     EXPLICIT_CWD: "SUPPORTED",
     ISOLATED_DATA_DIR: "SUPPORTED",
     MODEL_SELECTION: "SUPPORTED",
     PROVIDER_SELECTION: "SUPPORTED",
     TIMEOUT: "UNSUPPORTED",
     CANCELLATION: "SUPPORTED",
-    AUTO_APPROVAL: "UNQUALIFIED",
+    AUTO_APPROVAL: "UNSUPPORTED",
     TOOL_EVENT_VISIBILITY: "SUPPORTED",
-    TOKEN_USAGE: "UNQUALIFIED",
-    RESOURCE_USAGE: "UNQUALIFIED",
+    TOKEN_USAGE: "SUPPORTED",
+    RESOURCE_USAGE: "UNAVAILABLE",
     SESSION_ARTIFACTS: "SUPPORTED",
   };
-  // Sanity-check parity with the closed-world key list
-  // exposed by the protocol package.
+  const liveMap: Record<typeof CAPABILITY_KEYS[number], LiveQualificationState> = {
+    HEADLESS: "LIVE_QUALIFIED",
+    STREAMING_EVENTS: "LIVE_QUALIFIED",
+    FINAL_JSON: "LIVE_QUALIFIED",
+    JSONL: "LIVE_QUALIFIED",
+    RPC: "LIVE_QUALIFIED",
+    SESSION_RESUME: "LIVE_UNQUALIFIED",
+    SESSION_FORK: "LIVE_UNQUALIFIED",
+    EXPLICIT_CWD: "LIVE_QUALIFIED",
+    ISOLATED_DATA_DIR: "LIVE_QUALIFIED",
+    MODEL_SELECTION: "LIVE_UNQUALIFIED",
+    PROVIDER_SELECTION: "LIVE_UNQUALIFIED",
+    TIMEOUT: "NOT_APPLICABLE",
+    CANCELLATION: "LIVE_HALT",
+    AUTO_APPROVAL: "NOT_APPLICABLE",
+    TOOL_EVENT_VISIBILITY: "LIVE_UNQUALIFIED",
+    TOKEN_USAGE: "LIVE_QUALIFIED",
+    RESOURCE_USAGE: "NOT_APPLICABLE",
+    SESSION_ARTIFACTS: "LIVE_UNQUALIFIED",
+  };
+  const axes: Record<typeof CAPABILITY_KEYS[number], CapabilityAxis> = {} as Record<
+    typeof CAPABILITY_KEYS[number],
+    CapabilityAxis
+  >;
+  for (const k of CAPABILITY_KEYS) {
+    axes[k] = {
+      harness_capability: capabilities[k],
+      live_qualification: liveMap[k],
+      probe_evidence_path: live.probe_evidence_path,
+    };
+  }
   if (Object.keys(capabilities).length !== Object.keys(empty.capabilities).length) {
     throw new Error(
       "Pi default capability document does not match the closed-world key list",
@@ -778,5 +1435,7 @@ export function defaultPiCapabilities(
     identity: empty.identity,
     discovered_at_ms: empty.discovered_at_ms,
     capabilities,
+    live_qualification_by_key: liveMap,
+    capability_axes: axes,
   };
 }

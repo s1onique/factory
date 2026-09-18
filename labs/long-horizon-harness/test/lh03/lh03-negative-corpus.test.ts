@@ -65,7 +65,7 @@ async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
 // HNEG01: unknown native event => UNKNOWN_NATIVE_EVENT
 test("HNEG01: unknown native event is visible, not silently ignored", () => {
   const out = decodePiEvent("a1", JSON.stringify({ type: "totally_new_event" }));
-  assert.equal(out.kind, "UNKNOWN");
+  assert.equal(out.classification, "UNKNOWN");
   assert.equal(out.event, null);
 });
 
@@ -75,32 +75,53 @@ test("HNEG02: malformed native JSON is classified MALFORMED_NATIVE_EVENT", () =>
   assert.equal(out.kind, "MALFORMED_NATIVE_EVENT");
 });
 
-// HNEG03: extra closed-world field on a known kind is rejected
+// HNEG03: extra closed-world field on a known kind is rejected (CORRECTION01)
 test("HNEG03: known event extra closed-world field is rejected", () => {
-  // Pi tool_end has the closed-world shape; an unknown
-  // field is silently ignored at the type level, but a
-  // missing required field fails closed.
+  // Pi tool_execution_end (real schema): {type, toolCallId, toolName,
+  // result?, isError?}. An extra own key is rejected.
+  const outExtra = decodePiEvent(
+    "a1",
+    JSON.stringify({
+      type: "tool_execution_end",
+      toolCallId: "tc-1",
+      toolName: "bash",
+      result: { out: "" },
+      isError: false,
+      surprise: 1,
+    }),
+  );
+  assert.equal(outExtra.classification, "MALFORMED");
+  if (outExtra.classification === "MALFORMED") {
+    assert.equal(outExtra.hostile_reason, "extra_own_key");
+  }
+  // Pi tool_execution_end without required fields: also rejected.
   const outMissing = decodePiEvent(
     "a1",
-    JSON.stringify({ type: "tool_end" }),
+    JSON.stringify({ type: "tool_execution_end" }),
   );
-  assert.equal(outMissing.kind, "MALFORMED_NATIVE_EVENT");
+  assert.equal(outMissing.classification, "MALFORMED");
   // For Cline, 'done' is the closed kind; 'extra' field is
   // not promoted.
-  const outExtra = decodeClineEvent(
+  const outCline = decodeClineEvent(
     "a1",
     JSON.stringify({ type: "done", extra: "field" }),
   );
-  assert.notEqual(outExtra.event, null);
-  if (outExtra.event !== null) {
-    assert.equal(outExtra.event.type, "candidate_reported_completion");
+  assert.notEqual(outCline.event, null);
+  if (outCline.event !== null) {
+    assert.equal(outCline.event.type, "candidate_reported_completion");
   }
 });
 
-// HNEG04: native "success" with no Factory gate => NOT SUCCESS
+// HNEG04: native "success" with no Factory gate => NOT SUCCESS (CORRECTION01)
 test("HNEG04: harness self-report success without Factory gate is not terminal", async () => {
   const a = pi();
-  const raw = JSON.stringify({ type: "agent_end", summary: "completed" });
+  // Real Pi 0.85.1 agent_end shape (no "summary" field; lives in
+  // messages[].content).
+  const raw = JSON.stringify({
+    type: "agent_end",
+    messages: [{ role: "assistant", content: "completed" }],
+    willRetry: false,
+  });
   const h = a.injectCapturedRun({
     handle: "h-hneg04",
     stdout_lines: [raw],
@@ -110,7 +131,7 @@ test("HNEG04: harness self-report success without Factory gate is not terminal",
     process_exit_signal: null,
     started_at_ms: 0,
     exit_at_ms: 1,
-    native_events: [{ type: "agent_end", summary: "completed" }],
+    native_events: [{ type: "agent_end", messages: [{ role: "assistant", content: "completed" }], willRetry: false }],
   });
   const evs = await collect(a.events(h));
   for (const e of evs) {

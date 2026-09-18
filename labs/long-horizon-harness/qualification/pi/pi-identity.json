@@ -6,5 +6,5 @@
   "executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
   "reported_cli_version": "0.85.1",
   "protocol_mode": "JSONL_EVENTS",
-  "native_schema_fingerprint": "af78efa6a0f5ccf8649c4f39d94b42d7501ff16289b9a4c3e2cacf4f18cdee3d"
+  "native_schema_fingerprint": "411f371861a4a564052194e954efb52d0ab891add3398285a640edac4bde7cf1"
 }
