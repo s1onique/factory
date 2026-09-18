@@ -20,10 +20,14 @@
  * not a structured verifier field. The
  * `classified_authority_method` records whether the
  * classification came from the structured
- * `errorKind` alone, from `errorKind` plus axis
- * context, or from message-prefix inference. Reviewers
- * can audit the inference model by reading
- * `runner.classifyAuthority`.
+ * `errorKind` alone (structured_error_kind) or from
+ * message-prefix inference (message_prefix_inference).
+ * There is intentionally no third classification mode;
+ * in particular, no classification joins `errorKind`
+ * with axis context — the frozen LH-03 verifier does
+ * not expose a typed axis identifier alongside
+ * `errorKind`. Reviewers can audit the inference model
+ * by reading `runner.classifyAuthority`.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

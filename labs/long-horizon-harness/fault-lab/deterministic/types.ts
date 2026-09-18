@@ -162,11 +162,27 @@ export interface FaultExperimentResult {
   /**
    * The verifier authority under which the first
    * rejection occurred. This is *classified* by the lab,
-   * not directly emitted by the verifier (the frozen
-   * verifier returns only the typed `errorKind`; the
-   * lab maps `errorKind` + axis context into an
-   * authority label). The mapping is explicit and
-   * reproducible; see `runner.classifyAuthority`.
+   * not directly emitted by the verifier.
+   *
+   * Allowed classification methods are exactly two:
+   *
+   *   - structured_error_kind     — verifier's typed
+   *                                 `errorKind` alone
+   *                                 uniquely identifies
+   *                                 the authority.
+   *   - message_prefix_inference  — lab reads the verbatim
+   *                                 error `message` to
+   *                                 decide the authority.
+   *
+   * There is intentionally NO composite / hybrid
+   * classification mode. In particular, no classification
+   * method joins `errorKind` with axis context: the
+   * frozen LH-03 verifier does not expose a typed axis
+   * identifier alongside `errorKind`, so any
+   * `errorKind`+axis-context claim would overstate the
+   * evidence the lab has access to. See
+   * `runner.classifyAuthority` for the explicit, fully
+   * auditable mapping.
    *
    * The renamed field reflects this honestly: it is the
    * lab's classification of the verifier's first

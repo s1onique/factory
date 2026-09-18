@@ -1,0 +1,65 @@
+{
+  "schema": "lh04-frozen-record/v1",
+  "frozen_at": "2026-09-19T00:00:00Z",
+  "subject": {
+    "commit": "a8caa82655ca6036bc40a43be5000bdda5bb84bf",
+    "subject": "LH-04 CORRECTION02 deterministic fault laboratory closure: 17/17 fault matrix, semantic repeatability, prose cleanup"
+  },
+  "predecessor_chain": [
+    "7be31164 LH-03 deterministic substrate (Phase E @ 61b0979, LH-02 @ 715e639)",
+    "qualification/lh03-frozen.json",
+    "qualification/lh04-deterministic-faults.json"
+  ],
+  "qualification": {
+    "deterministic_substrate": "GREEN_FROZEN",
+    "live_substrate": {
+      "pi": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+      "cline": "HALT_CLINE_NOT_INSTALLED"
+    }
+  },
+  "fault_catalog_version": "lh04-fault-catalog.v1",
+  "fault_count": 17,
+  "passed": 17,
+  "escaped": 0,
+  "wrong_authority": 0,
+  "baseline_regressions": 0,
+  "classification_provenance": {
+    "structured_error_kind": 5,
+    "message_prefix_inference": 12,
+    "allowed_classification_methods": [
+      "structured_error_kind",
+      "message_prefix_inference"
+    ],
+    "rejected_classification_methods": [
+      "structured_error_kind_plus_axis_context",
+      "errorKind_plus_axis_context",
+      "any_axis_context_composite"
+    ]
+  },
+  "mutation_taxonomy": {
+    "SINGLE_DIMENSION": 8,
+    "GUARD_REACHABILITY_CONSTRUCTION": 6,
+    "COMPOUND_FORGERY": 2,
+    "COMPOUND_AXIS_SPLICE": 1
+  },
+  "substrate": {
+    "baseline_passes_verifier": true,
+    "workspace_isolation": "fresh-tmpdir-per-experiment",
+    "two_run_semantic_repeatability": true,
+    "byte_identical_result_artifact": false,
+    "byte_identical_result_artifact_reason": "emitted_at is an ISO timestamp; see L04-C06"
+  },
+  "evidence_files": {
+    "fault_lab_root": "fault-lab/deterministic/",
+    "lh04_targeted_tests": "test/lh04/",
+    "verifier_path": "src/adapter-common/evidence-verifier.ts",
+    "qualification_artifact": "qualification/lh04-deterministic-faults.json",
+    "frozen_contract_guard": "scripts/verify_lh04_frozen.sh"
+  },
+  "doctrine": [
+    "A single LH-04 controlled mutation targets exactly one verifier authority; rejection at a different authority is a fault-experiment design error.",
+    "Authority classification methods are exactly two: structured_error_kind (verifier's typed errorKind alone is unambiguous) and message_prefix_inference (lab reads the verbatim error message). No composite / hybrid mode is supported; in particular, no classification joins errorKind with axis context, because the frozen LH-03 verifier does not expose a typed axis identifier.",
+    "Semantic repeatability, not byte-identity, is the durability contract: emitted_at timestamps make byte-identity impossible without destroying audit trail value.",
+    "The fault matrix is the closed-world catalog F01..F17; adding a fault is a schema-visible change."
+  ]
+}
