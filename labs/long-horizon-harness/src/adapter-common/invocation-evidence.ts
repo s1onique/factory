@@ -347,12 +347,16 @@ function parsePiArgvStrict(argv: readonly string[]): {
       continue;
     }
     // Unknown flag: skip without consuming more argv.
-    // We do not parse other flags; they are tolerated but
-    // do not contribute to semantics. The grammar above
-    // covers the closed-world Pi launch subset Factory
-    // qualifies against. A strict grammar would refuse
-    // unknown flags, but the canonical fixtures only use
-    // the four flags above and a positional program arg.
+    // The grammar above is a STRICT parser for the
+    // closed-world set of Factory-semantic Pi flags
+    // (`--print` / `-p`, `--mode`, `--session-dir`,
+    // `--no-session`); non-Factory-semantic Pi flags
+    // (provider, model, session selection, tools,
+    // extensions, ...) are tolerated at the argv-token
+    // level but contribute no semantics. A future
+    // tightening that refuses unknown tokens entirely
+    // would create unnecessary version coupling against
+    // Pi's broader CLI surface.
     i += 1;
   }
 

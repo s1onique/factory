@@ -91,6 +91,8 @@ import {
   resolve as pathResolve,
 } from "node:path";
 
+import type { CapabilityKey } from "../protocol/harness-capabilities.js";
+
 /**
  * Provenance discriminator for an execution-capture
  * manifest (CORRECTION09 C09-01).
@@ -447,32 +449,82 @@ export function shaOfEmpty(): string {
 }
 
 /**
- * CORRECTION09 C09-04: for each non-null `*_path`
- * field on the manifest, re-read the file from disk
- * and re-SHA its bytes. Returns a list of field-name
- * ↔ recorded vs recomputed mismatches. The verifier
- * treats every mismatch as `EVIDENCE_HASH_MISMATCH`
- * (the same kind used for invocation / manifest
- * SHA drift).
+ * Result of one manifest-artifact path/SHA reverify
+ * attempt (CORRECTION10).
+ */
+export type ManifestArtifactReverifyResult =
+  | {
+      readonly kind: "hash_mismatch";
+      readonly field: keyof ExecutionCaptureManifest;
+      readonly path: string;
+      readonly recorded_sha256: string;
+      readonly recomputed_sha256: string;
+    }
+  | {
+      readonly kind: "path_escape";
+      readonly field: keyof ExecutionCaptureManifest;
+      readonly path: string;
+    }
+  | {
+      readonly kind: "missing";
+      readonly field: keyof ExecutionCaptureManifest;
+      readonly path: string;
+      readonly recorded_sha256: string;
+    };
+
+/**
+ * Path-authority resolver injected by the verifier
+ * (CORRECTION10). The verifier already owns
+ * `resolveEvidencePath()` which rejects absolute
+ * paths, `..`-escapes, and symlinks whose target
+ * escapes the repo root. The manifest-artifact paths
+ * MUST be checked by exactly the same authority —
+ * inventing a parallel authority is the whole defect
+ * CORRECTION10 closes.
+ */
+export type ManifestArtifactPathResolver = (
+  artifact_path: string,
+  capability: CapabilityKey,
+) =>
+  | { readonly ok: true; readonly absolute: string }
+  | {
+      readonly ok: false;
+      readonly error_message: string;
+      readonly artifact_path: string;
+    };
+
+/**
+ * CORRECTION09 C09-04 + CORRECTION10: for each non-null
+ * `*_path` field on the manifest,
  *
- * `repoRoot` is required because manifest `*_path`
- * fields are repo-relative.
+ *   1. Resolve the path through the caller's path
+ *      authority (the same authority the verifier uses
+ *      for `probe_evidence_path`, `invocation_evidence_path`,
+ *      and `execution_capture_path`). This rejects
+ *      absolute paths, `..`-escapes, and symlink escapes
+ *      from `repoRoot`.
+ *
+ *   2. Re-read the resolved canonical file from disk
+ *      and re-SHA its bytes.
+ *
+ * Returns a list of (path, recorded, recomputed)
+ * diagnostics:
+ *
+ *   - `path_escape`: the recorded path did not pass the
+ *     resolver. Caller emits `EVIDENCE_PATH_ESCAPE`.
+ *   - `missing`:     the resolved file does not exist.
+ *     Caller emits `EVIDENCE_HASH_MISMATCH` with empty
+ *     recomputed_sha256.
+ *   - `hash_mismatch`: the resolved file exists but its
+ *     recomputed SHA differs from the recorded SHA.
+ *     Caller emits `EVIDENCE_HASH_MISMATCH`.
  */
 export function reverifyExecutionCaptureManifestArtifacts(args: {
   readonly manifest: ExecutionCaptureManifest;
-  readonly repoRoot: string;
-}): readonly {
-  readonly field: keyof ExecutionCaptureManifest;
-  readonly path: string;
-  readonly recorded_sha256: string;
-  readonly recomputed_sha256: string;
-}[] {
-  const mismatches: {
-    field: keyof ExecutionCaptureManifest;
-    path: string;
-    recorded_sha256: string;
-    recomputed_sha256: string;
-  }[] = [];
+  readonly capability: CapabilityKey;
+  readonly resolvePath: ManifestArtifactPathResolver;
+}): readonly ManifestArtifactReverifyResult[] {
+  const out: ManifestArtifactReverifyResult[] = [];
   for (let i = 0; i < ARTIFACT_PATH_FIELDS.length; i++) {
     const pk = ARTIFACT_PATH_FIELDS[i] as keyof ExecutionCaptureManifest;
     const sk = ARTIFACT_SHA_FIELDS[i] as keyof ExecutionCaptureManifest;
@@ -480,20 +532,34 @@ export function reverifyExecutionCaptureManifestArtifacts(args: {
     const sv = args.manifest[sk];
     if (pv === null) continue;
     if (typeof pv !== "string" || typeof sv !== "string") continue;
-    const abs = pathResolve(args.repoRoot, pv);
-    if (!existsSync(abs)) {
-      mismatches.push({
+    // CORRECTION10: every internal manifest path is
+    // routed through the verifier's existing path
+    // authority. A manifest that names `../../etc/passwd`
+    // or `/etc/passwd` or a symlink that escapes the repo
+    // is rejected here, NOT at the raw read site.
+    const resolved = args.resolvePath(pv, args.capability);
+    if (!resolved.ok) {
+      out.push({
+        kind: "path_escape",
         field: pk,
         path: pv,
-        recorded_sha256: sv,
-        recomputed_sha256: "",
       });
       continue;
     }
-    const bytes = readFileSync(abs);
+    if (!existsSync(resolved.absolute)) {
+      out.push({
+        kind: "missing",
+        field: pk,
+        path: pv,
+        recorded_sha256: sv,
+      });
+      continue;
+    }
+    const bytes = readFileSync(resolved.absolute);
     const recomputed = createHash("sha256").update(bytes).digest("hex");
     if (recomputed !== sv) {
-      mismatches.push({
+      out.push({
+        kind: "hash_mismatch",
         field: pk,
         path: pv,
         recorded_sha256: sv,
@@ -501,7 +567,7 @@ export function reverifyExecutionCaptureManifestArtifacts(args: {
       });
     }
   }
-  return mismatches;
+  return out;
 }
 
 /**

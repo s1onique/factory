@@ -68,6 +68,7 @@ import {
   mkdirSync,
   symlinkSync,
   appendFileSync,
+  existsSync,
 } from "node:fs";
 import { isAbsolute, resolve, join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -160,55 +161,47 @@ function withInvocation(
   // also needs its own invocation artifact because
   // CANCELLATION.invocation.json's argv matches the
   // CANCELLATION manifest's invocation_sha256.
-  const cancelCap = loadCaptureFixture({
-    repoRoot: REPO_ROOT,
-    capability: "CANCELLATION",
-  });
-  const cancelInv = loadInvocationFixture({
-    repoRoot: REPO_ROOT,
-    capability: "CANCELLATION",
-  });
+  // CANCELLATION wiring handled by perAxisCapabilities loop below.
   // ISOLATED_DATA_DIR also needs its own manifest
   // (its declared --session-dir is unique). Build a
   // per-axis override map.
-  const isolatedCap = loadCaptureFixture({
-    repoRoot: REPO_ROOT,
-    capability: "ISOLATED_DATA_DIR",
-  });
-  const isolatedInv = loadInvocationFixture({
-    repoRoot: REPO_ROOT,
-    capability: "ISOLATED_DATA_DIR",
-  });
-  const axisExecutionIds: Record<string, string> = {
-    CANCELLATION: cancelCap.manifest.execution_id,
-  };
+  // ISOLATED_DATA_DIR wiring handled by perAxisCapabilities loop below.
+  // CORRECTION10: per-axis binding. Each axis MUST
+  // bind its own canonical capture manifest so
+  // `manifest.capability === axis.key`.
+  const perAxisCapabilities: ReadonlyArray<string> = [
+    "JSONL",
+    "STREAMING_EVENTS",
+    "HEADLESS",
+    "EXPLICIT_CWD",
+    "ISOLATED_DATA_DIR",
+    "CANCELLATION",
+  ];
+  const axisExecutionIds: Record<string, string> = {};
   const axisInvMap: Record<string, {
     evidence: import("../../src/adapter-common/invocation-evidence.js").InvocationEvidence;
     path: string;
     sha256: string;
-  }> = {
-    CANCELLATION: {
-      evidence: cancelInv.evidence,
-      path: cancelInv.repo_relative_path,
-      sha256: cancelInv.evidence.artifact_sha256,
-    },
-  };
-  const axisCapMap: Record<string, { path: string; sha256: string }> = {
-    CANCELLATION: {
-      path: cancelCap.repo_relative_path,
-      sha256: cancelCap.manifest_sha256,
-    },
-  };
-  if (wantsIsolated) {
-    axisExecutionIds["ISOLATED_DATA_DIR"] = isolatedCap.manifest.execution_id;
-    axisInvMap["ISOLATED_DATA_DIR"] = {
-      evidence: isolatedInv.evidence,
-      path: isolatedInv.repo_relative_path,
-      sha256: isolatedInv.evidence.artifact_sha256,
+  }> = {};
+  const axisCapMap: Record<string, { path: string; sha256: string }> = {};
+  for (const k of perAxisCapabilities) {
+    const ic = loadCaptureFixture({
+      repoRoot: REPO_ROOT,
+      capability: k,
+    });
+    const ii = loadInvocationFixture({
+      repoRoot: REPO_ROOT,
+      capability: k,
+    });
+    axisExecutionIds[k] = ic.manifest.execution_id;
+    axisInvMap[k] = {
+      evidence: ii.evidence,
+      path: ii.repo_relative_path,
+      sha256: ii.evidence.artifact_sha256,
     };
-    axisCapMap["ISOLATED_DATA_DIR"] = {
-      path: isolatedCap.repo_relative_path,
-      sha256: isolatedCap.manifest_sha256,
+    axisCapMap[k] = {
+      path: ic.repo_relative_path,
+      sha256: ic.manifest_sha256,
     };
   }
   return {
@@ -225,38 +218,10 @@ function withInvocation(
     // the adapter (forged-axis tests below) need to
     // declare it explicitly.
     execution_capture_origin: "REPLAY_FIXTURE",
-    axis_execution_captures: {
-      CANCELLATION: {
-        path: cancelCap.repo_relative_path,
-        sha256: cancelCap.manifest_sha256,
-      },
-      ...(wantsIsolated ? {
-        ISOLATED_DATA_DIR: {
-          path: isolatedCap.repo_relative_path,
-          sha256: isolatedCap.manifest_sha256,
-        },
-      } : {}),
-    },
-    axis_invocation_evidence: {
-      CANCELLATION: {
-        evidence: cancelInv.evidence,
-        path: cancelInv.repo_relative_path,
-        sha256: cancelInv.evidence.artifact_sha256,
-      },
-      ...(wantsIsolated ? {
-        ISOLATED_DATA_DIR: {
-          evidence: isolatedInv.evidence,
-          path: isolatedInv.repo_relative_path,
-          sha256: isolatedInv.evidence.artifact_sha256,
-        },
-      } : {}),
-    },
-    axis_execution_ids: {
-      CANCELLATION: cancelCap.manifest.execution_id,
-      ...(wantsIsolated ? {
-        ISOLATED_DATA_DIR: isolatedCap.manifest.execution_id,
-      } : {}),
-    },
+    // CORRECTION10: wire every axis to its own manifest.
+    axis_execution_captures: axisCapMap,
+    axis_invocation_evidence: axisInvMap,
+    axis_execution_ids: axisExecutionIds,
   } as unknown as Parameters<typeof defaultPiCapabilities>[2];
 }
 
@@ -2568,4 +2533,406 @@ test("C08-08: cumulative post-CORRECTION08 fixture/qualification matrix passes v
   if (r2.ok !== true) {
     assert.fail(`qualification verifier failed: ${JSON.stringify(r2.errors)}`);
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * CORRECTION10 - manifest artifact path authority + manifest.capability*
+ * ------------------------------------------------------------------ */
+
+test("C10-PATH01: manifest native_artifact_path = ../escape rejected (EVIDENCE_PATH_ESCAPE)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c10-path01-"));
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+  );
+  const cap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "JSONL",
+  });
+  const realSha = artifactSha256(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  const forgedManifest = {
+    ...cap.manifest,
+    native_artifact_path: "../../../../../../etc/passwd",
+    native_artifact_sha256: realSha,
+  };
+  const manifestRelPath =
+    "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(manifestAbs, JSON.stringify(forgedManifest, null, 2));
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const forged = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path:
+            "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+          artifact_sha256: realSha,
+          expected: "session",
+          observed: "session",
+          execution_id: cap.manifest.execution_id,
+        }),
+        probe_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        invocation_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+        invocation_evidence_sha256: artifactSha256(
+          resolve(
+            REPO_ROOT,
+            "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+          ),
+        ),
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    forged as unknown as Parameters<typeof verifyLiveQualificationEvidence>[0],
+    tmp,
+  );
+  assert.equal(r.ok, false);
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_PATH_ESCAPE"),
+    `verifier must report EVIDENCE_PATH_ESCAPE for ..-escape; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C10-PATH02: manifest native_artifact_path absolute is rejected (EVIDENCE_PATH_ESCAPE)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c10-path02-"));
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+  );
+  const cap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "JSONL",
+  });
+  const realSha = artifactSha256(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  const forgedManifest = {
+    ...cap.manifest,
+    native_artifact_path: "/etc/passwd",
+    native_artifact_sha256: realSha,
+  };
+  const manifestRelPath =
+    "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(manifestAbs, JSON.stringify(forgedManifest, null, 2));
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const forged = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path:
+            "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+          artifact_sha256: realSha,
+          expected: "session",
+          observed: "session",
+          execution_id: cap.manifest.execution_id,
+        }),
+        probe_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        invocation_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+        invocation_evidence_sha256: artifactSha256(
+          resolve(
+            REPO_ROOT,
+            "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+          ),
+        ),
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    forged as unknown as Parameters<typeof verifyLiveQualificationEvidence>[0],
+    tmp,
+  );
+  assert.equal(r.ok, false);
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_PATH_ESCAPE") || kinds.has("EVIDENCE_PARSE_FAILED"),
+    `verifier must reject absolute path; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C10-PATH03: symlink inside repo whose target escapes is rejected (EVIDENCE_PATH_ESCAPE)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c10-path03-"));
+  const outsideDir = mkdtempSync(join(tmpdir(), "lh03-c10-path03-out-"));
+  const outsideFile = join(outsideDir, "secret.jsonl");
+  writeFileSync(outsideFile, '{"type":"session","leaked":true}\n', "utf8");
+  const linkRelPath =
+    "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/leak.jsonl";
+  const linkAbs = join(tmp, linkRelPath);
+  mkdirSync(dirname(linkAbs), { recursive: true });
+  symlinkSync(outsideFile, linkAbs);
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+  );
+  const cap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "JSONL",
+  });
+  const realSha = artifactSha256(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  const forgedManifest = {
+    ...cap.manifest,
+    native_artifact_path: linkRelPath,
+    native_artifact_sha256: realSha,
+  };
+  const manifestRelPath =
+    "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(manifestAbs, JSON.stringify(forgedManifest, null, 2));
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const forged = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path:
+            "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+          artifact_sha256: realSha,
+          expected: "session",
+          observed: "session",
+          execution_id: cap.manifest.execution_id,
+        }),
+        probe_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        invocation_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+        invocation_evidence_sha256: artifactSha256(
+          resolve(
+            REPO_ROOT,
+            "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+          ),
+        ),
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    forged as unknown as Parameters<typeof verifyLiveQualificationEvidence>[0],
+    tmp,
+  );
+  assert.equal(r.ok, false);
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_PATH_ESCAPE"),
+    `verifier must report EVIDENCE_PATH_ESCAPE for symlink escape; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C10-CAP01: manifest.capability !== axis.key rejected (EVIDENCE_EXECUTION_MISMATCH)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c10-cap01-"));
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json"),
+  );
+  mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"),
+  );
+  // Use the canonical HEADLESS capture manifest (which
+  // carries real SHAs that all match) but rewrite
+  // `capability` to something else. The manifest's
+  // invocation_sha256 / native_artifact_sha256 /
+  // stdout_sha256 / stderr_sha256 / process_result_sha256
+  // all line up with the HEADLESS fixtures, so the ONLY
+  // remaining mismatch is `capability`.
+  const headlessCap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "HEADLESS",
+  });
+  const realSha = artifactSha256(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"),
+  );
+  // Copy the HEADLESS capture manifest's referenced
+  // stdout/stderr/process-result/native artifacts to
+  // the tmp repoRoot so the reverify step can read them.
+  const headlessManifest = headlessCap.manifest;
+  for (const p of [
+    headlessManifest.stdout_path,
+    headlessManifest.stderr_path,
+    headlessManifest.process_result_path,
+    headlessManifest.native_artifact_path,
+  ]) {
+    if (p === null) continue;
+    const src = resolve(REPO_ROOT, p);
+    const dst = join(tmp, p);
+    mkdirSync(dirname(dst), { recursive: true });
+    if (existsSync(src)) copyFileSync(src, dst);
+  }
+  const cap = headlessCap;
+  const forgedManifest = {
+    ...headlessCap.manifest,
+    capability: "JSONL", // LIE: declare JSONL while bound to HEADLESS axis.
+  };
+  const manifestRelPath =
+    "test/fixtures/harnesses/pi/pi-v0_85_1/captures/HEADLESS.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(manifestAbs, JSON.stringify(forgedManifest, null, 2));
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const headlessInv = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "HEADLESS",
+  });
+  const forged = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      HEADLESS: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: buildProbeEvidence({
+          capability: "HEADLESS" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path:
+            "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+          artifact_sha256: realSha,
+          expected: "session",
+          observed: "session",
+          execution_id: cap.manifest.execution_id,
+        }),
+        probe_evidence_path:
+          "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        invocation_evidence_path: headlessInv.repo_relative_path,
+        invocation_evidence_sha256: headlessInv.evidence.artifact_sha256,
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      HEADLESS: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    forged as unknown as Parameters<typeof verifyLiveQualificationEvidence>[0],
+    tmp,
+  );
+  assert.equal(r.ok, false);
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_EXECUTION_MISMATCH"),
+    `verifier must report EVIDENCE_EXECUTION_MISMATCH for capability mismatch; got ${[...kinds].join(",")}`,
+  );
+  const capErr = (r.errors ?? []).find(
+    (e) =>
+      e.kind === "EVIDENCE_EXECUTION_MISMATCH" &&
+      e.message.includes("capability="),
+  );
+  assert.ok(
+    capErr !== undefined,
+    "EVIDENCE_EXECUTION_MISMATCH must mention manifest.capability vs axis.key",
+  );
 });

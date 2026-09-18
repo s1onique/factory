@@ -68,4 +68,6 @@ export {
   reverifyExecutionCaptureManifestArtifacts,
   type ExecutionCaptureManifest,
   type CaptureOrigin,
+  type ManifestArtifactReverifyResult,
+  type ManifestArtifactPathResolver,
 } from "./execution-capture.js";

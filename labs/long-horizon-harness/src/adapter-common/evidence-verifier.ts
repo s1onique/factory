@@ -875,24 +875,76 @@ export function verifyLiveQualificationEvidence(
       });
       continue;
     }
-    // CORRECTION09 C09-04: re-read every manifest
-    // artifact (stdout / stderr / process_result /
-    // native) from disk and SHA-compare. A manifest
-    // that claims arbitrary SHAs without backing
-    // artifacts (or with stale bytes) fails closed.
+    // CORRECTION10: the manifest's self-declared
+    // `capability` MUST equal the axis key it is bound
+    // to. Without this, a JSONL manifest with all the
+    // right SHAs can be re-purposed for HEADLESS or any
+    // other axis the SHA happened to line up with.
+    if (
+      typeof manifest.capability === "string" &&
+      manifest.capability.length > 0 &&
+      manifest.capability !== k
+    ) {
+      errors.push({
+        kind: "EVIDENCE_EXECUTION_MISMATCH",
+        key: k,
+        message: `Execution-capture manifest declares capability='${manifest.capability}' but is bound to axis '${k}' (CORRECTION10). Manifest cannot be re-purposed across axes.`,
+        artifact_path: execAbsolute,
+      });
+      continue;
+    }
+    // CORRECTION09 C09-04 + CORRECTION10: re-read every
+    // manifest artifact (stdout / stderr / process_result
+    // / native) from disk and SHA-compare. Every internal
+    // `*_path` field is FIRST routed through the same
+    // `resolveEvidencePath` authority the verifier uses
+    // for `probe_evidence_path`, `invocation_evidence_path`,
+    // and `execution_capture_path`. A manifest that names
+    // an absolute path, a `..`-escape, or a symlink
+    // escaping the repo root is rejected here with
+    // `EVIDENCE_PATH_ESCAPE`.
     const artifactDrift = reverifyExecutionCaptureManifestArtifacts({
       manifest,
-      repoRoot,
+      capability: k,
+      resolvePath: (artifact_path, capability) => {
+        const r = resolveEvidencePath(artifact_path, repoRoot, capability);
+        if (r.ok) {
+          return { ok: true, absolute: r.absolute };
+        }
+        return {
+          ok: false,
+          error_message: r.error.message,
+          artifact_path: r.error.artifact_path ?? artifact_path,
+        };
+      },
     });
     for (const d of artifactDrift) {
-      errors.push({
-        kind: "EVIDENCE_HASH_MISMATCH",
-        key: k,
-        message: `Execution-capture manifest artifact '${String(d.field)}' at '${d.path}' recorded sha256='${d.recorded_sha256}' but recomputed sha256='${d.recomputed_sha256}' (CORRECTION09 C09-04).`,
-        artifact_path: pathResolve(repoRoot, d.path),
-        recorded_sha256: d.recorded_sha256,
-        recomputed_sha256: d.recomputed_sha256,
-      });
+      if (d.kind === "path_escape") {
+        errors.push({
+          kind: "EVIDENCE_PATH_ESCAPE",
+          key: k,
+          message: `Execution-capture manifest artifact '${String(d.field)}' declares path '${d.path}' which fails the repo-root path authority (CORRECTION10). Internal manifest paths share the same authority as execution_capture_path / probe_evidence_path / invocation_evidence_path.`,
+          artifact_path: d.path,
+        });
+      } else if (d.kind === "missing") {
+        errors.push({
+          kind: "EVIDENCE_HASH_MISMATCH",
+          key: k,
+          message: `Execution-capture manifest artifact '${String(d.field)}' at '${d.path}' is missing on disk (CORRECTION09 C09-04).`,
+          artifact_path: d.path,
+          recorded_sha256: d.recorded_sha256,
+          recomputed_sha256: "",
+        });
+      } else {
+        errors.push({
+          kind: "EVIDENCE_HASH_MISMATCH",
+          key: k,
+          message: `Execution-capture manifest artifact '${String(d.field)}' at '${d.path}' recorded sha256='${d.recorded_sha256}' but recomputed sha256='${d.recomputed_sha256}' (CORRECTION09 C09-04).`,
+          artifact_path: d.path,
+          recorded_sha256: d.recorded_sha256,
+          recomputed_sha256: d.recomputed_sha256,
+        });
+      }
     }
     if (artifactDrift.length > 0) {
       continue;

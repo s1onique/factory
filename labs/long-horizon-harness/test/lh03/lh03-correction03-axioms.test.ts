@@ -91,6 +91,19 @@ import {
 function withInvocation(
   base: Record<string, unknown>,
 ): Parameters<typeof defaultPiCapabilities>[2] {
+  // CORRECTION10: every LIVE_QUALIFIED / REPLAY_QUALIFIED
+  // axis MUST bind an execution-capture manifest whose
+  // `capability` field equals the axis key. Wire each
+  // axis to its own canonical capture fixture instead
+  // of reusing the JSONL manifest for everything.
+  const axes: ReadonlyArray<CapabilityKey> = [
+    "JSONL",
+    "STREAMING_EVENTS",
+    "HEADLESS",
+    "EXPLICIT_CWD",
+    "ISOLATED_DATA_DIR",
+    "CANCELLATION",
+  ];
   const inv = loadInvocationFixture({
     repoRoot: REPO_ROOT,
     capability: "JSONL",
@@ -99,14 +112,35 @@ function withInvocation(
     repoRoot: REPO_ROOT,
     capability: "JSONL",
   });
-  const cancelCap = loadCaptureFixture({
-    repoRoot: REPO_ROOT,
-    capability: "CANCELLATION",
-  });
-  const cancelInv = loadInvocationFixture({
-    repoRoot: REPO_ROOT,
-    capability: "CANCELLATION",
-  });
+  const axisInvocations: Record<
+    string,
+    { evidence: typeof inv.evidence; path: string; sha256: string }
+  > = {};
+  const axisCaptures: Record<
+    string,
+    { path: string; sha256: string }
+  > = {};
+  const axisExecutionIds: Record<string, string> = {};
+  for (const k of axes) {
+    const i = loadInvocationFixture({
+      repoRoot: REPO_ROOT,
+      capability: k,
+    });
+    const c = loadCaptureFixture({
+      repoRoot: REPO_ROOT,
+      capability: k,
+    });
+    axisInvocations[k] = {
+      evidence: i.evidence,
+      path: i.repo_relative_path,
+      sha256: i.evidence.artifact_sha256,
+    };
+    axisCaptures[k] = {
+      path: c.repo_relative_path,
+      sha256: c.manifest_sha256,
+    };
+    axisExecutionIds[k] = c.manifest.execution_id;
+  }
   return {
     ...(base as Parameters<typeof defaultPiCapabilities>[2]),
     invocation_evidence: inv.evidence,
@@ -118,22 +152,12 @@ function withInvocation(
     execution_capture_path: cap.repo_relative_path,
     execution_capture_sha256: cap.manifest_sha256,
     execution_id: cap.manifest.execution_id,
-    axis_execution_captures: {
-      CANCELLATION: {
-        path: cancelCap.repo_relative_path,
-        sha256: cancelCap.manifest_sha256,
-      },
-    },
-    axis_invocation_evidence: {
-      CANCELLATION: {
-        evidence: cancelInv.evidence,
-        path: cancelInv.repo_relative_path,
-        sha256: cancelInv.evidence.artifact_sha256,
-      },
-    },
-    axis_execution_ids: {
-      CANCELLATION: cancelCap.manifest.execution_id,
-    },
+    // CORRECTION10: per-axis execution-capture binding.
+    // Each axis binds its own manifest so
+    // `manifest.capability === axis.key`.
+    axis_execution_captures: axisCaptures,
+    axis_invocation_evidence: axisInvocations,
+    axis_execution_ids: axisExecutionIds,
   } as Parameters<typeof defaultPiCapabilities>[2];
 }
 
