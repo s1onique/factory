@@ -1073,4 +1073,18 @@ SELF_CONTRADICTORY_INVOCATION_ACCEPTED        = IMPOSSIBLE   (C07-06)
 LIVE_QUALIFIED_WITHOUT_INVOCATION_SHA         = IMPOSSIBLE   (C07-07)
 ```
 
+
+Terminal commit binding (CORRECTION07)
+-------------------------------------
+
+The CORRECTION07 patch was committed as:
+
+  \`\`\`text
+  TERMINAL_CORRECTION07_COMMIT = 8a0003d8b5899b875f1320374fa156b23b57639e
+  \`\`\`
+
+This SHA is the subject the Factory qualification binds to. Any
+rebase / amend invalidates this binding and forces a fresh
+qualification emit.
+
 CLOSED.
