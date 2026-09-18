@@ -14,7 +14,10 @@ import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import {
   buildCanonicalBaseline,
+  canonicalBaselineIdentityHash,
+  canonicalBaselineIdentityShape,
   CANONICAL_BASELINE_FILES,
+  loadFrozenCanonicalCapabilities,
 } from "../../fault-lab/deterministic/baseline.js";
 import {
   classify,
@@ -23,7 +26,9 @@ import {
   prepareWorkspace,
 } from "../../fault-lab/deterministic/runner.js";
 import { verifyLiveQualificationEvidence } from "../../src/adapter-common/evidence-verifier.js";
-import { findFault } from "../../fault-lab/deterministic/fault-catalog.js";
+import { FAULT_CATALOG, findFault } from "../../fault-lab/deterministic/fault-catalog.js";
+import * as catalogModule from "../../fault-lab/deterministic/fault-catalog.js";
+import * as typesModule from "../../fault-lab/deterministic/types.js";
 
 const REPO_ROOT = defaultRepoRoot();
 
@@ -69,7 +74,7 @@ test("LH-04 baseline: classify() returns PASS for matching authority+kind", () =
   });
   assert.equal(v.disposition, "PASS");
   assert.equal(v.observedErrorKind, "EVIDENCE_HASH_MISMATCH");
-  assert.equal(v.observedAuthority, "byte_hash");
+  assert.equal(v.classifiedAuthority, "byte_hash");
 });
 
 test("LH-04 baseline: classify() returns ESCAPED when verifier passes", () => {
@@ -96,7 +101,7 @@ test("LH-04 baseline: classify() returns WRONG_AUTHORITY when kind differs", () 
     expectedErrorKind: "EVIDENCE_HASH_MISMATCH",
   });
   assert.equal(v.disposition, "WRONG_AUTHORITY");
-  assert.equal(v.observedAuthority, "path");
+  assert.equal(v.classifiedAuthority, "path");
 });
 
 test("LH-04 fault catalog is closed-world: 17 experiments with all expected authorities", () => {
@@ -105,5 +110,77 @@ test("LH-04 fault catalog is closed-world: 17 experiments with all expected auth
     const exp = findFault(id);
     assert.ok(exp !== undefined, `catalog must contain ${id}`);
     assert.equal(exp.id, id);
+    // L04-C02: every catalog entry must carry a mutation_taxonomy.
+    assert.ok(
+      typeof exp.mutation_taxonomy === "string" &&
+        ["SINGLE_DIMENSION","GUARD_REACHABILITY_CONSTRUCTION","COMPOUND_FORGERY","COMPOUND_AXIS_SPLICE"].includes(
+          exp.mutation_taxonomy,
+        ),
+      `${id} must carry a valid mutation_taxonomy (got ${exp.mutation_taxonomy})`,
+    );
+  }
+  assert.equal(FAULT_CATALOG.length, 17);
+});
+
+test("L04-C02: catalog is the single fault-contract authority (no separate table)", () => {
+  assert.equal(
+    "FAULT_AUTHORITY_KIND" in catalogModule,
+    false,
+    "FAULT_AUTHORITY_KIND must be derived from FAULT_CATALOG, not exported separately",
+  );
+  assert.equal(
+    "FAULT_AUTHORITY_KIND" in typesModule,
+    false,
+    "FAULT_AUTHORITY_KIND must be derived from FAULT_CATALOG, not exported from types",
+  );
+});
+
+test("L04-C02: every catalog entry's (authority, kind) tuple is a known combination", () => {
+  const valid: ReadonlyArray<{ authority: string; kind: string }> = [
+    { authority: "byte_hash", kind: "EVIDENCE_HASH_MISMATCH" },
+    { authority: "invocation_byte_hash", kind: "EVIDENCE_HASH_MISMATCH" },
+    { authority: "execution_relationship", kind: "EVIDENCE_EXECUTION_MISMATCH" },
+    { authority: "execution_id_relationship", kind: "EVIDENCE_EXECUTION_MISMATCH" },
+    { authority: "manifest_capability_binding", kind: "EVIDENCE_EXECUTION_MISMATCH" },
+    { authority: "manifest_origin_discriminator", kind: "EVIDENCE_EXECUTION_MISMATCH" },
+    { authority: "path", kind: "EVIDENCE_PATH_ESCAPE" },
+    { authority: "oracle_semantic", kind: "EVIDENCE_OBSERVATION_MISMATCH" },
+    { authority: "invocation_derivation", kind: "EVIDENCE_PARSE_FAILED" },
+  ];
+  for (const exp of FAULT_CATALOG) {
+    const ok = valid.some(
+      (v) =>
+        v.authority === exp.expected_authority &&
+        v.kind === exp.expected_error_kind,
+    );
+    assert.ok(
+      ok,
+      `${exp.id}: (authority=${exp.expected_authority}, kind=${exp.expected_error_kind}) is not a known (authority,kind) tuple`,
+    );
+  }
+});
+
+test("L04-C05: reconstructed baseline equals frozen canonical capability document", () => {
+  const ws = prepareWorkspace({ repoRoot: REPO_ROOT, label: "baseline-identity" });
+  try {
+    const reconstructed = buildCanonicalBaseline({ workspaceRoot: ws });
+    const frozen = loadFrozenCanonicalCapabilities({ repoRoot: REPO_ROOT });
+    // Diagnostic: print the diff so failures are debuggable.
+    const aDoc = JSON.stringify(canonicalBaselineIdentityShape(reconstructed), null, 2);
+    const bDoc = JSON.stringify(canonicalBaselineIdentityShape(frozen), null, 2);
+    if (aDoc !== bDoc) {
+      console.log("L04-C05 baseline-identity DIFF:");
+      console.log("RECONSTRUCTED:\n" + aDoc);
+      console.log("FROZEN:\n" + bDoc);
+    }
+    const a = canonicalBaselineIdentityHash(reconstructed);
+    const b = canonicalBaselineIdentityHash(frozen);
+    assert.equal(
+      a,
+      b,
+      "reconstructed baseline must equal frozen canonical capability document on the fields the lab does not rewrite",
+    );
+  } finally {
+    cleanupWorkspace(ws);
   }
 });

@@ -37,7 +37,7 @@ async function expectPass(id: string): Promise<FaultExperimentResult> {
     `${id} must pass; got ${result.disposition}; first=${result.observed_first_rejection_message}`,
   );
   assert.equal(result.observed_error_kind, exp.expected_error_kind);
-  assert.equal(result.observed_authority, exp.expected_authority);
+  assert.equal(result.classified_authority, exp.expected_authority);
   return result;
 }
 

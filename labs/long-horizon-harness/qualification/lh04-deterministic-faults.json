@@ -1,6 +1,6 @@
 {
   "schema": "lh04-deterministic-faults/v1",
-  "emitted_at": "2026-09-18T16:40:15.011Z",
+  "emitted_at": "2026-09-18T21:26:30.053Z",
   "subject": {
     "commit": "7be31164b939f327c557847eb9a8b0c4ffd16b87",
     "predecessor": "qualification/lh03-frozen.json",
@@ -9,7 +9,9 @@
   "substrate": {
     "baseline_passes_verifier": true,
     "workspace_isolation": "fresh-tmpdir-per-experiment",
-    "determinism": "two-run semantic equivalence verified"
+    "two_run_semantic_repeatability": true,
+    "byte_identical_result_artifact": false,
+    "byte_identical_result_artifact_reason": "emitted_at is an ISO timestamp; see L04-C06"
   },
   "verdict": "PASS_DETERMINISTIC_FAULT_LAB",
   "summary": {
@@ -19,11 +21,17 @@
     "escaped": 0,
     "wrong_authority": 0
   },
+  "classification_method_summary": {
+    "structured_error_kind": 12,
+    "structured_error_kind_plus_axis_context": 0,
+    "message_prefix_inference": 5
+  },
   "fault_matrix": [
     {
       "id": "F01",
       "description": "Observation byte drift without rebinding the recorded SHA.",
       "mutated_dimension": "native_artifact_bytes",
+      "mutation_taxonomy": "GUARD_REACHABILITY_CONSTRUCTION",
       "preserved_dimensions": [
         "manifest_bytes",
         "invocation_bytes",
@@ -35,7 +43,8 @@
       ],
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "byte_hash",
+      "classified_authority": "byte_hash",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -44,6 +53,7 @@
       "id": "F02",
       "description": "Invocation byte drift (argv change) without rebinding the recorded SHA.",
       "mutated_dimension": "invocation_artifact_bytes",
+      "mutation_taxonomy": "GUARD_REACHABILITY_CONSTRUCTION",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_paths",
@@ -54,7 +64,8 @@
       ],
       "expected_authority": "invocation_byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "invocation_byte_hash",
+      "classified_authority": "invocation_byte_hash",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -63,6 +74,7 @@
       "id": "F03",
       "description": "Raw-launch contradiction: argv contains '--mode headless'.",
       "mutated_dimension": "invocation_derivation_grammar",
+      "mutation_taxonomy": "GUARD_REACHABILITY_CONSTRUCTION",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_paths",
@@ -74,7 +86,8 @@
       ],
       "expected_authority": "invocation_derivation",
       "expected_error_kind": "EVIDENCE_PARSE_FAILED",
-      "observed_authority": "invocation_derivation",
+      "classified_authority": "invocation_derivation",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_PARSE_FAILED",
       "disposition": "PASS",
       "baseline_passed": true
@@ -83,6 +96,7 @@
       "id": "F04",
       "description": "Invocation/observation splice: bind HEADLESS invocation to JSONL observation.",
       "mutated_dimension": "invocation_evidence_path_binding",
+      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_paths",
@@ -92,7 +106,8 @@
       ],
       "expected_authority": "execution_relationship",
       "expected_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
-      "observed_authority": "execution_relationship",
+      "classified_authority": "execution_relationship",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -101,6 +116,7 @@
       "id": "F05",
       "description": "Execution ID splice: probe evidence execution_id != manifest.execution_id.",
       "mutated_dimension": "probe_evidence_execution_id",
+      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_invocation_sha256",
@@ -110,7 +126,8 @@
       ],
       "expected_authority": "execution_id_relationship",
       "expected_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
-      "observed_authority": "execution_id_relationship",
+      "classified_authority": "execution_id_relationship",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -119,6 +136,7 @@
       "id": "F06",
       "description": "Cross-capability manifest reuse: HEADLESS manifest bound to JSONL axis.",
       "mutated_dimension": "manifest_capability_self_id",
+      "mutation_taxonomy": "COMPOUND_FORGERY",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_invocation_sha256",
@@ -128,7 +146,8 @@
       ],
       "expected_authority": "manifest_capability_binding",
       "expected_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
-      "observed_authority": "manifest_capability_binding",
+      "classified_authority": "manifest_capability_binding",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -137,6 +156,7 @@
       "id": "F07",
       "description": "Replay-to-live promotion: REPLAY_FIXTURE manifest bound to LIVE_QUALIFIED axis.",
       "mutated_dimension": "axis_execution_capture_origin",
+      "mutation_taxonomy": "COMPOUND_FORGERY",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_invocation_sha256",
@@ -147,7 +167,8 @@
       ],
       "expected_authority": "manifest_origin_discriminator",
       "expected_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
-      "observed_authority": "manifest_origin_discriminator",
+      "classified_authority": "manifest_origin_discriminator",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -156,6 +177,7 @@
       "id": "F08",
       "description": "Manifest internal stdout_path = '../escape' is rejected.",
       "mutated_dimension": "manifest_stdout_path",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -166,7 +188,8 @@
       ],
       "expected_authority": "path",
       "expected_error_kind": "EVIDENCE_PATH_ESCAPE",
-      "observed_authority": "path",
+      "classified_authority": "path",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_PATH_ESCAPE",
       "disposition": "PASS",
       "baseline_passed": true
@@ -175,6 +198,7 @@
       "id": "F09",
       "description": "Manifest internal stdout_path = '..'-escape is rejected at path authority.",
       "mutated_dimension": "manifest_stdout_path",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -185,7 +209,8 @@
       ],
       "expected_authority": "path",
       "expected_error_kind": "EVIDENCE_PATH_ESCAPE",
-      "observed_authority": "path",
+      "classified_authority": "path",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_PATH_ESCAPE",
       "disposition": "PASS",
       "baseline_passed": true
@@ -194,6 +219,7 @@
       "id": "F10",
       "description": "In-repo symlink whose target lies outside the workspace is rejected.",
       "mutated_dimension": "manifest_stdout_path",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -204,7 +230,8 @@
       ],
       "expected_authority": "path",
       "expected_error_kind": "EVIDENCE_PATH_ESCAPE",
-      "observed_authority": "path",
+      "classified_authority": "path",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_PATH_ESCAPE",
       "disposition": "PASS",
       "baseline_passed": true
@@ -213,6 +240,7 @@
       "id": "F11",
       "description": "Hash-valid bytes at an unauthorized (absolute) path are rejected.",
       "mutated_dimension": "probe_evidence_artifact_path",
+      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "execution_id_binding",
@@ -225,7 +253,8 @@
       ],
       "expected_authority": "path",
       "expected_error_kind": "EVIDENCE_PATH_ESCAPE",
-      "observed_authority": "path",
+      "classified_authority": "path",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_PATH_ESCAPE",
       "disposition": "PASS",
       "baseline_passed": true
@@ -234,6 +263,7 @@
       "id": "F12",
       "description": "stdout.jsonl byte drift without rebinding stdout_sha256.",
       "mutated_dimension": "stdout_artifact_bytes",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -245,7 +275,8 @@
       ],
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "byte_hash",
+      "classified_authority": "byte_hash",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -254,6 +285,7 @@
       "id": "F13",
       "description": "stderr.txt byte drift without rebinding stderr_sha256.",
       "mutated_dimension": "stderr_artifact_bytes",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -265,7 +297,8 @@
       ],
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "byte_hash",
+      "classified_authority": "byte_hash",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -274,6 +307,7 @@
       "id": "F14",
       "description": "process-result.json byte drift without rebinding sha.",
       "mutated_dimension": "process_result_artifact_bytes",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -285,7 +319,8 @@
       ],
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "byte_hash",
+      "classified_authority": "byte_hash",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -294,6 +329,7 @@
       "id": "F15",
       "description": "native artifact byte drift without rebinding sha.",
       "mutated_dimension": "native_artifact_bytes",
+      "mutation_taxonomy": "GUARD_REACHABILITY_CONSTRUCTION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "execution_id_binding",
@@ -307,7 +343,8 @@
       ],
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "byte_hash",
+      "classified_authority": "byte_hash",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -316,6 +353,7 @@
       "id": "F16",
       "description": "Manifest byte drift without rebinding external manifest SHA.",
       "mutated_dimension": "manifest_artifact_bytes",
+      "mutation_taxonomy": "GUARD_REACHABILITY_CONSTRUCTION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "native_artifact_bytes",
@@ -327,7 +365,8 @@
       ],
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
-      "observed_authority": "byte_hash",
+      "classified_authority": "byte_hash",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -336,6 +375,7 @@
       "id": "F17",
       "description": "All bytes + SHAs + paths correct, but recorded observed mismatches recomputed observed.",
       "mutated_dimension": "evidence_relation_observed",
+      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_paths",
@@ -349,7 +389,8 @@
       ],
       "expected_authority": "oracle_semantic",
       "expected_error_kind": "EVIDENCE_OBSERVATION_MISMATCH",
-      "observed_authority": "oracle_semantic",
+      "classified_authority": "oracle_semantic",
+      "classified_authority_method": "structured_error_kind",
       "observed_error_kind": "EVIDENCE_OBSERVATION_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true

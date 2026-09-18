@@ -11,6 +11,11 @@
  * A fault that ESCAPES the verifier (i.e. verifier
  * returns ok=true) is a critical failure: it means the
  * frozen verifier accepted a controlled mutation.
+ *
+ * L04-C06: the second test asserts
+ * `TWO_RUN_SEMANTIC_REPEATABILITY`, not byte-identity.
+ * The result artifact itself embeds an `emitted_at`
+ * ISO timestamp; byte-identical output is not claimed.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,7 +24,7 @@ import { FAULT_CATALOG } from "../../fault-lab/deterministic/fault-catalog.js";
 
 const REPO_ROOT = defaultRepoRoot();
 
-test("LH-04 full matrix: every catalog experiment runs deterministically", async () => {
+test("LH-04 full matrix: every catalog experiment PASSES at declared authority+kind", async () => {
   const results = await runFaultMatrix({
     repoRoot: REPO_ROOT,
     experiments: FAULT_CATALOG,
@@ -28,13 +33,13 @@ test("LH-04 full matrix: every catalog experiment runs deterministically", async
     if (r.disposition === "PASS") continue;
     // FAIL loud — every fault MUST be qualified.
     assert.fail(
-      `LH-04 fault ${r.id} disposition=${r.disposition} expected_authority=${r.expected_authority} expected_kind=${r.expected_error_kind} got_authority=${r.observed_authority} got_kind=${r.observed_error_kind} msg=${r.observed_first_rejection_message}`,
+      `LH-04 fault ${r.id} disposition=${r.disposition} expected_authority=${r.expected_authority} expected_kind=${r.expected_error_kind} got_authority=${r.classified_authority} got_kind=${r.observed_error_kind} msg=${r.observed_first_rejection_message}`,
     );
   }
   assert.equal(results.length, FAULT_CATALOG.length);
 });
 
-test("LH-04 full matrix: two consecutive runs produce identical semantic shape", async () => {
+test("L04-C06: TWO_RUN_SEMANTIC_REPEATABILITY holds (not byte-identity)", async () => {
   const a = await runFaultMatrix({
     repoRoot: REPO_ROOT,
     experiments: FAULT_CATALOG,
@@ -50,7 +55,7 @@ test("LH-04 full matrix: two consecutive runs produce identical semantic shape",
     assert.deepEqual(
       sa,
       sb,
-      `LH-04 determinism failure at ${a[i]!.id}`,
+      `LH-04 two-run semantic repeatability failure at ${a[i]!.id}`,
     );
   }
 });

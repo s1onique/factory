@@ -38,7 +38,6 @@ import {
 } from "../../src/protocol/index.js";
 import {
   QUALIFIED_PI_IDENTITY,
-  defaultPiCapabilities,
 } from "../../src/adapters/pi/pi-adapter.js";
 import {
   artifactSha256,
@@ -93,6 +92,22 @@ export const CANONICAL_BASELINE_FILES: readonly string[] = [
  * Build a canonical baseline `HarnessCapabilities`
  * document wired against a freshly-copied workspace.
  *
+ * L04-C05 (review pass 1): the lab MUST prove it is
+ * mutating the canonical state the LH-03 freeze
+ * committed to, not a "nearby valid state" reconstructed
+ * from scratch. We therefore start from
+ * `loadFrozenCanonicalCapabilities(repoRoot)` — the
+ * verbatim `capabilities.json` from the LH-03 freeze —
+ * and only mutate the fields the lab legitimately has
+ * to rewrite to make the closed-world verifier accept
+ * the canonical fixtures as `REPLAY_QUALIFIED`.
+ *
+ * Concretely, for each wired axis we set
+ * `live_qualification` and `probe_evidence` to reflect
+ * what the verifier will recompute; everything else
+ * (recorded SHAs, paths, capability bits) is left
+ * exactly as the frozen doc committed it.
+ *
  * Per CORRECTION10, each axis binds its own canonical
  * capture manifest; `manifest.capability === axis.key`.
  */
@@ -100,6 +115,26 @@ export function buildCanonicalBaseline(args: {
   readonly workspaceRoot: string;
 }): HarnessCapabilities {
   const ws = resolve(args.workspaceRoot);
+  const repoRoot = resolve(ws, "..", "..", "..", "..", "..");
+  // The workspace is a fresh tmpdir that mirrors
+  // the repo layout; resolve the frozen doc from
+  // the workspace's mirrored `test/fixtures/...` path
+  // so the SHA computation lines up.
+  const frozenPath = join(
+    ws,
+    "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json",
+  );
+  if (!existsSync(frozenPath)) {
+    throw new Error(
+      `buildCanonicalBaseline: frozen capabilities.json missing at ${frozenPath}`,
+    );
+  }
+  const initial = JSON.parse(readFileSync(frozenPath, "utf8")) as Record<string, unknown>;
+  const initialAxes = (initial["capability_axes"] ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  void repoRoot;
 
   const axisExecutionIds: Record<string, string> = {};
   const axisInvMap: Record<string, {
@@ -159,27 +194,24 @@ export function buildCanonicalBaseline(args: {
     // LIVE_UNQUALIFIED in the baseline.
   ];
 
-  // The adapter's evidence parameter is a wide object;
-  // we cast to that type via the function's parameter
-  // type. We deliberately pass partial per-axis maps;
-  // the adapter does not require every axis to be
-  // populated.
-  type EvidenceArg = Parameters<typeof defaultPiCapabilities>[2];
-  const evidence = {
-    session_capture: FIXTURE_SESSION,
-    cancellation_halt: FIXTURE_PROCESS,
-    requested_cwd: "/private/tmp/pi-live",
-    execution_capture_origin: "REPLAY_FIXTURE",
-    axis_execution_captures: axisCapMap,
-    axis_invocation_evidence: axisInvMap,
-    axis_execution_ids: axisExecutionIds,
-  } as unknown as EvidenceArg;
-
-  const initial = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, evidence);
+  // L04-C05 (review pass 1): start from the frozen
+  // canonical capability document (already loaded as
+  // `initial` above), NOT from a fresh
+  // `defaultPiCapabilities` reconstruction. The frozen
+  // doc is the source of truth; the lab only rewrites
+  // `live_qualification_by_key` + per-axis
+  // `probe_evidence` + the four path/SHA fields the
+  // lab must repoint against the workspace-mirrored
+  // fixtures. Every other field (recorded
+  // `execution_capture_sha256` etc. for unwired axes,
+  // `harness_capability` bits, etc.) is preserved
+  // verbatim from the freeze.
   const mutated: Record<string, unknown> = {
     ...initial,
-    capability_axes: { ...initial.capability_axes },
-    live_qualification_by_key: { ...initial.live_qualification_by_key },
+    capability_axes: { ...initialAxes },
+    live_qualification_by_key: {
+      ...((initial["live_qualification_by_key"] ?? {}) as Record<string, string>),
+    },
   };
   const axes = mutated["capability_axes"] as Record<
     string,
@@ -254,6 +286,93 @@ export function emptyCapsForWorkspace(_workspaceRoot: string): HarnessCapabiliti
   return emptyCapabilities(QUALIFIED_PI_IDENTITY, 1700000000000);
 }
 
+/**
+ * Load the LH-03 frozen canonical capabilities document
+ * from disk, returning the verbatim `HarnessCapabilities`
+ * the LH-03 freeze record commits to.
+ *
+ * The lab uses this as the seed for `buildCanonicalBaseline`
+ * assertions (see `lh04-baseline.test.ts` →
+ * `RECONSTRUCTED_BASELINE_AUTHORITY_MATCHES_FROZEN_CAPABILITIES`)
+ * and as the starting point for byte-exact mutation
+ * experiments that need to preserve every recorded SHA.
+ *
+ * This is the single authority for "what the LH-03
+ * freeze considered the canonical capability document";
+ * every other representation is derived from this one.
+ */
+export function loadFrozenCanonicalCapabilities(args: {
+  readonly repoRoot: string;
+}): HarnessCapabilities {
+  const abs = join(
+    args.repoRoot,
+    "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json",
+  );
+  if (!existsSync(abs)) {
+    throw new Error(
+      `loadFrozenCanonicalCapabilities: missing ${abs}`,
+    );
+  }
+  const raw = readFileSync(abs, "utf8");
+  return JSON.parse(raw) as HarnessCapabilities;
+}
+
+/**
+ * Compute a canonical SHA-256 of a `HarnessCapabilities`
+ * document by re-serialising with stable key ordering.
+ * Used by `RECONSTRUCTED_BASELINE_AUTHORITY_MATCHES_FROZEN_CAPABILITIES`
+ * to prove the reconstructed baseline matches the
+ * frozen capability document on the fields the lab
+ * commits to NOT rewriting.
+ *
+ * The lab legitimately rewrites, for the per-axis
+ * witnesses it wires:
+ *   - `live_qualification_by_key[k]`
+ *   - `capability_axes[k].live_qualification`
+ *   - `capability_axes[k].probe_evidence`
+ *   - `capability_axes[k].probe_evidence_path`
+ *   - `capability_axes[k].invocation_evidence_path`
+ *   - `capability_axes[k].invocation_evidence_sha256`
+ *   - `capability_axes[k].execution_capture_path`
+ *   - `capability_axes[k].execution_capture_sha256`
+ *   - `capability_axes[k].execution_capture_origin`
+ *     (always "REPLAY_FIXTURE" so no observable change)
+ *
+ * What the oracle compares is the authority-binding
+ * substrate that the lab MUST NOT drift:
+ *   - `harness_identity` (provider + version)
+ *   - `schema_version`
+ *   - `capability_axes[k].harness_capability` (bit)
+ *   - `capability_axes[k].execution_capture_sha256`
+ *     (the recorded manifest SHA — the lab MUST preserve
+ *     it byte-exact for the frozen-substrate proof)
+ */
+export function canonicalBaselineIdentityShape(
+  doc: HarnessCapabilities,
+): Record<string, unknown> {
+  const allowed: Record<string, unknown> = {
+    harness_identity: doc.harness_identity,
+    schema_version: doc.schema_version,
+    capability_axes: {},
+  };
+  const axes = doc.capability_axes as Record<string, Record<string, unknown>>;
+  const sortedKeys = Object.keys(axes).sort();
+  for (const k of sortedKeys) {
+    const a = axes[k] ?? {};
+    (allowed.capability_axes as Record<string, unknown>)[k] = {
+      harness_capability: a.harness_capability,
+      execution_capture_sha256: a.execution_capture_sha256,
+    };
+  }
+  return allowed;
+}
+
+export function canonicalBaselineIdentityHash(doc: HarnessCapabilities): string {
+  const h = createHash("sha256");
+  h.update(JSON.stringify(canonicalBaselineIdentityShape(doc)));
+  return h.digest("hex");
+}
+
 export const PATH_SEP = pathSep;
 
 /**
@@ -281,4 +400,3 @@ function computeObservedForAxis(args: {
       return "session";
   }
 }
-

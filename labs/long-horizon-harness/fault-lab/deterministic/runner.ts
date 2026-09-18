@@ -13,7 +13,8 @@
  *
  *   3. Invokes the experiment's `mutate` closure,
  *      which tampers with exactly the intended
- *      authority dimension.
+ *      authority dimension (or, for `COMPOUND_*`
+ *      taxonomies, the documented compound shape).
  *
  *   4. Re-builds the baseline from the mutated
  *      workspace, runs the verifier, and classifies
@@ -27,7 +28,9 @@
  * `runFaultMatrix` runs every experiment in a catalog
  * and returns the deterministic set of results. Two
  * consecutive calls from clean tmp workspaces MUST
- * produce byte-identical results.
+ * produce semantically identical results
+ * (`TWO_RUN_SEMANTIC_REPEATABILITY`, NOT byte-identity:
+ * the result artifact embeds `emitted_at` ISO timestamps).
  */
 import { mkdtempSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,14 +86,19 @@ export function classify(args: {
 }): {
   readonly disposition: FaultDisposition;
   readonly observedErrorKind: ExpectedErrorKind | "VERIFIER_OK" | "VERIFIER_PARSED_NULL";
-  readonly observedAuthority: Authority | "verifier_ok";
+  readonly classifiedAuthority: Authority | "verifier_ok";
+  readonly classifiedAuthorityMethod:
+    | "structured_error_kind"
+    | "structured_error_kind_plus_axis_context"
+    | "message_prefix_inference";
   readonly firstMessage: string | null;
 } {
   if (args.verifierOk) {
     return {
       disposition: "ESCAPED",
       observedErrorKind: "VERIFIER_OK",
-      observedAuthority: "verifier_ok",
+      classifiedAuthority: "verifier_ok",
+      classifiedAuthorityMethod: "structured_error_kind",
       firstMessage: null,
     };
   }
@@ -98,57 +106,15 @@ export function classify(args: {
     return {
       disposition: "WRONG_AUTHORITY",
       observedErrorKind: "VERIFIER_PARSED_NULL",
-      observedAuthority: "byte_hash",
+      classifiedAuthority: "byte_hash",
+      classifiedAuthorityMethod: "structured_error_kind",
       firstMessage: "verifier returned ok=false with no error list",
     };
   }
   const first: EvidenceVerificationError = args.verifierErrors[0]!;
   const observedKind = first.kind as ExpectedErrorKind;
-  let observedAuthority: Authority;
-  switch (observedKind) {
-    case "EVIDENCE_HASH_MISMATCH":
-      // Differentiate invocation vs observation byte
-      // drift by message text. Both fire the same
-      // closed-world error kind, but the catalog
-      // distinguishes them as separate authority
-      // dimensions (invocation_byte_hash vs
-      // byte_hash) for finer attribution.
-      observedAuthority = first.message.startsWith("Invocation artifact")
-        ? "invocation_byte_hash"
-        : "byte_hash";
-      break;
-    case "EVIDENCE_PATH_ESCAPE":
-      observedAuthority = "path";
-      break;
-    case "EVIDENCE_PARSE_FAILED":
-      observedAuthority = first.message.includes("Invocation")
-        ? "invocation_derivation"
-        : "oracle_semantic";
-      break;
-    case "EVIDENCE_OBSERVATION_MISMATCH":
-      observedAuthority = "oracle_semantic";
-      break;
-    case "EVIDENCE_ORACLE_FAILED":
-      observedAuthority = "oracle_semantic";
-      break;
-    case "EVIDENCE_EXECUTION_MISMATCH":
-      if (first.message.includes("manifest declares capability")) {
-        observedAuthority = "manifest_capability_binding";
-      } else if (first.message.includes("capture_origin")) {
-        observedAuthority = "manifest_origin_discriminator";
-      } else if (first.message.includes("execution_id")) {
-        observedAuthority = "execution_id_relationship";
-      } else {
-        observedAuthority = "execution_relationship";
-      }
-      break;
-    case "EVIDENCE_ARTIFACT_MISSING":
-      observedAuthority = "path";
-      break;
-    default:
-      observedAuthority = "byte_hash";
-  }
-  const authorityMatches = observedAuthority === args.expectedAuthority;
+  const classified = classifyAuthority(first);
+  const authorityMatches = classified.authority === args.expectedAuthority;
   const kindMatches = observedKind === args.expectedErrorKind;
   const disposition: FaultDisposition =
     authorityMatches && kindMatches
@@ -157,9 +123,99 @@ export function classify(args: {
   return {
     disposition,
     observedErrorKind: observedKind,
-    observedAuthority,
+    classifiedAuthority: classified.authority,
+    classifiedAuthorityMethod: classified.method,
     firstMessage: first.message,
   };
+}
+
+/**
+ * Classify the authority under which the verifier's
+ * FIRST error was emitted.
+ *
+ * The frozen LH-03 verifier emits a structured
+ * `EvidenceVerificationErrorKind`; this function maps
+ * that structured field to the lab's authority label.
+ * For two error kinds
+ * (`EVIDENCE_HASH_MISMATCH`, `EVIDENCE_PARSE_FAILED`)
+ * the structured field alone does not uniquely identify
+ * the authority axis (e.g. an invocation byte-drift and
+ * an observation byte-drift both fire
+ * `EVIDENCE_HASH_MISMATCH`), so the lab uses the
+ * verbatim error `message` as a disambiguator.
+ *
+ * The classification method is recorded alongside the
+ * label so reviewers can see when the lab is relying
+ * on message-text inference vs structured output.
+ */
+export function classifyAuthority(err: EvidenceVerificationError): {
+  readonly authority: Authority;
+  readonly method:
+    | "structured_error_kind"
+    | "structured_error_kind_plus_axis_context"
+    | "message_prefix_inference";
+} {
+  switch (err.kind) {
+    case "EVIDENCE_PATH_ESCAPE":
+      return { authority: "path", method: "structured_error_kind" };
+    case "EVIDENCE_OBSERVATION_MISMATCH":
+      return { authority: "oracle_semantic", method: "structured_error_kind" };
+    case "EVIDENCE_ORACLE_FAILED":
+      return { authority: "oracle_semantic", method: "structured_error_kind" };
+    case "EVIDENCE_ARTIFACT_MISSING":
+      return { authority: "path", method: "structured_error_kind" };
+    case "EVIDENCE_HASH_MISMATCH":
+      // invocation vs observation byte drift share one
+      // error kind; disambiguate by message prefix.
+      return err.message.startsWith("Invocation artifact")
+        ? {
+            authority: "invocation_byte_hash",
+            method: "message_prefix_inference",
+          }
+        : { authority: "byte_hash", method: "structured_error_kind" };
+    case "EVIDENCE_PARSE_FAILED":
+      // invocation parse failure vs observation parse
+      // failure share one error kind; disambiguate by
+      // message text.
+      return err.message.includes("Invocation")
+        ? {
+            authority: "invocation_derivation",
+            method: "message_prefix_inference",
+          }
+        : { authority: "oracle_semantic", method: "structured_error_kind" };
+    case "EVIDENCE_EXECUTION_MISMATCH":
+      // The execution_mismatch error kind covers four
+      // axes (relationship, capability binding, origin
+      // discriminator, execution_id relationship); the
+      // verifier message names which axis failed.
+      if (err.message.includes("manifest declares capability")) {
+        return {
+          authority: "manifest_capability_binding",
+          method: "message_prefix_inference",
+        };
+      }
+      if (err.message.includes("capture_origin")) {
+        return {
+          authority: "manifest_origin_discriminator",
+          method: "message_prefix_inference",
+        };
+      }
+      if (err.message.includes("execution_id")) {
+        return {
+          authority: "execution_id_relationship",
+          method: "message_prefix_inference",
+        };
+      }
+      return {
+        authority: "execution_relationship",
+        method: "structured_error_kind",
+      };
+    default:
+      return {
+        authority: "byte_hash",
+        method: "structured_error_kind",
+      };
+  }
 }
 
 /**
@@ -190,8 +246,10 @@ export async function runFaultExperiment(args: {
         expected_error_kind: args.experiment.expected_error_kind,
         mutated_dimension: args.experiment.mutated_dimension,
         preserved_dimensions: args.experiment.preserved_dimensions,
+        mutation_taxonomy: args.experiment.mutation_taxonomy,
         observed_error_kind: "VERIFIER_PARSED_NULL",
-        observed_authority: "verifier_ok",
+        classified_authority: "verifier_ok",
+        classified_authority_method: "structured_error_kind",
         observed_first_rejection_message:
           baselineErrs
             .map((e) => `${e.kind}: ${e.message}`)
@@ -220,8 +278,10 @@ export async function runFaultExperiment(args: {
       expected_error_kind: args.experiment.expected_error_kind,
       mutated_dimension: args.experiment.mutated_dimension,
       preserved_dimensions: args.experiment.preserved_dimensions,
+      mutation_taxonomy: args.experiment.mutation_taxonomy,
       observed_error_kind: verdict.observedErrorKind,
-      observed_authority: verdict.observedAuthority,
+      classified_authority: verdict.classifiedAuthority,
+      classified_authority_method: verdict.classifiedAuthorityMethod,
       observed_first_rejection_message: verdict.firstMessage,
       disposition: verdict.disposition,
       baseline_passed: true,
@@ -256,10 +316,15 @@ export async function runFaultMatrix(args: {
 }
 
 /**
- * Normalize a result for determinism comparison. Strips
- * fields that legitimately vary between runs (workspace
- * paths, free-text messages) and keeps only the
- * deterministic semantic fields.
+ * Normalize a result for semantic-repeatability
+ * comparison (`TWO_RUN_SEMANTIC_REPEATABILITY`). Strips
+ * fields that legitimately vary between runs (free-text
+ * messages, free-text notes) and keeps only the
+ * semantically meaningful fields.
+ *
+ * Note: this is NOT byte-identity. The result artifact
+ * itself embeds an `emitted_at` ISO timestamp; byte-
+ * identical output is not claimed.
  */
 export function semanticResultShape(
   result: FaultExperimentResult,
@@ -271,8 +336,10 @@ export function semanticResultShape(
     expected_error_kind: result.expected_error_kind,
     mutated_dimension: result.mutated_dimension,
     preserved_dimensions: result.preserved_dimensions,
+    mutation_taxonomy: result.mutation_taxonomy,
     observed_error_kind: result.observed_error_kind,
-    observed_authority: result.observed_authority,
+    classified_authority: result.classified_authority,
+    classified_authority_method: result.classified_authority_method,
     disposition: result.disposition,
     baseline_passed: result.baseline_passed,
   };
@@ -285,4 +352,3 @@ export function semanticResultShape(
 export function defaultRepoRoot(): string {
   return resolve(import.meta.dirname, "..", "..");
 }
-

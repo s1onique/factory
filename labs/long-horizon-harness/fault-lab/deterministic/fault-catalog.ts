@@ -49,6 +49,7 @@ const F01: FaultExperiment = {
   expected_authority: "byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "native_artifact_bytes",
+  mutation_taxonomy: "GUARD_REACHABILITY_CONSTRUCTION",
   preserved_dimensions: [
     "manifest_bytes",
     "invocation_bytes",
@@ -105,6 +106,7 @@ const F02: FaultExperiment = {
   expected_authority: "invocation_byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "invocation_artifact_bytes",
+  mutation_taxonomy: "GUARD_REACHABILITY_CONSTRUCTION",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_paths",
@@ -189,6 +191,7 @@ const F03: FaultExperiment = {
   expected_authority: "invocation_derivation",
   expected_error_kind: "EVIDENCE_PARSE_FAILED",
   mutated_dimension: "invocation_derivation_grammar",
+  mutation_taxonomy: "GUARD_REACHABILITY_CONSTRUCTION",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_paths",
@@ -243,6 +246,7 @@ const F04: FaultExperiment = {
   expected_authority: "execution_relationship",
   expected_error_kind: "EVIDENCE_EXECUTION_MISMATCH",
   mutated_dimension: "invocation_evidence_path_binding",
+  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_paths",
@@ -272,6 +276,7 @@ const F05: FaultExperiment = {
   expected_authority: "execution_id_relationship",
   expected_error_kind: "EVIDENCE_EXECUTION_MISMATCH",
   mutated_dimension: "probe_evidence_execution_id",
+  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_invocation_sha256",
@@ -304,6 +309,7 @@ const F06: FaultExperiment = {
   expected_authority: "manifest_capability_binding",
   expected_error_kind: "EVIDENCE_EXECUTION_MISMATCH",
   mutated_dimension: "manifest_capability_self_id",
+  mutation_taxonomy: "COMPOUND_FORGERY",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_invocation_sha256",
@@ -411,6 +417,7 @@ const F07: FaultExperiment = {
   expected_authority: "manifest_origin_discriminator",
   expected_error_kind: "EVIDENCE_EXECUTION_MISMATCH",
   mutated_dimension: "axis_execution_capture_origin",
+  mutation_taxonomy: "COMPOUND_FORGERY",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_invocation_sha256",
@@ -447,6 +454,7 @@ const F08: FaultExperiment = {
   expected_authority: "path",
   expected_error_kind: "EVIDENCE_PATH_ESCAPE",
   mutated_dimension: "manifest_stdout_path",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -491,6 +499,7 @@ const F09: FaultExperiment = {
   expected_authority: "path",
   expected_error_kind: "EVIDENCE_PATH_ESCAPE",
   mutated_dimension: "manifest_stdout_path",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -519,6 +528,7 @@ const F10: FaultExperiment = {
   expected_authority: "path",
   expected_error_kind: "EVIDENCE_PATH_ESCAPE",
   mutated_dimension: "manifest_stdout_path",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -564,6 +574,7 @@ const F11: FaultExperiment = {
   expected_authority: "path",
   expected_error_kind: "EVIDENCE_PATH_ESCAPE",
   mutated_dimension: "probe_evidence_artifact_path",
+  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "execution_id_binding",
@@ -613,6 +624,7 @@ const F12: FaultExperiment = {
   expected_authority: "byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "stdout_artifact_bytes",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -640,6 +652,7 @@ const F13: FaultExperiment = {
   expected_authority: "byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "stderr_artifact_bytes",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -667,6 +680,7 @@ const F14: FaultExperiment = {
   expected_authority: "byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "process_result_artifact_bytes",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -708,6 +722,7 @@ const F15: FaultExperiment = {
   expected_authority: "byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "native_artifact_bytes",
+  mutation_taxonomy: "GUARD_REACHABILITY_CONSTRUCTION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "execution_id_binding",
@@ -769,6 +784,7 @@ const F16: FaultExperiment = {
   expected_authority: "byte_hash",
   expected_error_kind: "EVIDENCE_HASH_MISMATCH",
   mutated_dimension: "manifest_artifact_bytes",
+  mutation_taxonomy: "GUARD_REACHABILITY_CONSTRUCTION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "native_artifact_bytes",
@@ -812,6 +828,7 @@ const F17: FaultExperiment = {
   expected_authority: "oracle_semantic",
   expected_error_kind: "EVIDENCE_OBSERVATION_MISMATCH",
   mutated_dimension: "evidence_relation_observed",
+  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_paths",
@@ -866,4 +883,3 @@ export const FAULT_CATALOG: readonly FaultExperiment[] = Object.freeze([
 export function findFault(id: string): FaultExperiment | undefined {
   return FAULT_CATALOG.find((f) => f.id === id);
 }
-
