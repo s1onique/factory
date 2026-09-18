@@ -34,16 +34,16 @@
     "HEADLESS": "LIVE_UNQUALIFIED",
     "STREAMING_EVENTS": "LIVE_UNQUALIFIED",
     "FINAL_JSON": "LIVE_UNQUALIFIED",
-    "JSONL": "LIVE_QUALIFIED",
+    "JSONL": "REPLAY_QUALIFIED",
     "RPC": "LIVE_UNQUALIFIED",
     "SESSION_RESUME": "LIVE_UNQUALIFIED",
     "SESSION_FORK": "LIVE_UNQUALIFIED",
-    "EXPLICIT_CWD": "LIVE_QUALIFIED",
+    "EXPLICIT_CWD": "REPLAY_QUALIFIED",
     "ISOLATED_DATA_DIR": "LIVE_UNQUALIFIED",
     "MODEL_SELECTION": "LIVE_UNQUALIFIED",
     "PROVIDER_SELECTION": "LIVE_UNQUALIFIED",
     "TIMEOUT": "NOT_APPLICABLE",
-    "CANCELLATION": "LIVE_HALT",
+    "CANCELLATION": "REPLAY_HALT",
     "AUTO_APPROVAL": "NOT_APPLICABLE",
     "TOOL_EVENT_VISIBILITY": "LIVE_UNQUALIFIED",
     "TOKEN_USAGE": "LIVE_UNQUALIFIED",
@@ -57,7 +57,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/HEADLESS.capture.json",
+      "execution_capture_sha256": "7d2315923b8e128d10d2cd7dc6989d6d80c2aafdf3bd8a26360e926dbfe6adfc",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "STREAMING_EVENTS": {
       "harness_capability": "SUPPORTED",
@@ -65,7 +68,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/STREAMING_EVENTS.capture.json",
+      "execution_capture_sha256": "526a492b86e3f73f9746dbe39687da835032721e10be9a7df07296b1170742f8",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "FINAL_JSON": {
       "harness_capability": "UNSUPPORTED",
@@ -73,11 +79,12 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "JSONL": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
+      "live_qualification": "REPLAY_QUALIFIED",
       "probe_evidence": {
         "capability": "JSONL",
         "probe_kind": "SESSION_ENVELOPE",
@@ -87,11 +94,15 @@
           "expected": "session",
           "observed": "session"
         },
-        "disposition": "PASS"
+        "disposition": "PASS",
+        "execution_id": "26ebdab1ba3ba0b2e196dc72a61f00b4695856688eeb4645d9b63c531fed59f7"
       },
       "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
       "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
-      "invocation_evidence_sha256": "de8461206034e31257fc5c73a9afb6f19eb04d167f365f21f68729a2bb4f7b20"
+      "invocation_evidence_sha256": "de8461206034e31257fc5c73a9afb6f19eb04d167f365f21f68729a2bb4f7b20",
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "9dfe7e1f2e0ea3246ff28140fd78fe7c9025470682accd174a81e8c1a1499c33",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "RPC": {
       "harness_capability": "SUPPORTED",
@@ -99,7 +110,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "SESSION_RESUME": {
       "harness_capability": "SUPPORTED",
@@ -107,7 +121,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "SESSION_FORK": {
       "harness_capability": "SUPPORTED",
@@ -115,11 +132,14 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "EXPLICIT_CWD": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
+      "live_qualification": "REPLAY_QUALIFIED",
       "probe_evidence": {
         "capability": "EXPLICIT_CWD",
         "probe_kind": "SESSION_ENVELOPE",
@@ -129,11 +149,15 @@
           "expected": "/private/tmp/pi-live",
           "observed": "/private/tmp/pi-live"
         },
-        "disposition": "PASS"
+        "disposition": "PASS",
+        "execution_id": "2a62f9740c1929d294df33c3d69bf0afeab8fa2a822a461e3d055c6506585e73"
       },
       "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
       "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/EXPLICIT_CWD.invocation.json",
-      "invocation_evidence_sha256": "b668398c2426aa94954c6f043242b4934582d07cb82dbe39a677042184c391f8"
+      "invocation_evidence_sha256": "b668398c2426aa94954c6f043242b4934582d07cb82dbe39a677042184c391f8",
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/EXPLICIT_CWD.capture.json",
+      "execution_capture_sha256": "8236cfb643ce2264ebb308e36c5d00990b9e47c145f19a9ca6eeaea746d8a040",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "ISOLATED_DATA_DIR": {
       "harness_capability": "SUPPORTED",
@@ -141,7 +165,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/ISOLATED_DATA_DIR.capture.json",
+      "execution_capture_sha256": "33f10ac205a428553304efee74bbdfc6cd80d106a19798c132ab5e561cc5a842",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "MODEL_SELECTION": {
       "harness_capability": "SUPPORTED",
@@ -149,7 +176,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "PROVIDER_SELECTION": {
       "harness_capability": "SUPPORTED",
@@ -157,7 +187,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "TIMEOUT": {
       "harness_capability": "UNSUPPORTED",
@@ -165,11 +198,12 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "CANCELLATION": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_HALT",
+      "live_qualification": "REPLAY_HALT",
       "probe_evidence": {
         "capability": "CANCELLATION",
         "probe_kind": "CANCELLATION_HALT",
@@ -179,11 +213,15 @@
           "expected": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
           "observed": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE"
         },
-        "disposition": "HALT"
+        "disposition": "HALT",
+        "execution_id": "318022ad1e636b14fc380b28a1a55b129b204478504909ccb70374cd50df006f"
       },
       "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
       "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/CANCELLATION.invocation.json",
-      "invocation_evidence_sha256": "3fc7db14dd5ae3e4bbf5867eee0d79f3fe00201a06957bf61017ce51574c8e9e"
+      "invocation_evidence_sha256": "3fc7db14dd5ae3e4bbf5867eee0d79f3fe00201a06957bf61017ce51574c8e9e",
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/CANCELLATION.capture.json",
+      "execution_capture_sha256": "a8072aec64d6029a4d8aa7c46913f5622e410cf3d59c8a605d9750604b6bce13",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "AUTO_APPROVAL": {
       "harness_capability": "UNSUPPORTED",
@@ -191,7 +229,8 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "TOOL_EVENT_VISIBILITY": {
       "harness_capability": "SUPPORTED",
@@ -199,7 +238,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "TOKEN_USAGE": {
       "harness_capability": "SUPPORTED",
@@ -207,7 +249,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "RESOURCE_USAGE": {
       "harness_capability": "UNAVAILABLE",
@@ -215,7 +260,8 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_origin": "REPLAY_FIXTURE"
     },
     "SESSION_ARTIFACTS": {
       "harness_capability": "SUPPORTED",
@@ -223,7 +269,10 @@
       "probe_evidence": null,
       "probe_evidence_path": null,
       "invocation_evidence_path": null,
-      "invocation_evidence_sha256": null
+      "invocation_evidence_sha256": null,
+      "execution_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/captures/JSONL.capture.json",
+      "execution_capture_sha256": "657455a93730ca45305b3179574125360e003715aa5dae7d64eafb3f2914e8c5",
+      "execution_capture_origin": "REPLAY_FIXTURE"
     }
   }
 }

@@ -108,16 +108,51 @@ export function isCapabilityKey(value: unknown): value is CapabilityKey {
  * bug the original LH-03 closure made for `SESSION_RESUME`
  * and `SESSION_FORK`.
  */
+/**
+ * LH-03 CORRECTION09 C09-01: capture provenance states.
+ *
+ * `LIVE_QUALIFIED` and `LIVE_HALT` carry a MACHINE-PROVABLE
+ * link to an actual subprocess run captured by an
+ * authoritative spawn authority. The discriminating proof
+ * is `axis.execution_capture_origin`:
+ *
+ *   - "REAL_PROCESS_CAPTURE": the manifest was emitted by a
+ *     spawn authority (CORRECTION09 C09-02 SPAWN_AUTHORITY)
+ *     at the moment of `spawn()`, and the same authority
+ *     captured stdout / stderr / process-result / native
+ *     artifacts under the same execution_id. ONLY axes
+ *     with this origin may carry `LIVE_QUALIFIED` /
+ *     `LIVE_HALT`.
+ *
+ *   - "REPLAY_FIXTURE": the manifest was authored from a
+ *     captured fixture for deterministic replay
+ *     qualification. The verifier still rejects splices
+ *     (artifact SHA / execution_id mismatches) but the
+ *     proof of common OS process is structural rather
+ *     than mechanically observed. Axes with this origin
+ *     MUST be classified `REPLAY_QUALIFIED` (a separate
+ *     disposition distinct from `LIVE_QUALIFIED`) so the
+ *     qualification consumer can tell a recorded live
+ *     qualification apart from a replay of a recorded
+ *     one.
+ *
+ * `LIVE_UNQUALIFIED` / `NOT_APPLICABLE` axes may carry
+ * either origin or null.
+ */
 export type LiveQualificationState =
   | "LIVE_QUALIFIED"
+  | "REPLAY_QUALIFIED"
   | "LIVE_UNQUALIFIED"
   | "LIVE_HALT"
+  | "REPLAY_HALT"
   | "NOT_APPLICABLE";
 
 export const LIVE_QUALIFICATION_STATES: readonly LiveQualificationState[] = [
   "LIVE_QUALIFIED",
+  "REPLAY_QUALIFIED",
   "LIVE_UNQUALIFIED",
   "LIVE_HALT",
+  "REPLAY_HALT",
   "NOT_APPLICABLE",
 ] as const;
 
@@ -233,6 +268,17 @@ export type CapabilityProbeEvidence = {
   readonly probe_kind: CapabilityProbeKind;
   readonly artifact_path: string;
   readonly artifact_sha256: string;
+  /**
+   * CORRECTION08 C08-03: stable execution_id of the OS
+   * process run that produced the captured observation.
+   * MUST equal `manifest.execution_id` for the
+   * execution-capture manifest referenced by
+   * `axis.execution_capture_path`.
+   *
+   * A splice that swaps observation-B under
+   * invocation-A is caught by a mismatched execution_id.
+   */
+  readonly execution_id: string;
   readonly evidence_relation: {
     readonly expected: string;
     readonly observed: string;
@@ -297,6 +343,60 @@ export type CapabilityAxis = {
    * invocation_evidence_sha256 is null OR empty.
    */
   readonly invocation_evidence_sha256: string | null;
+  /**
+   * CORRECTION08 C08-01 / C08-03: repo-relative path to
+   * the execution capture manifest that records the
+   * actual OS process run (stdout/stderr/process-result
+   * SHAs + native-artifact SHA + runtime session file
+   * path + execution_id). The manifest is emitted by
+   * the spawn authority at process start, atomically
+   * from the exact arguments handed to spawn/execFile,
+   * so a splice (valid invocation A + valid observation
+   * B) is caught by binding the manifest to the probe
+   * evidence via `execution_id`.
+   *
+   * Required for every LIVE_QUALIFIED and LIVE_HALT
+   * axis. `null` is the typed default; the validator
+   * refuses LIVE_QUALIFIED / LIVE_HALT axes whose
+   * execution_capture_path is null.
+   */
+  readonly execution_capture_path: string | null;
+  /**
+   * CORRECTION08 C08-01: SHA256 of the execution
+   * capture manifest's on-disk bytes, bound externally
+   * on the axis. The verifier enforces
+   *   sha256(actual manifest bytes) ===
+   *     axis.execution_capture_sha256
+   * AND the manifest's `invocation_sha256` equals
+   * `axis.invocation_evidence_sha256`
+   * AND `ev.execution_id` equals `manifest.execution_id`.
+   *
+   * `null` is the typed default. The validator refuses
+   * LIVE_QUALIFIED / LIVE_HALT axes whose
+   * execution_capture_sha256 is null OR empty.
+   */
+  readonly execution_capture_sha256: string | null;
+  /**
+   * LH-03 CORRECTION09 C09-01: provenance discriminator
+   * for the execution-capture manifest bound on this
+   * axis. See {@link LiveQualificationState} for the
+   * closed-world semantics.
+   *
+   * `LIVE_QUALIFIED` / `LIVE_HALT` REQUIRES
+   * `execution_capture_origin === "REAL_PROCESS_CAPTURE"`.
+   * Fixture-derived qualification MUST classify the
+   * axis `REPLAY_QUALIFIED` and declare
+   * `execution_capture_origin === "REPLAY_FIXTURE"`.
+   *
+   * `null` is permitted only for `LIVE_UNQUALIFIED` /
+   * `NOT_APPLICABLE` axes; the validator refuses
+   * `LIVE_QUALIFIED` / `REPLAY_QUALIFIED` / `LIVE_HALT`
+   * axes whose origin is null.
+   */
+  readonly execution_capture_origin:
+    | "REAL_PROCESS_CAPTURE"
+    | "REPLAY_FIXTURE"
+    | null;
 };
 
 /**
@@ -376,6 +476,9 @@ export function emptyCapabilities(
       probe_evidence_path: null,
       invocation_evidence_path: null,
       invocation_evidence_sha256: null,
+      execution_capture_path: null,
+      execution_capture_sha256: null,
+      execution_capture_origin: null,
     };
   }
   return {
@@ -517,6 +620,106 @@ export type LiveQualificationViolation =
       readonly key: CapabilityKey;
     }
   | {
+      /**
+       * CORRECTION08 C08-01: every LIVE_QUALIFIED axis
+       * must bind a durable execution-capture manifest.
+       * The verifier refuses LIVE_QUALIFIED claims
+       * whose observation cannot be linked to a real
+       * OS process run.
+       */
+      readonly kind: "live_qualified_without_execution_capture";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_without_execution_capture";
+      readonly key: CapabilityKey;
+    }
+  | {
+      /**
+       * CORRECTION08 C08-01: every LIVE_QUALIFIED axis
+       * must bind the SHA256 of the execution-capture
+       * manifest's bytes, externally on the axis.
+       */
+      readonly kind: "live_qualified_without_execution_capture_sha";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_without_execution_capture_sha";
+      readonly key: CapabilityKey;
+    }
+  | {
+      /**
+       * CORRECTION08 C08-03: the probe evidence must
+       * carry the same execution_id as the manifest.
+       */
+      readonly kind: "probe_evidence_without_execution_id";
+      readonly key: CapabilityKey;
+    }
+  | {
+      /**
+       * CORRECTION09 C09-01: LIVE_QUALIFIED / LIVE_HALT
+       * REQUIRES `execution_capture_origin ===
+       * "REAL_PROCESS_CAPTURE"`. A fixture-derived
+       * qualification must be classified
+       * REPLAY_QUALIFIED with origin
+       * "REPLAY_FIXTURE"; it can never be promoted to
+       * LIVE_QUALIFIED.
+       */
+      readonly kind: "live_qualified_with_replay_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_with_replay_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      /**
+       * CORRECTION09 C09-01: LIVE_QUALIFIED /
+       * LIVE_HALT / REPLAY_QUALIFIED axes MUST declare
+       * an explicit capture_origin. A null origin is
+       * permitted only for LIVE_UNQUALIFIED /
+       * NOT_APPLICABLE.
+       */
+      readonly kind: "live_qualified_without_capture_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_without_capture_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "replay_qualified_without_capture_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      /**
+       * CORRECTION09 C09-01: REPLAY_QUALIFIED with
+       * REAL_PROCESS_CAPTURE is a contradictory claim:
+       * either the manifest came from a real spawn
+       * authority (LIVE_QUALIFIED) or it was a fixture
+       * (REPLAY_FIXTURE). The verifier refuses to admit
+       * the contradiction.
+       */
+      readonly kind: "replay_qualified_with_real_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      /**
+       * CORRECTION09 C09-01: REPLAY_HALT (a halt that
+       * was recorded from a fixture replay rather than
+       * observed in real time) requires
+       * REPLAY_FIXTURE origin. LIVE_HALT requires
+       * REAL_PROCESS_CAPTURE origin. The validator
+       * refuses mismatches.
+       */
+      readonly kind: "replay_halt_with_real_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "replay_halt_without_capture_origin";
+      readonly key: CapabilityKey;
+    }
+  | {
       readonly kind: "axis_views_disagree";
       readonly key: CapabilityKey;
       readonly axes_axis: LiveQualificationState;
@@ -559,7 +762,10 @@ export function validateLiveQualification(
     //   probe_evidence.capability === k AND
     //   (probe_evidence_path == null OR
     //    probe_evidence_path === probe_evidence.artifact_path)
-    if (axis.live_qualification === "LIVE_QUALIFIED") {
+    if (
+      axis.live_qualification === "LIVE_QUALIFIED" ||
+      axis.live_qualification === "REPLAY_QUALIFIED"
+    ) {
       if (axis.probe_evidence === null) {
         violations.push({
           kind: "live_qualified_without_evidence",
@@ -639,8 +845,77 @@ export function validateLiveQualification(
           key: k,
         });
       }
+      // CORRECTION08 C08-01 / C08-03: every LIVE_QUALIFIED
+      // axis must bind a durable execution-capture
+      // manifest + its external SHA + the probe evidence
+      // execution_id.
+      if (axis.execution_capture_path === null) {
+        violations.push({
+          kind: "live_qualified_without_execution_capture",
+          key: k,
+        });
+      }
+      if (
+        axis.execution_capture_sha256 === null ||
+        axis.execution_capture_sha256 === ""
+      ) {
+        violations.push({
+          kind: "live_qualified_without_execution_capture_sha",
+          key: k,
+        });
+      }
+      if (
+        typeof ev.execution_id !== "string" ||
+        ev.execution_id.length === 0
+      ) {
+        violations.push({
+          kind: "probe_evidence_without_execution_id",
+          key: k,
+        });
+      }
+      // CORRECTION09 C09-01: LIVE_QUALIFIED REQUIRES
+      // REAL_PROCESS_CAPTURE (a manifest authored from
+      // a fixture can never be promoted to LIVE_QUALIFIED;
+      // it must be classified REPLAY_QUALIFIED).
+      // REPLAY_QUALIFIED requires REPLAY_FIXTURE.
+      if (
+        axis.live_qualification === "LIVE_QUALIFIED" &&
+        axis.execution_capture_origin === "REPLAY_FIXTURE"
+      ) {
+        violations.push({
+          kind: "live_qualified_with_replay_origin",
+          key: k,
+        });
+      } else if (
+        axis.live_qualification === "LIVE_QUALIFIED" &&
+        axis.execution_capture_origin === null
+      ) {
+        violations.push({
+          kind: "live_qualified_without_capture_origin",
+          key: k,
+        });
+      } else if (
+        axis.live_qualification === "REPLAY_QUALIFIED" &&
+        axis.execution_capture_origin === "REAL_PROCESS_CAPTURE"
+      ) {
+        violations.push({
+          kind: "replay_qualified_with_real_origin",
+          key: k,
+        });
+      } else if (
+        axis.live_qualification === "REPLAY_QUALIFIED" &&
+        axis.execution_capture_origin === null
+      ) {
+        violations.push({
+          kind: "replay_qualified_without_capture_origin",
+          key: k,
+        });
+      }
     }
-    if (axis.live_qualification === "LIVE_HALT") {
+    if (
+      axis.live_qualification === "LIVE_HALT" ||
+      axis.live_qualification === "REPLAY_HALT"
+    ) {
       if (axis.probe_evidence === null) {
         violations.push({
           kind: "live_halt_without_evidence",
@@ -689,6 +964,69 @@ export function validateLiveQualification(
       ) {
         violations.push({
           kind: "live_halt_without_invocation_sha",
+          key: k,
+        });
+      }
+      // CORRECTION08 C08-01: halt axes must also bind
+      // the execution-capture manifest + external SHA.
+      if (axis.execution_capture_path === null) {
+        violations.push({
+          kind: "live_halt_without_execution_capture",
+          key: k,
+        });
+      }
+      if (
+        axis.execution_capture_sha256 === null ||
+        axis.execution_capture_sha256 === ""
+      ) {
+        violations.push({
+          kind: "live_halt_without_execution_capture_sha",
+          key: k,
+        });
+      }
+      // CORRECTION09 C09-01: LIVE_HALT also REQUIRES
+      // LIVE_HALT REQUIRES REAL_PROCESS_CAPTURE. A
+      // fixture-derived halt would be a recorded "I saw
+      // a halt" without a process to halt — which is
+      // structurally incoherent and refused.
+      // REPLAY_HALT REQUIRES REPLAY_FIXTURE.
+      if (
+        axis.live_qualification === "LIVE_HALT" &&
+        axis.execution_capture_origin === "REPLAY_FIXTURE"
+      ) {
+        violations.push({
+          kind: "live_halt_with_replay_origin",
+          key: k,
+        });
+      } else if (
+        axis.live_qualification === "LIVE_HALT" &&
+        axis.execution_capture_origin === null
+      ) {
+        violations.push({
+          kind: "live_halt_without_capture_origin",
+          key: k,
+        });
+      }
+    }
+    // CORRECTION09 C09-01: REPLAY_QUALIFIED REQUIRES
+    // REPLAY_FIXTURE origin; a contradictory
+    // (REPLAY_QUALIFIED + REAL_PROCESS_CAPTURE) is
+    // refused because it would mean "this came from a
+    // real spawn authority but it is a replay" — which
+    // has no defensible semantics.
+    // CORRECTION09 C09-01: REPLAY_HALT requires
+    // REPLAY_FIXTURE origin. A REPLAY_HALT with
+    // REAL_PROCESS_CAPTURE is refused because real
+    // halts are LIVE_HALT.
+    if (axis.live_qualification === "REPLAY_HALT") {
+      if (axis.execution_capture_origin === null) {
+        violations.push({
+          kind: "replay_halt_without_capture_origin",
+          key: k,
+        });
+      } else if (axis.execution_capture_origin === "REAL_PROCESS_CAPTURE") {
+        violations.push({
+          kind: "replay_halt_with_real_origin",
           key: k,
         });
       }

@@ -57,3 +57,15 @@ export {
   type LaunchForm,
   type DerivedInvocationSemantics,
 } from "./invocation-evidence.js";
+
+export {
+  computeExecutionId,
+  writeExecutionCaptureManifest,
+  readExecutionCaptureManifest,
+  shaOfExecutionCaptureManifest,
+  isRuntimeSessionFileInside,
+  shaOfEmpty,
+  reverifyExecutionCaptureManifestArtifacts,
+  type ExecutionCaptureManifest,
+  type CaptureOrigin,
+} from "./execution-capture.js";

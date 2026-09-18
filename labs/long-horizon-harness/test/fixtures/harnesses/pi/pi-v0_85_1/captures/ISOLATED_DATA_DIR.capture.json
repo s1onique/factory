@@ -1,0 +1,16 @@
+{
+  "execution_id": "21da6527df060ad8b354e785bdc0c818292d084124c7a57b1319ac362ce9231b",
+  "capability": "ISOLATED_DATA_DIR",
+  "invocation_sha256": "68d3b142821bcea821a0ca6bc493468585af695abcba35e242cab5ff8401314d",
+  "stdout_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+  "stderr_sha256": "1bec95339d8d61b1f9f6d42cb441d780f712c086a789371f9d414048e74afd56",
+  "process_result_sha256": "14d6d2a62ae8c523d71e818fc38df01d750bca9f7aa4a9d17650823196d1473f",
+  "native_artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+  "runtime_session_file_path": "/Users/pi/.pi/sessions/isolated-runtime.jsonl",
+  "recorded_at": "2026-09-18T00:00:00Z",
+  "capture_origin": "REPLAY_FIXTURE",
+  "stdout_path": "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl",
+  "stderr_path": "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt",
+  "process_result_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+  "native_artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+}

@@ -757,6 +757,22 @@ export function defaultClineCapabilities(
       probe_evidence_path: null,
       invocation_evidence_path: null,
       invocation_evidence_sha256: null,
+      // CORRECTION08 C08-01: cline emits LIVE_HALT
+      // without execution-capture manifest. The
+      // validator refuses LIVE_HALT axes whose
+      // execution_capture_path is null, so cline
+      // remains HALT_CREDENTIALS / HALT_NOT_INSTALLED
+      // (the validator never claims LIVE_QUALIFIED
+      // for cline because cline has no execution
+      // capture manifest).
+      execution_capture_path: null,
+      execution_capture_sha256: null,
+      // CORRECTION09 C09-01: cline has no spawn
+      // authority for this axis, so the capture_origin
+      // is null. The validator refuses LIVE_HALT axes
+      // with a null origin, which is the intended
+      // disposition for cline.
+      execution_capture_origin: null,
     };
   }
   return {

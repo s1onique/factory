@@ -164,6 +164,19 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // raw-launch schema that the validator inspects
     // downstream.
     "src/adapter-common/invocation-evidence.ts",
+    // LH-03 CORRECTION08: the typed execution-capture
+    // manifest reader. Re-parses the on-disk manifest
+    // to recover the closed-world field set
+    // (execution_id, invocation_sha256, native artifact
+    // SHA, runtime session file path, ...). This is
+    // the trust boundary for raw-bytes -> typed
+    // `ExecutionCaptureManifest` conversion;
+    // candidate-specific adapters MUST route their
+    // spawn-authority manifest assertions through it.
+    // JSON.parse here is bounded to the closed-world
+    // manifest schema that the validator inspects
+    // downstream (C08-04 refuses any extra field).
+    "src/adapter-common/execution-capture.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

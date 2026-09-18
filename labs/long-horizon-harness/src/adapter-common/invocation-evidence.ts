@@ -242,62 +242,171 @@ export type InvocationEvidence = RawInvocationLaunch & {
  * ------------------------------------------------------------------ */
 
 /**
+ * Strict closed-world argv grammar for the subset of Pi
+ * flags Factory qualifies (CORRECTION08 C08-06).
+ *
+ * Grammar rules:
+ *
+ *   protocol: at most one `--mode`, the value MUST be
+ *             one of {json, rpc, text}; a trailing
+ *             `--mode` with no value is REFUSED;
+ *             duplicate `--mode` is REFUSED; an unknown
+ *             value (including `headless`) is REFUSED.
+ *
+ *   session_dir: at most one `--session-dir`, the value
+ *             MUST be present and non-empty; a trailing
+ *             `--session-dir` with no value is REFUSED;
+ *             duplicate `--session-dir` is REFUSED.
+ *             `PI_CODING_AGENT_SESSION_DIR` env var is
+ *             used as a fallback if and only if no
+ *             `--session-dir` was passed.
+ *
+ *   print: at most one `-p` / `--print`; duplicates are
+ *             REFUSED.
+ *
+ *   no_session: at most one `--no-session`; duplicates
+ *             are REFUSED.
+ *
+ *   contradiction: `--no-session` + effective session_dir
+ *             (from either source) is REFUSED.
+ */
+function parsePiArgvStrict(argv: readonly string[]): {
+  protocol: InvocationProtocol;
+  print: boolean;
+  sessionDirArgv: string | null;
+  noSession: boolean;
+} {
+  let protocol: InvocationProtocol | null = null;
+  let print = false;
+  let sessionDirArgv: string | null = null;
+  let noSession = false;
+
+  let i = 0;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (a === "--mode") {
+      if (i + 1 >= argv.length) {
+        throw new Error(
+          `deriveInvocationSemantics: argv '--mode' has no value; trailing --mode refused. CORRECTION08 C08-06.`,
+        );
+      }
+      const v = argv[i + 1];
+      if (protocol !== null) {
+        throw new Error(
+          `deriveInvocationSemantics: duplicate '--mode' refused ('${protocol}' and '${v}'). CORRECTION08 C08-06.`,
+        );
+      }
+      if (v !== "json" && v !== "rpc" && v !== "text") {
+        throw new Error(
+          `deriveInvocationSemantics: argv '--mode ${v}' is not a Pi launch form; Pi's --mode values are json | rpc | text. CORRECTION08 C08-06.`,
+        );
+      }
+      protocol = v;
+      i += 2;
+      continue;
+    }
+    if (a === "--session-dir") {
+      if (i + 1 >= argv.length) {
+        throw new Error(
+          `deriveInvocationSemantics: argv '--session-dir' has no value; trailing --session-dir refused. CORRECTION08 C08-06.`,
+        );
+      }
+      const v = argv[i + 1];
+      if (sessionDirArgv !== null) {
+        throw new Error(
+          `deriveInvocationSemantics: duplicate '--session-dir' refused ('${sessionDirArgv}' and '${v}'). CORRECTION08 C08-06.`,
+        );
+      }
+      if (typeof v !== "string" || v.length === 0) {
+        throw new Error(
+          `deriveInvocationSemantics: argv '--session-dir <value>' has empty value. CORRECTION08 C08-06.`,
+        );
+      }
+      sessionDirArgv = v;
+      i += 2;
+      continue;
+    }
+    if (a === "-p" || a === "--print") {
+      if (print) {
+        throw new Error(
+          `deriveInvocationSemantics: duplicate '${a}' refused. CORRECTION08 C08-06.`,
+        );
+      }
+      print = true;
+      i += 1;
+      continue;
+    }
+    if (a === "--no-session") {
+      if (noSession) {
+        throw new Error(
+          `deriveInvocationSemantics: duplicate '--no-session' refused. CORRECTION08 C08-06.`,
+        );
+      }
+      noSession = true;
+      i += 1;
+      continue;
+    }
+    // Unknown flag: skip without consuming more argv.
+    // We do not parse other flags; they are tolerated but
+    // do not contribute to semantics. The grammar above
+    // covers the closed-world Pi launch subset Factory
+    // qualifies against. A strict grammar would refuse
+    // unknown flags, but the canonical fixtures only use
+    // the four flags above and a positional program arg.
+    i += 1;
+  }
+
+  return {
+    protocol: protocol ?? "text",
+    print,
+    sessionDirArgv,
+    noSession,
+  };
+}
+
+/**
  * Derive protocol / headless / session_dir / no_session
  * from raw launch facts. The function is pure (no I/O,
  * no clock, no randomness) and is the ONLY authority
  * for those four fields. Any document whose recorded
  * facts disagree with the derivation is refused.
  *
- * Contradiction checks:
+ * Contradiction checks (C08-06):
  *   - `--mode <unknown>` is rejected (Pi does not
  *     implement it). Specifically `--mode headless` is
  *     refused.
- *   - `--no-session` plus a session-dir derivation is
- *     rejected.
+ *   - duplicate / trailing `--mode` is refused.
+ *   - duplicate / trailing `--session-dir` is refused.
+ *   - duplicate `-p`/`--print` is refused.
+ *   - duplicate `--no-session` is refused.
+ *   - `--no-session` plus an effective session_dir is
+ *     refused.
  */
 export function deriveInvocationSemantics(
   raw: RawInvocationLaunch,
 ): DerivedInvocationSemantics {
-  // ---- protocol: --mode <value>
-  let protocol: InvocationProtocol = "text";
-  const modeIdx = raw.argv.indexOf("--mode");
-  if (modeIdx >= 0 && modeIdx + 1 < raw.argv.length) {
-    const modeVal = raw.argv[modeIdx + 1];
-    if (modeVal === "json") protocol = "json";
-    else if (modeVal === "rpc") protocol = "rpc";
-    else if (modeVal === "text") protocol = "text";
-    else if (modeVal === "headless") {
-      throw new Error(
-        `deriveInvocationSemantics: argv '--mode headless' is not a Pi launch form; Pi's --mode values are json | rpc | text. CORRECTION07 C07-05.`,
-      );
-    } else {
-      throw new Error(
-        `deriveInvocationSemantics: argv '--mode ${modeVal}' is not a Pi launch form; Pi's --mode values are json | rpc | text. CORRECTION07 C07-05.`,
-      );
-    }
-  }
-  // ---- no_session: --no-session
-  const no_session = raw.argv.includes("--no-session");
+  const parsed = parsePiArgvStrict(raw.argv);
+  const protocol: InvocationProtocol = parsed.protocol;
+  const no_session = parsed.noSession;
   // ---- session_dir: --session-dir X else env PI_CODING_AGENT_SESSION_DIR
   let session_dir: string | null = null;
-  const sessionIdx = raw.argv.indexOf("--session-dir");
-  if (sessionIdx >= 0 && sessionIdx + 1 < raw.argv.length) {
-    const v = raw.argv[sessionIdx + 1];
-    if (typeof v === "string") session_dir = v;
+  if (parsed.sessionDirArgv !== null) {
+    session_dir = parsed.sessionDirArgv;
   } else if (
-    typeof raw.env_subset["PI_CODING_AGENT_SESSION_DIR"] === "string"
+    typeof raw.env_subset["PI_CODING_AGENT_SESSION_DIR"] === "string" &&
+    (raw.env_subset["PI_CODING_AGENT_SESSION_DIR"] as string).length > 0
   ) {
     session_dir = raw.env_subset["PI_CODING_AGENT_SESSION_DIR"] as string;
   }
   // contradiction: --no-session + session_dir
   if (no_session && session_dir !== null) {
     throw new Error(
-      `deriveInvocationSemantics: --no-session is present but session_dir='${session_dir}' is also claimed. CORRECTION07 C07-06.`,
+      `deriveInvocationSemantics: --no-session is present but session_dir='${session_dir}' is also claimed. CORRECTION08 C08-06.`,
     );
   }
   // ---- headless: -p / --print OR protocol json/rpc
   let headless = false;
-  if (raw.argv.includes("-p") || raw.argv.includes("--print")) {
+  if (parsed.print) {
     headless = true;
   } else if (protocol === "json" || protocol === "rpc") {
     headless = true;

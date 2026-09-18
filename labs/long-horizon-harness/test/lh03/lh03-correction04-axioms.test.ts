@@ -67,8 +67,9 @@ import {
   copyFileSync,
   mkdirSync,
   symlinkSync,
+  appendFileSync,
 } from "node:fs";
-import { isAbsolute, resolve, join } from "node:path";
+import { isAbsolute, resolve, join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
@@ -93,9 +94,14 @@ import {
 } from "../../src/adapter-common/evidence-verifier.js";
 import {
   loadInvocationFixture,
+  loadCaptureFixture,
 } from "./_invocation_helper.js";
 import {
+  computeExecutionId,
+} from "../../src/adapter-common/execution-capture.js";
+import {
   readInvocationEvidence,
+  deriveInvocationSemantics,
 } from "../../src/adapter-common/invocation-evidence.js";
 
 const FIXTURE_SESSION =
@@ -139,11 +145,119 @@ function withInvocation(
     repoRoot: REPO_ROOT,
     capability: fixtureKey,
   });
+  // CORRECTION08 C08-01: load the matching
+  // execution-capture manifest for the same fixture.
+  // The manifest binds the invocation SHA + execution_id
+  // + native artifact SHA + runtime session file path
+  // that the verifier cross-references.
+  const cap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: fixtureKey,
+  });
+  // CANCELLATION (LIVE_HALT) needs its own dedicated
+  // manifest because its probe_evidence.artifact_path
+  // is process-result.json, not pi.session.jsonl. It
+  // also needs its own invocation artifact because
+  // CANCELLATION.invocation.json's argv matches the
+  // CANCELLATION manifest's invocation_sha256.
+  const cancelCap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "CANCELLATION",
+  });
+  const cancelInv = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "CANCELLATION",
+  });
+  // ISOLATED_DATA_DIR also needs its own manifest
+  // (its declared --session-dir is unique). Build a
+  // per-axis override map.
+  const isolatedCap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "ISOLATED_DATA_DIR",
+  });
+  const isolatedInv = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "ISOLATED_DATA_DIR",
+  });
+  const axisExecutionIds: Record<string, string> = {
+    CANCELLATION: cancelCap.manifest.execution_id,
+  };
+  const axisInvMap: Record<string, {
+    evidence: import("../../src/adapter-common/invocation-evidence.js").InvocationEvidence;
+    path: string;
+    sha256: string;
+  }> = {
+    CANCELLATION: {
+      evidence: cancelInv.evidence,
+      path: cancelInv.repo_relative_path,
+      sha256: cancelInv.evidence.artifact_sha256,
+    },
+  };
+  const axisCapMap: Record<string, { path: string; sha256: string }> = {
+    CANCELLATION: {
+      path: cancelCap.repo_relative_path,
+      sha256: cancelCap.manifest_sha256,
+    },
+  };
+  if (wantsIsolated) {
+    axisExecutionIds["ISOLATED_DATA_DIR"] = isolatedCap.manifest.execution_id;
+    axisInvMap["ISOLATED_DATA_DIR"] = {
+      evidence: isolatedInv.evidence,
+      path: isolatedInv.repo_relative_path,
+      sha256: isolatedInv.evidence.artifact_sha256,
+    };
+    axisCapMap["ISOLATED_DATA_DIR"] = {
+      path: isolatedCap.repo_relative_path,
+      sha256: isolatedCap.manifest_sha256,
+    };
+  }
   return {
     ...(base as Parameters<typeof defaultPiCapabilities>[2]),
     invocation_evidence: inv.evidence,
     invocation_evidence_path: inv.repo_relative_path,
-  } as Parameters<typeof defaultPiCapabilities>[2];
+    execution_capture_path: cap.repo_relative_path,
+    execution_capture_sha256: cap.manifest_sha256,
+    execution_id: cap.manifest.execution_id,
+    // CORRECTION09 C09-01: every fixture-driven
+    // qualification in this test file uses pre-captured
+    // REPLAY_FIXTURE manifests. The adapter sets
+    // REPLAY_FIXTURE by default but tests that bypass
+    // the adapter (forged-axis tests below) need to
+    // declare it explicitly.
+    execution_capture_origin: "REPLAY_FIXTURE",
+    axis_execution_captures: {
+      CANCELLATION: {
+        path: cancelCap.repo_relative_path,
+        sha256: cancelCap.manifest_sha256,
+      },
+      ...(wantsIsolated ? {
+        ISOLATED_DATA_DIR: {
+          path: isolatedCap.repo_relative_path,
+          sha256: isolatedCap.manifest_sha256,
+        },
+      } : {}),
+    },
+    axis_invocation_evidence: {
+      CANCELLATION: {
+        evidence: cancelInv.evidence,
+        path: cancelInv.repo_relative_path,
+        sha256: cancelInv.evidence.artifact_sha256,
+      },
+      ...(wantsIsolated ? {
+        ISOLATED_DATA_DIR: {
+          evidence: isolatedInv.evidence,
+          path: isolatedInv.repo_relative_path,
+          sha256: isolatedInv.evidence.artifact_sha256,
+        },
+      } : {}),
+    },
+    axis_execution_ids: {
+      CANCELLATION: cancelCap.manifest.execution_id,
+      ...(wantsIsolated ? {
+        ISOLATED_DATA_DIR: isolatedCap.manifest.execution_id,
+      } : {}),
+    },
+  } as unknown as Parameters<typeof defaultPiCapabilities>[2];
 }
 
 /* ------------------------------------------------------------------ *
@@ -160,6 +274,9 @@ test("C04-01a: validateLiveQualification is pure (does not read disk)", () => {
     requested_cwd: "/private/tmp/pi-live",
   }, ["EXPLICIT_CWD", "JSONL", "HEADLESS", "STREAMING_EVENTS"]));
   const r = validateLiveQualification(caps);
+  if (r.ok !== true) {
+    console.log("DEBUG C04-01a violations:", JSON.stringify(r.violations, null, 2));
+  }
   assert.equal(r.ok, true, "valid document must pass pure validator");
 });
 
@@ -189,6 +306,8 @@ test("C04-HASH01: mutate artifact bytes after probe record created -> FAIL", () 
   const cancelCopy = join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json");
   mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1"), { recursive: true });
   copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  copyFileSync(resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"), join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"));
+  copyFileSync(resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"), join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"));
   // Copy the invocation fixture so the verifier can
   // re-read it under the fresh checkout root.
   mkdirSync(join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations"), { recursive: true });
@@ -210,6 +329,14 @@ test("C04-HASH01: mutate artifact bytes after probe record created -> FAIL", () 
   writeFileSync(sessionCopy, '{"type":"session","mutated":true}\n', "utf8");
   // Now the verifier must reject.
   const r = verifyLiveQualificationEvidence(realCaps, tmp);
+  if (r.ok) {
+    console.log("DEBUG C04-HASH01 unexpectedly passed; capabilities =", JSON.stringify(Object.keys(realCaps.capability_axes), null, 2));
+    for (const ax of Object.values(realCaps.capability_axes)) {
+      console.log("DEBUG C04-HASH01 axis", ax.live_qualification, ax.probe_evidence?.artifact_path);
+    }
+  } else {
+    console.log("DEBUG C04-HASH01 errors:", JSON.stringify(r.errors?.slice(0, 3), null, 2));
+  }
   assert.equal(r.ok, false, "verifier must reject mutated bytes");
   const kinds = new Set((r.errors ?? []).map((e) => e.kind));
   assert.ok(
@@ -271,6 +398,9 @@ test("C04-HASH03: correct bytes + correct sha256 -> PASS", () => {
   const realSha = artifactSha256(resolve(REPO_ROOT, FIXTURE_SESSION));
   assert.equal(jsonlEv.artifact_sha256, realSha);
   const r = verifyLiveQualificationEvidence(caps, REPO_ROOT);
+  if (!r.ok) {
+    console.log("DEBUG C04-HASH03 errors:", JSON.stringify(r.errors?.slice(0, 5), null, 2));
+  }
   assert.equal(r.ok, true, "verifier must accept real sha256");
 });
 
@@ -300,6 +430,17 @@ test("C04-PATH02: checkout root B (different absolute path) -> PASS", () => {
     resolve(REPO_ROOT, FIXTURE_PROCESS),
     join(tmp, fixtureRel, "process-result.json"),
   );
+  // CORRECTION09 C09-04: copy stdout/stderr artifacts
+  // so the verifier can re-read them under the fresh
+  // checkout root.
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    join(tmp, fixtureRel, "stdout.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    join(tmp, fixtureRel, "stderr.txt"),
+  );
   // Copy the invocation fixture too so the verifier can
   // re-read it under the fresh checkout root.
   mkdirSync(
@@ -310,6 +451,30 @@ test("C04-PATH02: checkout root B (different absolute path) -> PASS", () => {
     resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
     join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
   );
+  // CORRECTION08 C08-01: copy the captures dir too so
+  // the verifier can re-read each axis's execution-
+  // capture manifest under the fresh checkout root.
+  mkdirSync(
+    join(tmp, "test/fixtures/harnesses/pi/pi-v0_85_1/captures"),
+    { recursive: true },
+  );
+  for (const cap of [
+    "JSONL",
+    "HEADLESS",
+    "STREAMING_EVENTS",
+    "EXPLICIT_CWD",
+    "ISOLATED_DATA_DIR",
+    "CANCELLATION",
+  ]) {
+    copyFileSync(
+      resolve(REPO_ROOT, `test/fixtures/harnesses/pi/pi-v0_85_1/captures/${cap}.capture.json`),
+      join(tmp, `test/fixtures/harnesses/pi/pi-v0_85_1/captures/${cap}.capture.json`),
+    );
+    copyFileSync(
+      resolve(REPO_ROOT, `test/fixtures/harnesses/pi/pi-v0_85_1/invocations/${cap}.invocation.json`),
+      join(tmp, `test/fixtures/harnesses/pi/pi-v0_85_1/invocations/${cap}.invocation.json`),
+    );
+  }
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: join(fixtureRel, "raw-artifacts/pi.session.jsonl"),
     cancellation_halt: join(fixtureRel, "process-result.json"),
@@ -487,7 +652,7 @@ test("C04-ISOLATED02: isolated_session_dir contains the captured session artifac
   }, ["ISOLATED_DATA_DIR", "EXPLICIT_CWD", "JSONL", "HEADLESS", "STREAMING_EVENTS"]));
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
   );
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.probe_evidence?.disposition,
@@ -540,7 +705,7 @@ test("C04-INVOCATION02: HEADLESS with invocation_mode=headless -> LIVE_QUALIFIED
   }, ["HEADLESS", "JSONL", "STREAMING_EVENTS"]));
   assert.equal(
     caps.capability_axes.HEADLESS.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
   );
   assert.equal(
     caps.capability_axes.HEADLESS.probe_evidence?.disposition,
@@ -571,7 +736,7 @@ test("C04-INVOCATION04: JSONL qualifies from session envelope plus invocation ev
   }, ["JSONL"]));
   assert.equal(
     caps.capability_axes.JSONL.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
     "JSONL is the canonical Factory name for the upstream JSON Event Stream Mode; the session envelope + invocation evidence is the proof",
   );
 });
@@ -588,6 +753,7 @@ test("C04-ERRORS: closed-world verifier error kinds are exhaustive", () => {
     "EVIDENCE_PARSE_FAILED",
     "EVIDENCE_OBSERVATION_MISMATCH",
     "EVIDENCE_ORACLE_FAILED",
+    "EVIDENCE_EXECUTION_MISMATCH",
   ];
   assert.deepEqual(
     [...EVIDENCE_VERIFICATION_ERROR_KINDS].sort(),
@@ -747,6 +913,19 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
   const cancelCopy = join(tmp, "process-result.json");
   copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
   const realSha = artifactSha256(sessionCopy);
+  // CORRECTION09 C09-04: copy stdout/stderr artifacts so
+  // the verifier can re-read them.
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    join(tmp, "stdout.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    join(tmp, "stderr.txt"),
+  );
+  const stdoutShaTmp = artifactSha256(join(tmp, "stdout.jsonl"));
+  const stderrShaTmp = artifactSha256(join(tmp, "stderr.txt"));
+  const processResultShaTmp = artifactSha256(cancelCopy);
   // Write a real invocation artifact at the same
   // fixture path under the tmp repoRoot.
   const invRelPath = "test/fixtures/invocations/JSONL.invocation.json";
@@ -755,6 +934,36 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
     resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
     join(tmp, invRelPath),
   );
+  // CORRECTION08 C08-01: write a matching
+  // execution-capture manifest under the tmp repoRoot.
+  const manifestRelPath = "test/fixtures/captures/JSONL.capture.json";
+  mkdirSync(join(tmp, "test/fixtures/captures"), { recursive: true });
+  const manifestAbs = join(tmp, manifestRelPath);
+  const invocationAbsTmp = join(tmp, invRelPath);
+  const invocationShaTmp = artifactSha256(invocationAbsTmp);
+  const execIdTmp = computeExecutionId({
+    nonce: "c04-errors-oracle",
+    invocation_sha256: invocationShaTmp,
+    capability: "JSONL",
+  });
+  const manifestObjTmp = {
+    capture_origin: "REPLAY_FIXTURE",
+    execution_id: execIdTmp,
+    capability: "JSONL",
+    invocation_sha256: invocationShaTmp,
+    stdout_path: "stdout.jsonl",
+    stdout_sha256: stdoutShaTmp,
+    stderr_path: "stderr.txt",
+    stderr_sha256: stderrShaTmp,
+    process_result_path: "process-result.json",
+    process_result_sha256: processResultShaTmp,
+    native_artifact_path: "session.jsonl",
+    native_artifact_sha256: realSha,
+    runtime_session_file_path: null,
+    recorded_at: "2026-09-18T00:00:00Z",
+  };
+  writeFileSync(manifestAbs, JSON.stringify(manifestObjTmp, null, 2));
+  const manifestSha = artifactSha256(manifestAbs);
   const id = QUALIFIED_PI_IDENTITY;
   const caps = emptyCapabilities(id, 1700000000000);
   const doc = {
@@ -763,7 +972,7 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
       ...caps.capability_axes,
       JSONL: {
         harness_capability: "SUPPORTED" as const,
-        live_qualification: "LIVE_QUALIFIED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
         probe_evidence: buildProbeEvidence({
           capability: "JSONL" as const,
           probe_kind: "SESSION_ENVELOPE" as const,
@@ -771,6 +980,7 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
           artifact_sha256: realSha,
           expected: "different",
           observed: "session",
+          execution_id: execIdTmp,
         }),
         probe_evidence_path: "session.jsonl",
         invocation_evidence_path: invRelPath,
@@ -779,11 +989,17 @@ test("C04-ERRORS: oracle recomputation failed produces EVIDENCE_ORACLE_FAILED", 
         // check (the test is about oracle
         // recomputation, not invocation binding).
         invocation_evidence_sha256: null,
+        // CORRECTION08 C08-01: bind the execution-capture
+        // manifest so the verifier reaches the oracle
+        // check (not the manifest check).
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
       },
     },
     live_qualification_by_key: {
       ...caps.live_qualification_by_key,
-      JSONL: "LIVE_QUALIFIED" as const,
+      JSONL: "REPLAY_QUALIFIED" as const,
     },
   };
   const r = verifyLiveQualificationEvidence(
@@ -1028,7 +1244,7 @@ test("C05-01b: ISOLATED_DATA_DIR qualifies when captured artifact lives under is
   }, ["ISOLATED_DATA_DIR"]));
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
   );
 });
 
@@ -1043,13 +1259,60 @@ test("C05-02: forged expected halt reason fails verification", () => {
   copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
   const cancelCopy = join(tmp, "process-result.json");
   copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  // CORRECTION09 C09-04: copy stdout/stderr/process_result
+  // artifacts so the verifier can re-read them.
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    join(tmp, "stdout.jsonl"),
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    join(tmp, "stderr.txt"),
+  );
   const invRelPath = "test/fixtures/invocations/CANCELLATION.invocation.json";
   mkdirSync(join(tmp, "test/fixtures/invocations"), { recursive: true });
   copyFileSync(
     resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
     join(tmp, invRelPath),
   );
+  // CORRECTION08 C08-01: also copy the canonical
+  // CANCELLATION capture manifest into the tmp dir and
+  // copy it as a manifest for this axis so the
+  // execution-capture check passes. The manifest's
+  // invocation_sha256 must match the SHA of the copied
+  // invocation artifact.
   const realSha = artifactSha256(cancelCopy);
+  const stdoutSha = artifactSha256(join(tmp, "stdout.jsonl"));
+  const stderrSha = artifactSha256(join(tmp, "stderr.txt"));
+  const processResultSha = realSha;
+  const manifestRelPath = "captures/CANCELLATION.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  const invocationAbs = join(tmp, invRelPath);
+  const invocationSha = artifactSha256(invocationAbs);
+  const execId = computeExecutionId({
+    nonce: "c05-02-tmp",
+    invocation_sha256: invocationSha,
+    capability: "CANCELLATION",
+  });
+  const manifestObj = {
+    capture_origin: "REPLAY_FIXTURE",
+    execution_id: execId,
+    capability: "CANCELLATION",
+    invocation_sha256: invocationSha,
+    stdout_path: "stdout.jsonl",
+    stdout_sha256: stdoutSha,
+    stderr_path: "stderr.txt",
+    stderr_sha256: stderrSha,
+    process_result_path: "process-result.json",
+    process_result_sha256: processResultSha,
+    native_artifact_path: "process-result.json",
+    native_artifact_sha256: realSha,
+    runtime_session_file_path: null,
+    recorded_at: "2026-09-18T00:00:00Z",
+  };
+  writeFileSync(manifestAbs, JSON.stringify(manifestObj, null, 2));
+  const manifestSha = artifactSha256(manifestAbs);
   const id = QUALIFIED_PI_IDENTITY;
   const caps = emptyCapabilities(id, 1700000000000);
   const doc = {
@@ -1058,7 +1321,7 @@ test("C05-02: forged expected halt reason fails verification", () => {
       ...caps.capability_axes,
       CANCELLATION: {
         harness_capability: "SUPPORTED" as const,
-        live_qualification: "LIVE_HALT" as const,
+        live_qualification: "REPLAY_HALT" as const,
         probe_evidence: {
           capability: "CANCELLATION" as const,
           probe_kind: "CANCELLATION_HALT" as const,
@@ -1072,6 +1335,7 @@ test("C05-02: forged expected halt reason fails verification", () => {
             observed: "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
           },
           disposition: "HALT" as const,
+          execution_id: execId,
         },
         probe_evidence_path: "process-result.json",
         invocation_evidence_path: invRelPath,
@@ -1080,11 +1344,17 @@ test("C05-02: forged expected halt reason fails verification", () => {
         // check (the test is about forged expected,
         // not invocation binding).
         invocation_evidence_sha256: null,
+        // CORRECTION08 C08-01: bind the execution-capture
+        // manifest so the forged-expected check actually
+        // runs (not the manifest check).
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
       },
     },
     live_qualification_by_key: {
       ...caps.live_qualification_by_key,
-      CANCELLATION: "LIVE_HALT" as const,
+      CANCELLATION: "REPLAY_HALT" as const,
     },
   };
   const r = verifyLiveQualificationEvidence(
@@ -1278,7 +1548,7 @@ test("C06-03: HEADLESS is LIVE_QUALIFIED iff derived.headless === true", () => {
   }, ["HEADLESS"]));
   assert.equal(
     caps.capability_axes.HEADLESS.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
     "HEADLESS is LIVE_QUALIFIED iff derived.headless === true (CORRECTION07 C07-03)",
   );
 });
@@ -1313,7 +1583,7 @@ test("C06-05: ISOLATED_DATA_DIR oracle = artifact under derived.session_dir", ()
   }, ["ISOLATED_DATA_DIR"]));
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
     "ISOLATED_DATA_DIR is LIVE_QUALIFIED iff artifact lives under invocation-recorded session_dir (CORRECTION06 C06-05)",
   );
 });
@@ -1589,6 +1859,9 @@ test("C07-07: validateLiveQualification refuses LIVE_QUALIFIED without invocatio
         probe_evidence_path: "session.jsonl",
         invocation_evidence_path: "invocations/x.invocation.json",
         invocation_evidence_sha256: null,
+        execution_capture_path: null,
+        execution_capture_sha256: null,
+        execution_capture_origin: null,
       },
     },
     live_qualification_by_key: {
@@ -1639,3 +1912,660 @@ const _coveredKeys = new Set<CapabilityKey>([
   "CANCELLATION",
 ]);
 void _coveredKeys;
+
+
+/* ================================================================== *
+ * LH-03 CORRECTION08 - execution evidence is bound by SHA, semantics *
+ *   are derived mechanically, and invocation + observation are bound *
+ *   to the same OS process run via execution_capture manifest.       *
+ *   C08-01..C08-07 (C08-08 cumulative).                              *
+ * ================================================================== */
+
+test("C08-01: execution_capture manifest SHA is bound externally on the capability axis", () => {
+  // Mutating the manifest bytes after binding must
+  // fail closed. The axis binds
+  // `execution_capture_sha256` to the bytes' SHA at
+  // write time; any later mutation triggers
+  // EVIDENCE_HASH_MISMATCH.
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c08-01-"));
+  const sessionCopy = join(tmp, "session.jsonl");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
+  const cancelCopy = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  const processResultSha = artifactSha256(cancelCopy);
+  // CORRECTION09 C09-04: create stdout/stderr whose
+  // SHA matches `invocationSha` (the SHA the manifest
+  // declares for both). We write a placeholder and let
+  // the post-write compute the SHA; the manifest values
+  // are then set to that SHA.
+  const stdoutCopy = join(tmp, "stdout.jsonl");
+  const stderrCopy = join(tmp, "stderr.txt");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    stdoutCopy,
+  );
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    stderrCopy,
+  );
+  const realSha = artifactSha256(sessionCopy);
+  const invRelPath = "inv/JSONL.invocation.json";
+  mkdirSync(join(tmp, "inv"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, invRelPath),
+  );
+  const invocationSha = artifactSha256(join(tmp, invRelPath));
+  const stdoutSha = artifactSha256(stdoutCopy);
+  const stderrSha = artifactSha256(stderrCopy);
+  const execId = computeExecutionId({
+    nonce: "c08-01",
+    invocation_sha256: invocationSha,
+    capability: "JSONL",
+  });
+  const manifestRelPath = "captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(
+    manifestAbs,
+    JSON.stringify(
+      {
+        capture_origin: "REPLAY_FIXTURE",
+        execution_id: execId,
+        capability: "JSONL",
+        invocation_sha256: invocationSha,
+        stdout_path: "stdout.jsonl",
+        stdout_sha256: stdoutSha,
+        stderr_path: "stderr.txt",
+        stderr_sha256: stderrSha,
+        process_result_path: "process-result.json",
+        process_result_sha256: processResultSha,
+        native_artifact_path: "session.jsonl",
+        native_artifact_sha256: realSha,
+        runtime_session_file_path: null,
+        recorded_at: "2026-09-18T00:00:00Z",
+      },
+      null,
+      2,
+    ),
+  );
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: {
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: "session.jsonl",
+          artifact_sha256: realSha,
+          evidence_relation: { expected: "session", observed: "session" },
+          disposition: "PASS" as const,
+          execution_id: execId,
+        },
+        probe_evidence_path: "session.jsonl",
+        invocation_evidence_path: invRelPath,
+        invocation_evidence_sha256: invocationSha,
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r1 = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  if (!r1.ok) {
+    console.log("DEBUG C08-01 r1 errors:", JSON.stringify(r1.errors?.slice(0, 3), null, 2));
+  }
+  assert.equal(r1.ok, true, "valid document must pass");
+  appendFileSync(manifestAbs, "\n{\"tampered\":true}\n");
+  const r2 = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(r2.ok, false, "mutated manifest must fail verification");
+  const kinds = new Set((r2.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_HASH_MISMATCH"),
+    `verifier must report EVIDENCE_HASH_MISMATCH; got ${[...kinds].join(",")}`,
+  );
+});
+
+
+test("C08-02: validateLiveQualification refuses LIVE_QUALIFIED without execution_capture_path", () => {
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
+    session_capture: FIXTURE_SESSION,
+    cancellation_halt: FIXTURE_PROCESS,
+    requested_cwd: "/private/tmp/pi-live",
+  }, ["JSONL"]));
+  const r0 = validateLiveQualification(caps);
+  assert.equal(r0.ok, true);
+  const forged: HarnessCapabilities = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        ...caps.capability_axes.JSONL,
+        execution_capture_path: null,
+      },
+    },
+  };
+  const r = validateLiveQualification(forged);
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  const v = r.violations.find(
+    (x) => x.kind === "live_qualified_without_execution_capture",
+  );
+  assert.ok(v, "expected live_qualified_without_execution_capture or replay_qualified_without_execution_capture violation");
+  // CORRECTION09: with the fixture-driven origin
+  // requirement, REPLAY_QUALIFIED axes (which the
+  // pi-adapter produces for fixture replays) need a
+  // capture_path too — the validator refuses null
+  // captures for either disposition.
+});
+
+test("C08-03: probe evidence execution_id mismatch with manifest fails EVIDENCE_EXECUTION_MISMATCH", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c08-03-"));
+  const sessionCopy = join(tmp, "session.jsonl");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
+  const cancelCopy = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  const stdoutCopy = join(tmp, "stdout.jsonl");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    stdoutCopy,
+  );
+  const stderrCopy = join(tmp, "stderr.txt");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    stderrCopy,
+  );
+  const realSha = artifactSha256(sessionCopy);
+  const stdoutSha = artifactSha256(stdoutCopy);
+  const stderrSha = artifactSha256(stderrCopy);
+  const processResultSha = artifactSha256(cancelCopy);
+  const invRelPath = "inv/JSONL.invocation.json";
+  mkdirSync(join(tmp, "inv"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, invRelPath),
+  );
+  const invocationSha = artifactSha256(join(tmp, invRelPath));
+  const execIdM = computeExecutionId({
+    nonce: "c08-03-manifest",
+    invocation_sha256: invocationSha,
+    capability: "JSONL",
+  });
+  const manifestRelPath = "captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(
+    manifestAbs,
+    JSON.stringify(
+      {
+        capture_origin: "REPLAY_FIXTURE",
+        execution_id: execIdM,
+        capability: "JSONL",
+        invocation_sha256: invocationSha,
+        stdout_path: "stdout.jsonl",
+        stdout_sha256: stdoutSha,
+        stderr_path: "stderr.txt",
+        stderr_sha256: stderrSha,
+        process_result_path: "process-result.json",
+        process_result_sha256: processResultSha,
+        native_artifact_path: "session.jsonl",
+        native_artifact_sha256: realSha,
+        runtime_session_file_path: null,
+        recorded_at: "2026-09-18T00:00:00Z",
+      },
+      null,
+      2,
+    ),
+  );
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: {
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: "session.jsonl",
+          artifact_sha256: realSha,
+          evidence_relation: { expected: "session", observed: "session" },
+          disposition: "PASS" as const,
+          execution_id: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        },
+        probe_evidence_path: "session.jsonl",
+        invocation_evidence_path: invRelPath,
+        invocation_evidence_sha256: invocationSha,
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(r.ok, false, "execution_id mismatch must fail verification");
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_EXECUTION_MISMATCH"),
+    `verifier must report EVIDENCE_EXECUTION_MISMATCH; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C08-04: manifest with extra fields outside closed-world schema is refused", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c08-04-"));
+  const sessionCopy = join(tmp, "session.jsonl");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
+  const cancelCopy = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  const realSha = artifactSha256(sessionCopy);
+  const invRelPath = "inv/JSONL.invocation.json";
+  mkdirSync(join(tmp, "inv"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, invRelPath),
+  );
+  const invocationSha = artifactSha256(join(tmp, invRelPath));
+  const execId = computeExecutionId({
+    nonce: "c08-04",
+    invocation_sha256: invocationSha,
+    capability: "JSONL",
+  });
+  const manifestRelPath = "captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(
+    manifestAbs,
+    JSON.stringify(
+      {
+        execution_id: execId,
+        capability: "JSONL",
+        invocation_sha256: invocationSha,
+        stdout_sha256: invocationSha,
+        stderr_sha256: invocationSha,
+        process_result_sha256: realSha,
+        native_artifact_sha256: realSha,
+        runtime_session_file_path: null,
+        recorded_at: "2026-09-18T00:00:00Z",
+        extra_forbidden_field: "should not be here",
+      },
+      null,
+      2,
+    ),
+  );
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "LIVE_QUALIFIED" as const,
+        probe_evidence: {
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: "session.jsonl",
+          artifact_sha256: realSha,
+          evidence_relation: { expected: "session", observed: "session" },
+          disposition: "PASS" as const,
+          execution_id: execId,
+        },
+        probe_evidence_path: "session.jsonl",
+        invocation_evidence_path: invRelPath,
+        invocation_evidence_sha256: invocationSha,
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "LIVE_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(r.ok, false, "manifest with extra fields must fail");
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_PARSE_FAILED"),
+    `verifier must report EVIDENCE_PARSE_FAILED; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C08-05: ISOLATED_DATA_DIR oracle requires runtime_session_file_path under declared session_dir", () => {
+  // Closed-world test: build a fresh fixture subtree
+  // whose --session-dir is RELATIVE and whose
+  // captured artifact + runtime_session_file_path
+  // both live UNDER the argv-derived session_dir.
+  // Then mutate runtime_session_file_path to a path
+  // OUTSIDE the session_dir and observe oracle fail.
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c08-05-"));
+  const sessionRel = "test/fixtures/harnesses/pi/pi-v0_85_1/sessions/runtime.jsonl";
+  const sessionAbs = join(tmp, sessionRel);
+  mkdirSync(dirname(sessionAbs), { recursive: true });
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionAbs);
+  const cancelAbs = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelAbs);
+  const stdoutAbs = join(tmp, "stdout.jsonl");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    stdoutAbs,
+  );
+  const stderrAbs = join(tmp, "stderr.txt");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    stderrAbs,
+  );
+  const realSha = artifactSha256(sessionAbs);
+  const stdoutSha = artifactSha256(stdoutAbs);
+  const stderrSha = artifactSha256(stderrAbs);
+  const processResultSha = artifactSha256(cancelAbs);
+  const invRelPath = "inv/ISOLATED_DATA_DIR.invocation.json";
+  mkdirSync(join(tmp, "inv"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/ISOLATED_DATA_DIR.invocation.json"),
+    join(tmp, invRelPath),
+  );
+  const invocationSha = artifactSha256(join(tmp, invRelPath));
+  const execId = computeExecutionId({
+    nonce: "c08-05",
+    invocation_sha256: invocationSha,
+    capability: "ISOLATED_DATA_DIR",
+  });
+  const manifestRelPath = "captures/ISOLATED_DATA_DIR.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(
+    manifestAbs,
+    JSON.stringify(
+      {
+        capture_origin: "REPLAY_FIXTURE",
+        execution_id: execId,
+        capability: "ISOLATED_DATA_DIR",
+        invocation_sha256: invocationSha,
+        stdout_path: "stdout.jsonl",
+        stdout_sha256: stdoutSha,
+        stderr_path: "stderr.txt",
+        stderr_sha256: stderrSha,
+        process_result_path: "process-result.json",
+        process_result_sha256: processResultSha,
+        native_artifact_path: sessionRel,
+        native_artifact_sha256: realSha,
+        runtime_session_file_path: sessionAbs,
+        recorded_at: "2026-09-18T00:00:00Z",
+      },
+      null,
+      2,
+    ),
+  );
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      ISOLATED_DATA_DIR: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: {
+          capability: "ISOLATED_DATA_DIR" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: sessionRel,
+          artifact_sha256: realSha,
+          evidence_relation: {
+            expected: "/private/tmp/pi-live",
+            observed: sessionRel,
+          },
+          disposition: "PASS" as const,
+          execution_id: execId,
+        },
+        probe_evidence_path: sessionRel,
+        invocation_evidence_path: invRelPath,
+        invocation_evidence_sha256: invocationSha,
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+        execution_capture_origin: "REPLAY_FIXTURE",
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      ISOLATED_DATA_DIR: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r1 = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(
+    r1.ok,
+    true,
+    "ISOLATED_DATA_DIR with runtime_session_file_path inside session_dir must pass",
+  );
+  const manifestRawT = JSON.parse(readFileSync(manifestAbs, "utf8"));
+  manifestRawT.runtime_session_file_path = "/tmp/pi-session-DIFFERENT.jsonl";
+  writeFileSync(manifestAbs, JSON.stringify(manifestRawT, null, 2));
+  // Rebind the manifest SHA on the document so
+  // CORRECTION08 C08-01 lets the verifier reach the
+  // oracle step.
+  doc.capability_axes.ISOLATED_DATA_DIR.execution_capture_sha256 =
+    artifactSha256(manifestAbs);
+  const r2 = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(
+    r2.ok,
+    false,
+    "runtime_session_file_path outside session_dir must fail",
+  );
+  const kinds = new Set((r2.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_ORACLE_FAILED"),
+    `verifier must report EVIDENCE_ORACLE_FAILED; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C08-06: strict argv grammar refuses --mode (no value), duplicate --mode, duplicate --session-dir", () => {
+  const baseLaunch: import("../../src/adapter-common/invocation-evidence.js").RawInvocationLaunch = {
+    capability: "JSONL",
+    executable: "/usr/bin/env",
+    argv: ["node", "pi", "--mode", "json"],
+    spawn_cwd: "/private/tmp/pi-live",
+    env_subset: {},
+    recorded_at: "2026-09-18T00:00:00Z",
+  };
+  assert.throws(
+    () => deriveInvocationSemantics({ ...baseLaunch, argv: ["pi", "--mode"] }),
+    /--mode' has no value/,
+  );
+  assert.throws(
+    () => deriveInvocationSemantics({
+      ...baseLaunch,
+      argv: ["pi", "--mode", "json", "--mode", "rpc"],
+    }),
+    /duplicate '--mode'/,
+  );
+  assert.throws(
+    () => deriveInvocationSemantics({
+      ...baseLaunch,
+      argv: ["pi", "--mode", "json", "--session-dir", "/a", "--session-dir", "/b"],
+    }),
+    /duplicate '--session-dir'/,
+  );
+  assert.throws(
+    () => deriveInvocationSemantics({
+      ...baseLaunch,
+      argv: ["pi", "--mode", "json", "--session-dir"],
+    }),
+    /--session-dir' has no value/,
+  );
+  assert.throws(
+    () => deriveInvocationSemantics({ ...baseLaunch, argv: ["pi", "-p", "-p"] }),
+    /duplicate '-p'/,
+  );
+  assert.throws(
+    () => deriveInvocationSemantics({
+      ...baseLaunch,
+      argv: ["pi", "--no-session", "--no-session"],
+    }),
+    /duplicate '--no-session'/,
+  );
+  const ok = deriveInvocationSemantics(baseLaunch);
+  assert.equal(ok.protocol, "json");
+  assert.equal(ok.headless, true);
+});
+
+test("C08-07: probe evidence artifact_sha256 mismatch with manifest native_artifact_sha256 fails EVIDENCE_EXECUTION_MISMATCH", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "lh03-c08-07-"));
+  const sessionCopy = join(tmp, "session.jsonl");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_SESSION), sessionCopy);
+  const cancelCopy = join(tmp, "process-result.json");
+  copyFileSync(resolve(REPO_ROOT, FIXTURE_PROCESS), cancelCopy);
+  const stdoutCopy = join(tmp, "stdout.jsonl");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl"),
+    stdoutCopy,
+  );
+  const stderrCopy = join(tmp, "stderr.txt");
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt"),
+    stderrCopy,
+  );
+  const realSha = artifactSha256(sessionCopy);
+  const stdoutSha = artifactSha256(stdoutCopy);
+  const stderrSha = artifactSha256(stderrCopy);
+  const processResultSha = artifactSha256(cancelCopy);
+  const invRelPath = "inv/JSONL.invocation.json";
+  mkdirSync(join(tmp, "inv"), { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"),
+    join(tmp, invRelPath),
+  );
+  const invocationSha = artifactSha256(join(tmp, invRelPath));
+  const execId = computeExecutionId({
+    nonce: "c08-07",
+    invocation_sha256: invocationSha,
+    capability: "JSONL",
+  });
+  const wrongNativeSha = "0000000000000000000000000000000000000000000000000000000000000001";
+  const manifestRelPath = "captures/JSONL.capture.json";
+  const manifestAbs = join(tmp, manifestRelPath);
+  mkdirSync(dirname(manifestAbs), { recursive: true });
+  writeFileSync(
+    manifestAbs,
+    JSON.stringify(
+      {
+        capture_origin: "REPLAY_FIXTURE",
+        execution_id: execId,
+        capability: "JSONL",
+        invocation_sha256: invocationSha,
+        stdout_path: "stdout.jsonl",
+        stdout_sha256: stdoutSha,
+        stderr_path: "stderr.txt",
+        stderr_sha256: stderrSha,
+        process_result_path: "process-result.json",
+        process_result_sha256: processResultSha,
+        native_artifact_path: "session.jsonl",
+        native_artifact_sha256: wrongNativeSha,
+        runtime_session_file_path: null,
+        recorded_at: "2026-09-18T00:00:00Z",
+      },
+      null,
+      2,
+    ),
+  );
+  const manifestSha = artifactSha256(manifestAbs);
+  const id = QUALIFIED_PI_IDENTITY;
+  const caps = emptyCapabilities(id, 1700000000000);
+  const doc = {
+    ...caps,
+    capability_axes: {
+      ...caps.capability_axes,
+      JSONL: {
+        harness_capability: "SUPPORTED" as const,
+        live_qualification: "REPLAY_QUALIFIED" as const,
+        probe_evidence: {
+          capability: "JSONL" as const,
+          probe_kind: "SESSION_ENVELOPE" as const,
+          artifact_path: "session.jsonl",
+          artifact_sha256: realSha,
+          evidence_relation: { expected: "session", observed: "session" },
+          disposition: "PASS" as const,
+          execution_id: execId,
+        },
+        probe_evidence_path: "session.jsonl",
+        invocation_evidence_path: invRelPath,
+        invocation_evidence_sha256: invocationSha,
+        execution_capture_path: manifestRelPath,
+        execution_capture_sha256: manifestSha,
+      },
+    },
+    live_qualification_by_key: {
+      ...caps.live_qualification_by_key,
+      JSONL: "REPLAY_QUALIFIED" as const,
+    },
+  };
+  const r = verifyLiveQualificationEvidence(
+    doc as unknown as HarnessCapabilities,
+    tmp,
+  );
+  assert.equal(r.ok, false, "native_artifact_sha mismatch must fail");
+  const kinds = new Set((r.errors ?? []).map((e) => e.kind));
+  assert.ok(
+    kinds.has("EVIDENCE_EXECUTION_MISMATCH"),
+    `verifier must report EVIDENCE_EXECUTION_MISMATCH; got ${[...kinds].join(",")}`,
+  );
+});
+
+test("C08-08: cumulative post-CORRECTION08 fixture/qualification matrix passes verifier", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "test/fixtures/harnesses/pi/pi-v0_85_1/capabilities.json"),
+      "utf8",
+    ),
+  );
+  const qualification = JSON.parse(
+    readFileSync(
+      resolve(REPO_ROOT, "qualification/pi/pi-capabilities.json"),
+      "utf8",
+    ),
+  );
+  const r1 = verifyLiveQualificationEvidence(fixture, REPO_ROOT);
+  if (r1.ok !== true) {
+    assert.fail(`fixture verifier failed: ${JSON.stringify(r1.errors)}`);
+  }
+  const r2 = verifyLiveQualificationEvidence(qualification, REPO_ROOT);
+  if (r2.ok !== true) {
+    assert.fail(`qualification verifier failed: ${JSON.stringify(r2.errors)}`);
+  }
+});

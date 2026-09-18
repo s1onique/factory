@@ -1526,6 +1526,105 @@ export function defaultPiCapabilities(
      * when `invocation_evidence` is supplied.
      */
     readonly invocation_evidence_path?: string | null;
+    /**
+     * CORRECTION08 C08-01: the repo-relative path to the
+     * execution-capture manifest on disk. The manifest
+     * binds the invocation artifact and the probe
+     * evidence to the same OS process run via a stable
+     * execution_id. Required for every LIVE_QUALIFIED
+     * and LIVE_HALT axis; the validator refuses axes
+     * whose `execution_capture_path` is null.
+     */
+    readonly execution_capture_path?: string | null;
+    /**
+     * CORRECTION08 C08-01: SHA256 of the execution-
+     * capture manifest's on-disk bytes. The verifier
+     * recomputes the SHA and compares against this
+     * externally-bound value.
+     */
+    readonly execution_capture_sha256?: string | null;
+    /**
+     * CORRECTION08 C08-03: stable execution_id of the
+     * captured process run. The caller MUST compute
+     * this once (via `computeExecutionId`) and pass it
+     * both here and into the manifest's
+     * `execution_id` field, so the probe evidence and
+     * the manifest agree. The pi-adapter does not
+     * recompute it (the spawn authority is the source
+     * of truth).
+     */
+    readonly execution_id?: string | null;
+    /**
+     * CORRECTION08 C08-01: per-axis map of execution-
+     * capture manifest paths. When supplied, the
+     * corresponding axis binds the mapped
+     * (path, sha) instead of the bundle-level
+     * `execution_capture_path` /
+     * `execution_capture_sha256`. This lets a single
+     * LIVE_HALT CANCELLATION axis use a different
+     * manifest than the JSONL / HEADLESS /
+     * STREAMING_EVENTS axes.
+     */
+    readonly axis_execution_captures?: Readonly<
+      Record<
+        CapabilityKey,
+        {
+          readonly path: string;
+          readonly sha256: string;
+        }
+      >
+    >;
+    /**
+     * CORRECTION08 C08-03: per-axis map of invocation
+     * evidence. When supplied, the corresponding axis
+     * binds the mapped (evidence, path, sha) instead of
+     * the bundle-level `invocation_evidence` /
+     * `invocation_evidence_path` / `invocation_evidence_sha256`.
+     */
+    readonly axis_invocation_evidence?: Readonly<
+      Record<
+        CapabilityKey,
+        {
+          readonly evidence: import("../../adapter-common/invocation-evidence.js").InvocationEvidence;
+          readonly path: string;
+          readonly sha256: string;
+        }
+      >
+    >;
+    /**
+     * CORRECTION08 C08-03: per-axis map of execution_id.
+     * When supplied, the corresponding axis's probe
+     * evidence carries the mapped execution_id instead
+     * of the bundle-level `execution_id`. CANCELLATION
+     * uses this so its halt evidence matches its
+     * dedicated halt capture manifest.
+     */
+    readonly axis_execution_ids?: Readonly<
+      Record<CapabilityKey, string>
+    >;
+    /**
+     * CORRECTION09 C09-01: provenance discriminator for
+     * the bundle-level execution-capture manifest. The
+     * adapter binds the same origin on every axis that
+     * uses the bundle-level manifest. Per-axis overrides
+     * are supported via `axis_execution_capture_origins`.
+     * `null` (the default) leaves the origin field null
+     * on the axes, which the validator refuses for
+     * `LIVE_QUALIFIED` / `REPLAY_QUALIFIED` / `LIVE_HALT`.
+     */
+    readonly execution_capture_origin?:
+      | "REAL_PROCESS_CAPTURE"
+      | "REPLAY_FIXTURE"
+      | null;
+    /**
+     * CORRECTION09 C09-01: per-axis override of
+     * `execution_capture_origin`. The CANCELLATION axis
+     * uses this when its manifest has a different origin
+     * from the JSONL axis.
+     */
+    readonly axis_execution_capture_origins?: Readonly<
+      Record<CapabilityKey, "REAL_PROCESS_CAPTURE" | "REPLAY_FIXTURE">
+    >;
   } = { session_capture: null, cancellation_halt: null },
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
@@ -1630,6 +1729,24 @@ export function defaultPiCapabilities(
   // passes the parsed object here.
   const invocationEvidence = evidence.invocation_evidence ?? null;
   const invocationEvidencePath = evidence.invocation_evidence_path ?? null;
+  // CORRECTION08 C08-01: extract the execution-capture
+  // manifest path + external SHA from the bundle arg.
+  // The manifest is bound on every LIVE_QUALIFIED /
+  // LIVE_HALT axis; the validator refuses axes whose
+  // execution_capture_path is null. Per-axis overrides
+  // take precedence over the bundle-level fields so a
+  // single LIVE_HALT CANCELLATION axis can carry its
+  // own halt-specific manifest.
+  const axisCaptureOverrides = evidence.axis_execution_captures ?? null;
+  // CORRECTION08 C08-03: per-axis invocation overrides.
+  // CANCELLATION needs its own invocation artifact
+  // because its argv differs from JSONL's. The
+  // overrides are keyed by capability; absent keys
+  // fall back to the bundle-level
+  // `invocation_evidence_path`.
+  const axisInvocationOverrides = evidence.axis_invocation_evidence ?? null;
+  const axisExecutionIds = evidence.axis_execution_ids ?? null;
+  const executionId = evidence.execution_id ?? null;
   // CORRECTION07: derivation of expected values lives
   // inside the artifact itself
   // (`invocation.derived.*`). The pi-adapter no longer
@@ -1658,8 +1775,30 @@ export function defaultPiCapabilities(
       cap === "EXPLICIT_CWD" || cap === "ISOLATED_DATA_DIR"
         ? (observedSession.cwd ?? "")
         : observedSession.session_type;
+    // CORRECTION08 C08-03: the probe evidence must
+    // carry the execution_id of the captured process
+    // run. For session-derived axes the canonical
+    // execution_id is the manifest's execution_id
+    // (passed in via `evidence.execution_capture_path`
+    // + the manifest on disk). The pi-adapter does not
+    // re-compute it; it accepts the caller-supplied
+    // `evidence.execution_id` so the manifest and the
+    // probe always agree. Per-axis overrides take
+    // precedence.
+    const execId =
+      (axisExecutionIds !== null && axisExecutionIds[cap] !== undefined
+        ? axisExecutionIds[cap]
+        : executionId) ?? "";
     return {
-      lq: "LIVE_QUALIFIED",
+      // CORRECTION09 C09-01: the pi-adapter is a
+      // fixture-driven replay harness, not a spawn
+      // authority. The capabilities it qualifies are
+      // therefore REPLAY_QUALIFIED, not LIVE_QUALIFIED.
+      // A future CORRECTION10 spawn-authority code path
+      // can promote axes to LIVE_QUALIFIED by emitting
+      // a REAL_PROCESS_CAPTURE manifest from a live
+      // capture authority.
+      lq: "REPLAY_QUALIFIED",
       probe: buildProbeEvidence({
         capability: cap,
         probe_kind: "SESSION_ENVELOPE",
@@ -1667,6 +1806,7 @@ export function defaultPiCapabilities(
         artifact_sha256: observedSession.artifact_sha256,
         expected,
         observed,
+        execution_id: execId,
       }),
     };
   }
@@ -1704,12 +1844,20 @@ export function defaultPiCapabilities(
       return emptyEntry;
     }
     return {
-      lq: "LIVE_QUALIFIED",
+      // CORRECTION09 C09-01: the pi-adapter is a
+      // fixture-driven replay harness, so its
+      // qualifications are REPLAY_QUALIFIED (not
+      // LIVE_QUALIFIED). A future spawn-authority code
+      // path can promote axes to LIVE_QUALIFIED by
+      // emitting a REAL_PROCESS_CAPTURE manifest from a
+      // live capture authority.
+      lq: "REPLAY_QUALIFIED",
       probe: buildIsolatedDataDirEvidence({
         artifact_path: observedSession.artifact_path,
         artifact_sha256: observedSession.artifact_sha256,
         isolated_session_dir: invocationSessionDir,
         observed_artifact_path: artifactPath,
+        execution_id: (axisExecutionIds !== null && axisExecutionIds["ISOLATED_DATA_DIR"] !== undefined ? axisExecutionIds["ISOLATED_DATA_DIR"] : executionId) ?? "",
       }),
     };
   }
@@ -1799,13 +1947,23 @@ export function defaultPiCapabilities(
     CANCELLATION:
       observedCancellation !== null && invocationEvidence !== null
         ? {
-            lq: "LIVE_HALT",
+            // CORRECTION09 C09-01: the pi-adapter is a
+            // fixture-driven replay harness, so the halt
+            // it qualifies is REPLAY_HALT, not LIVE_HALT.
+            // A future spawn-authority code path can
+            // promote axes to LIVE_HALT by emitting a
+            // REAL_PROCESS_CAPTURE manifest from a live
+            // capture authority.
+            lq: "REPLAY_HALT",
             probe: haltProbeEvidence({
               capability: "CANCELLATION",
               artifact_path: observedCancellation.artifact_path,
               artifact_sha256: observedCancellation.artifact_sha256,
               expected: "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
               observed: observedCancellation.halt_disposition ?? "",
+              // CORRECTION08 C08-03: bind the captured
+              // execution_id onto the halt evidence.
+              execution_id: (axisExecutionIds !== null && axisExecutionIds["CANCELLATION"] !== undefined ? axisExecutionIds["CANCELLATION"] : executionId) ?? "",
             }),
           }
         : { lq: "LIVE_UNQUALIFIED", probe: null },
@@ -1837,9 +1995,39 @@ export function defaultPiCapabilities(
         `Pi default capability document attempted LIVE_QUALIFIED with NOT_RUN probe for key ${k}`,
       );
     }
+    // CORRECTION09 C09-01: REPLAY_QUALIFIED carries the
+    // same evidence-binding invariants as LIVE_QUALIFIED
+    // — it just declares a different capture_origin.
+    if (entry.lq === "REPLAY_QUALIFIED" && entry.probe === null) {
+      throw new Error(
+        `Pi default capability document attempted REPLAY_QUALIFIED with null probe_evidence for key ${k}`,
+      );
+    }
+    if (entry.lq === "REPLAY_QUALIFIED" && entry.probe?.disposition !== "PASS") {
+      throw new Error(
+        `Pi default capability document attempted REPLAY_QUALIFIED with failed oracle for key ${k}: expected=${entry.probe?.evidence_relation.expected} observed=${entry.probe?.evidence_relation.observed} disposition=${entry.probe?.disposition}`,
+      );
+    }
+    if (entry.lq === "REPLAY_QUALIFIED" && entry.probe?.probe_kind === "NOT_RUN") {
+      throw new Error(
+        `Pi default capability document attempted REPLAY_QUALIFIED with NOT_RUN probe for key ${k}`,
+      );
+    }
     if (entry.lq === "LIVE_HALT" && entry.probe === null) {
       throw new Error(
         `Pi default capability document attempted LIVE_HALT with null probe_evidence for key ${k}`,
+      );
+    }
+    // CORRECTION09 C09-01: REPLAY_HALT carries the
+    // same evidence-binding invariants as LIVE_HALT.
+    if (entry.lq === "REPLAY_HALT" && entry.probe === null) {
+      throw new Error(
+        `Pi default capability document attempted REPLAY_HALT with null probe_evidence for key ${k}`,
+      );
+    }
+    if (entry.lq === "REPLAY_HALT" && entry.probe?.disposition !== "HALT") {
+      throw new Error(
+        `Pi default capability document attempted REPLAY_HALT with non-HALT probe for key ${k}: disposition=${entry.probe?.disposition}`,
       );
     }
     if (
@@ -1865,17 +2053,36 @@ export function defaultPiCapabilities(
     // `invocation_evidence` argument.
     let invocationEvidencePathForAxis: string | null = null;
     let invocationEvidenceShaForAxis: string | null = null;
+    // CORRECTION08 C08-03: per-axis invocation override.
+    // CANCELLATION uses its own invocation artifact
+    // (CANCELLATION.invocation.json) whose argv differs
+    // from JSONL's. Without this override, every axis
+    // would point at JSONL.invocation.json and the
+    // CANCELLATION manifest's invocation_sha256 would
+    // not match.
+    const axisInvOverride =
+      axisInvocationOverrides !== null
+        ? axisInvocationOverrides[k]
+        : undefined;
     if (
-      (entry.lq === "LIVE_QUALIFIED" || entry.lq === "LIVE_HALT") &&
-      invocationEvidence !== null &&
-      invocationEvidencePath !== null
+      (entry.lq === "LIVE_QUALIFIED" ||
+        entry.lq === "LIVE_HALT" ||
+        entry.lq === "REPLAY_QUALIFIED" ||
+        entry.lq === "REPLAY_HALT") &&
+      ((invocationEvidence !== null && invocationEvidencePath !== null) ||
+        axisInvOverride !== undefined)
     ) {
-      invocationEvidencePathForAxis = invocationEvidencePath;
-      // CORRECTION07 C07-01: bind the invocation SHA on
-      // the axis. The verifier recomputes the SHA from
-      // the on-disk bytes and compares against this
-      // value.
-      invocationEvidenceShaForAxis = invocationSha256;
+      if (axisInvOverride !== undefined) {
+        invocationEvidencePathForAxis = axisInvOverride.path;
+        invocationEvidenceShaForAxis = axisInvOverride.sha256;
+      } else {
+        invocationEvidencePathForAxis = invocationEvidencePath;
+        // CORRECTION07 C07-01: bind the invocation SHA on
+        // the axis. The verifier recomputes the SHA from
+        // the on-disk bytes and compares against this
+        // value.
+        invocationEvidenceShaForAxis = invocationSha256;
+      }
     }
     axes[k] = {
       harness_capability: capabilities[k],
@@ -1884,6 +2091,35 @@ export function defaultPiCapabilities(
       probe_evidence_path: entry.probe?.artifact_path ?? null,
       invocation_evidence_path: invocationEvidencePathForAxis,
       invocation_evidence_sha256: invocationEvidenceShaForAxis,
+      // CORRECTION08 C08-01: bind the execution-capture
+      // manifest + external SHA on the axis. The
+      // manifest closes the invocation-vs-observation
+      // splice hole CORRECTION07's review identified.
+      // `null` means the axis is LIVE_UNQUALIFIED or
+      // carries no manifest (LIVE_HALT without a
+      // manifest, which the validator refuses).
+      execution_capture_path:
+        axisCaptureOverrides !== null && axisCaptureOverrides[k] !== undefined
+          ? axisCaptureOverrides[k].path
+          : evidence.execution_capture_path ?? null,
+      execution_capture_sha256:
+        axisCaptureOverrides !== null && axisCaptureOverrides[k] !== undefined
+          ? axisCaptureOverrides[k].sha256
+          : evidence.execution_capture_sha256 ?? null,
+      // CORRECTION09 C09-01: provenance discriminator.
+      // Per-axis overrides take precedence over the
+      // bundle-level `execution_capture_origin`. The
+      // pi-adapter defaults to REPLAY_FIXTURE because it
+      // consumes pre-captured evidence; a future spawn-
+      // authority code path can override to
+      // REAL_PROCESS_CAPTURE.
+      execution_capture_origin:
+        evidence.axis_execution_capture_origins !== undefined &&
+        evidence.axis_execution_capture_origins[k] !== undefined
+          ? evidence.axis_execution_capture_origins[k]
+          : evidence.execution_capture_origin !== undefined
+            ? evidence.execution_capture_origin
+            : "REPLAY_FIXTURE",
     };
   }
   if (Object.keys(capabilities).length !== Object.keys(empty.capabilities).length) {

@@ -70,6 +70,7 @@ const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 import {
   loadInvocationFixture,
+  loadCaptureFixture,
 } from "./_invocation_helper.js";
 
 /**
@@ -94,10 +95,45 @@ function withInvocation(
     repoRoot: REPO_ROOT,
     capability: "JSONL",
   });
+  const cap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "JSONL",
+  });
+  const cancelCap = loadCaptureFixture({
+    repoRoot: REPO_ROOT,
+    capability: "CANCELLATION",
+  });
+  const cancelInv = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "CANCELLATION",
+  });
   return {
     ...(base as Parameters<typeof defaultPiCapabilities>[2]),
     invocation_evidence: inv.evidence,
     invocation_evidence_path: inv.repo_relative_path,
+    // CORRECTION08 C08-01: bind execution_capture_path
+    // + SHA on every LIVE_QUALIFIED axis so the
+    // verifier can prove invocation + observation came
+    // from the same OS process run.
+    execution_capture_path: cap.repo_relative_path,
+    execution_capture_sha256: cap.manifest_sha256,
+    execution_id: cap.manifest.execution_id,
+    axis_execution_captures: {
+      CANCELLATION: {
+        path: cancelCap.repo_relative_path,
+        sha256: cancelCap.manifest_sha256,
+      },
+    },
+    axis_invocation_evidence: {
+      CANCELLATION: {
+        evidence: cancelInv.evidence,
+        path: cancelInv.repo_relative_path,
+        sha256: cancelInv.evidence.artifact_sha256,
+      },
+    },
+    axis_execution_ids: {
+      CANCELLATION: cancelCap.manifest.execution_id,
+    },
   } as Parameters<typeof defaultPiCapabilities>[2];
 }
 
@@ -161,6 +197,9 @@ test("C03-01b: validateLiveQualification rejects LIVE_QUALIFIED with disposition
         probe_evidence_path: FIXTURE_SESSION,
         invocation_evidence_path: null,
         invocation_evidence_sha256: null,
+        execution_capture_path: null,
+        execution_capture_sha256: null,
+        execution_capture_origin: null,
       },
     },
     live_qualification_by_key: {
@@ -198,10 +237,14 @@ test("C03-01c: validateLiveQualification rejects LIVE_QUALIFIED with probe_kind 
             "0000000000000000000000000000000000000000000000000000000000000000",
           evidence_relation: { expected: "", observed: "" },
           disposition: "FAIL" as const,
+          execution_id: "",
         },
         probe_evidence_path: null,
         invocation_evidence_path: null,
         invocation_evidence_sha256: null,
+        execution_capture_path: null,
+        execution_capture_sha256: null,
+        execution_capture_origin: null,
       },
     },
     live_qualification_by_key: {
@@ -237,6 +280,9 @@ test("C03-01d: validateLiveQualification rejects probe_evidence.capability misma
         probe_evidence_path: FIXTURE_SESSION,
         invocation_evidence_path: null,
         invocation_evidence_sha256: null,
+        execution_capture_path: null,
+        execution_capture_sha256: null,
+        execution_capture_origin: null,
       },
     },
     live_qualification_by_key: {
@@ -272,6 +318,9 @@ test("C03-01e: validateLiveQualification rejects probe_evidence_path vs probe_ev
         probe_evidence_path: "/some/other/path.jsonl",
         invocation_evidence_path: null,
         invocation_evidence_sha256: null,
+        execution_capture_path: null,
+        execution_capture_sha256: null,
+        execution_capture_origin: null,
       },
     },
     live_qualification_by_key: {
@@ -301,7 +350,13 @@ test("C03-02a: EXPLICIT_CWD oracle PASSes iff requested_cwd === observed session
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
   }));
-  assert.equal(pass.capability_axes.EXPLICIT_CWD.live_qualification, "LIVE_QUALIFIED");
+  // CORRECTION09 C09-01: the pi-adapter is a fixture-
+  // driven replay harness, so its qualifications are
+  // REPLAY_QUALIFIED (not LIVE_QUALIFIED). A future
+  // spawn-authority code path can promote axes to
+  // LIVE_QUALIFIED by emitting a REAL_PROCESS_CAPTURE
+  // manifest from a live capture authority.
+  assert.equal(pass.capability_axes.EXPLICIT_CWD.live_qualification, "REPLAY_QUALIFIED");
   assert.equal(
     pass.capability_axes.EXPLICIT_CWD.probe_evidence?.disposition,
     "PASS",
@@ -333,7 +388,7 @@ test("C03-02a: EXPLICIT_CWD oracle PASSes iff requested_cwd === observed session
         } as unknown as Parameters<typeof defaultPiCapabilities>[2],
       );
     },
-    /LIVE_QUALIFIED with failed oracle|invocation_evidence.*EXPLICIT_CWD/,
+    /LIVE_QUALIFIED with failed oracle|REPLAY_QUALIFIED with failed oracle|invocation_evidence.*EXPLICIT_CWD/,
   );
 });
 
@@ -430,7 +485,7 @@ test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION
   );
   assert.equal(
     isoCaps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
-    "LIVE_QUALIFIED",
+    "REPLAY_QUALIFIED",
   );
   assert.equal(
     isoCaps.capability_axes.ISOLATED_DATA_DIR.probe_evidence?.disposition,
@@ -491,7 +546,11 @@ test("C03-03a: FINAL_JSON harness_capability is UNSUPPORTED (canonical name is J
   assert.equal(caps.capabilities.FINAL_JSON, "UNSUPPORTED");
   assert.equal(caps.capabilities.JSONL, "SUPPORTED");
   assert.equal(caps.capability_axes.FINAL_JSON.live_qualification, "LIVE_UNQUALIFIED");
-  assert.equal(caps.capability_axes.JSONL.live_qualification, "LIVE_QUALIFIED");
+  // CORRECTION09 C09-01: the pi-adapter's fixture-driven
+  // qualification emits REPLAY_QUALIFIED (not
+  // LIVE_QUALIFIED) for axes whose manifest declares
+  // REPLAY_FIXTURE origin.
+  assert.equal(caps.capability_axes.JSONL.live_qualification, "REPLAY_QUALIFIED");
 });
 
 /* ------------------------------------------------------------------ *
@@ -599,6 +658,9 @@ test("C03-05c: artifact hash drift fails closed (CORRECTION04 verifyLiveQualific
         probe_evidence_path: FIXTURE_SESSION,
         invocation_evidence_path: null,
         invocation_evidence_sha256: null,
+        execution_capture_path: null,
+        execution_capture_sha256: null,
+        execution_capture_origin: null,
       },
     },
     live_qualification_by_key: {
@@ -661,7 +723,7 @@ test("C03-05d: right artifact / wrong cwd cannot qualify EXPLICIT_CWD (builder t
         } as unknown as Parameters<typeof defaultPiCapabilities>[2],
       );
     },
-    /LIVE_QUALIFIED with failed oracle|invocation_evidence.*EXPLICIT_CWD/,
+    /LIVE_QUALIFIED with failed oracle|REPLAY_QUALIFIED with failed oracle|invocation_evidence.*EXPLICIT_CWD/,
   );
 });
 

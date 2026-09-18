@@ -74,6 +74,12 @@ import type {
   HarnessCapabilities,
 } from "../protocol/index.js";
 import { readInvocationEvidence } from "./invocation-evidence.js";
+import {
+  isRuntimeSessionFileInside,
+  readExecutionCaptureManifest,
+  reverifyExecutionCaptureManifestArtifacts,
+  shaOfExecutionCaptureManifest,
+} from "./execution-capture.js";
 
 /**
  * Closed-world failure kinds for evidence verification
@@ -87,7 +93,8 @@ export type EvidenceVerificationErrorKind =
   | "EVIDENCE_HASH_MISMATCH"
   | "EVIDENCE_PARSE_FAILED"
   | "EVIDENCE_OBSERVATION_MISMATCH"
-  | "EVIDENCE_ORACLE_FAILED";
+  | "EVIDENCE_ORACLE_FAILED"
+  | "EVIDENCE_EXECUTION_MISMATCH";
 
 export const EVIDENCE_VERIFICATION_ERROR_KINDS: readonly EvidenceVerificationErrorKind[] = [
   "EVIDENCE_ARTIFACT_MISSING",
@@ -96,6 +103,7 @@ export const EVIDENCE_VERIFICATION_ERROR_KINDS: readonly EvidenceVerificationErr
   "EVIDENCE_PARSE_FAILED",
   "EVIDENCE_OBSERVATION_MISMATCH",
   "EVIDENCE_ORACLE_FAILED",
+  "EVIDENCE_EXECUTION_MISMATCH",
 ] as const;
 
 export type EvidenceVerificationError = {
@@ -142,7 +150,11 @@ export function resolveEvidencePath(
   // committed evidence; an absolute path inside the
   // repo is not portable across checkouts and is the
   // whole class of defect we are trying to close.
-  if (artifact_path === "" || isAbsolute(artifact_path)) {
+  // CORRECTION08 C08-01: also refuse undefined /
+  // non-string paths so that callers that pass an
+  // absent axis field fail closed with a typed error
+  // rather than a runtime crash.
+  if (typeof artifact_path !== "string" || artifact_path === "" || isAbsolute(artifact_path)) {
     return {
       ok: false,
       error: {
@@ -364,6 +376,19 @@ export function evaluateCapabilityOracle(args: {
   readonly parsedObservation: unknown;
   readonly observed: string;
   readonly observationArtifactAbsolute: string;
+  /**
+   * CORRECTION08 C08-05: the runtime session file path
+   * the execution-capture manifest reports for this
+   * capability (the actual file Pi's session manager
+   * created, e.g. `PI_SESSION_FILE`). For
+   * ISOLATED_DATA_DIR the oracle refuses any claim where
+   * the runtime file is not absolute AND inside
+   * `invocation.derived.session_dir`. For other
+   * capabilities this is informational; the oracle does
+   * not consume it.
+   */
+  readonly runtimeSessionFilePath?: string | null;
+  readonly repoRoot?: string;
 }): boolean {
   const {
     capability,
@@ -407,6 +432,19 @@ export function evaluateCapabilityOracle(args: {
       // the derivation has already failed closed.
       if (invocation.derived.session_dir === null) return false;
       if (invocation.derived.no_session) return false;
+      // CORRECTION08 C08-05: the runtime session file
+      // path reported by the execution-capture manifest
+      // MUST be absolute AND live under the derived
+      // session_dir. Fixture placement is no longer
+      // authoritative.
+      if (args.repoRoot !== undefined) {
+        const ok = isRuntimeSessionFileInside({
+          runtimePath: args.runtimeSessionFilePath ?? null,
+          derivedSessionDir: invocation.derived.session_dir,
+          repoRoot: args.repoRoot,
+        });
+        if (!ok) return false;
+      }
       return isUnder(observed, invocation.derived.session_dir);
     case "CANCELLATION": {
       if (
@@ -500,7 +538,9 @@ export function verifyLiveQualificationEvidence(
     if (axis === undefined) continue;
     if (
       axis.live_qualification !== "LIVE_QUALIFIED" &&
-      axis.live_qualification !== "LIVE_HALT"
+      axis.live_qualification !== "LIVE_HALT" &&
+      axis.live_qualification !== "REPLAY_QUALIFIED" &&
+      axis.live_qualification !== "REPLAY_HALT"
     ) {
       continue;
     }
@@ -671,6 +711,78 @@ export function verifyLiveQualificationEvidence(
       });
       continue;
     }
+    // CORRECTION08 C08-01: every LIVE_QUALIFIED /
+    // LIVE_HALT axis must bind an execution-capture
+    // manifest. The manifest is the same-execution
+    // proof that closes the invocation-vs-observation
+    // splice hole CORRECTION07's review identified.
+    if (axis.execution_capture_path === null || axis.execution_capture_path === undefined) {
+      errors.push({
+        kind: "EVIDENCE_PARSE_FAILED",
+        key: k,
+        message: `Capability ${k} is ${axis.live_qualification} but execution_capture_path is null; cannot prove the invocation and observation came from the same OS process (CORRECTION08 C08-01).`,
+        artifact_path: absolute,
+      });
+      continue;
+    }
+    const execResolved = resolveEvidencePath(
+      axis.execution_capture_path,
+      repoRoot,
+      k,
+    );
+    if (execResolved.ok !== true) {
+      errors.push({
+        ...execResolved.error,
+        message: `Execution-capture manifest path failed resolve: ${execResolved.error.message}`,
+      });
+      continue;
+    }
+    const execAbsolute = execResolved.absolute;
+    if (!existsSync(execAbsolute)) {
+      errors.push({
+        kind: "EVIDENCE_ARTIFACT_MISSING",
+        key: k,
+        message: `Execution-capture manifest '${execAbsolute}' does not exist (CORRECTION08 C08-01).`,
+        artifact_path: execAbsolute,
+      });
+      continue;
+    }
+    const execRel = relative(pathResolve(repoRoot), execAbsolute);
+    const execSha = shaOfExecutionCaptureManifest(execRel, repoRoot);
+    if (execSha === null) {
+      errors.push({
+        kind: "EVIDENCE_PARSE_FAILED",
+        key: k,
+        message: `Execution-capture manifest at '${execRel}' could not be hashed (CORRECTION08 C08-01).`,
+        artifact_path: execAbsolute,
+      });
+      continue;
+    }
+    if (
+      axis.execution_capture_sha256 !== null &&
+      axis.execution_capture_sha256 !== "" &&
+      axis.execution_capture_sha256 !== execSha
+    ) {
+      errors.push({
+        kind: "EVIDENCE_HASH_MISMATCH",
+        key: k,
+        message: `Execution-capture manifest hash drift on '${execAbsolute}' (CORRECTION08 C08-01).`,
+        artifact_path: execAbsolute,
+        recorded_sha256: axis.execution_capture_sha256,
+        recomputed_sha256: execSha,
+      });
+      continue;
+    }
+    const manifest = readExecutionCaptureManifest(execRel, repoRoot);
+    if (manifest === null) {
+      errors.push({
+        kind: "EVIDENCE_PARSE_FAILED",
+        key: k,
+        message: `Execution-capture manifest at '${execRel}' is missing, malformed, or carries fields outside the closed-world schema (CORRECTION08 C08-04).`,
+        artifact_path: execAbsolute,
+      });
+      continue;
+    }
     // CORRECTION06 C06-06: the invocation artifact's
     // `capability` field is a self-identifier; the
     // verifier does NOT enforce it equals the axis
@@ -699,12 +811,100 @@ export function verifyLiveQualificationEvidence(
     // (the observed protocol output) but the
     // invocation-aware oracle checks invocation_mode +
     // observed === "session". Both sides are evaluated.
+    // CORRECTION08 C08-03: cross-reference the manifest
+    // BEFORE running the capability oracle. The manifest
+    // MUST (a) declare the same invocation_sha256, (b)
+    // declare the same execution_id as the probe
+    // evidence, and (c) declare the same native artifact
+    // SHA as the probe evidence. A splice fails closed
+    // here, BEFORE the oracle is even consulted.
+    if (manifest.invocation_sha256 !== invocation.artifact_sha256) {
+      errors.push({
+        kind: "EVIDENCE_EXECUTION_MISMATCH",
+        key: k,
+        message: `Execution-capture manifest declares invocation_sha256='${manifest.invocation_sha256}' but the actual invocation artifact hashes to '${invocation.artifact_sha256}'. The manifest does not belong to the same launch (CORRECTION08 C08-03).`,
+        artifact_path: execAbsolute,
+      });
+      continue;
+    }
+    if (typeof ev.execution_id !== "string" || ev.execution_id.length === 0) {
+      errors.push({
+        kind: "EVIDENCE_EXECUTION_MISMATCH",
+        key: k,
+        message: `Probe evidence for ${k} has no execution_id (CORRECTION08 C08-03).`,
+        artifact_path: absolute,
+      });
+      continue;
+    }
+    if (ev.execution_id !== manifest.execution_id) {
+      errors.push({
+        kind: "EVIDENCE_EXECUTION_MISMATCH",
+        key: k,
+        message: `Probe evidence execution_id='${ev.execution_id}' does not match manifest execution_id='${manifest.execution_id}' (CORRECTION08 C08-03). The observation cannot be proven to come from the same OS process as the invocation.`,
+        artifact_path: absolute,
+      });
+      continue;
+    }
+    if (
+      typeof manifest.native_artifact_sha256 === "string" &&
+      manifest.native_artifact_sha256.length > 0 &&
+      ev.artifact_sha256 !== manifest.native_artifact_sha256
+    ) {
+      errors.push({
+        kind: "EVIDENCE_EXECUTION_MISMATCH",
+        key: k,
+        message: `Probe evidence artifact_sha256='${ev.artifact_sha256}' does not match manifest native_artifact_sha256='${manifest.native_artifact_sha256}' (CORRECTION08 C08-07). The observation was not the file the captured process wrote.`,
+        artifact_path: absolute,
+      });
+      continue;
+    }
+    // CORRECTION09 C09-01: capture_origin must agree
+    // with the axis declaration. A LIVE_QUALIFIED axis
+    // cannot bind a REPLAY_FIXTURE manifest, and a
+    // REPLAY_QUALIFIED axis cannot bind a
+    // REAL_PROCESS_CAPTURE manifest.
+    if (
+      axis.execution_capture_origin !== null &&
+      axis.execution_capture_origin !== manifest.capture_origin
+    ) {
+      errors.push({
+        kind: "EVIDENCE_EXECUTION_MISMATCH",
+        key: k,
+        message: `Execution-capture manifest declares capture_origin='${manifest.capture_origin}' but the axis declares execution_capture_origin='${axis.execution_capture_origin}' (CORRECTION09 C09-01).`,
+        artifact_path: execAbsolute,
+      });
+      continue;
+    }
+    // CORRECTION09 C09-04: re-read every manifest
+    // artifact (stdout / stderr / process_result /
+    // native) from disk and SHA-compare. A manifest
+    // that claims arbitrary SHAs without backing
+    // artifacts (or with stale bytes) fails closed.
+    const artifactDrift = reverifyExecutionCaptureManifestArtifacts({
+      manifest,
+      repoRoot,
+    });
+    for (const d of artifactDrift) {
+      errors.push({
+        kind: "EVIDENCE_HASH_MISMATCH",
+        key: k,
+        message: `Execution-capture manifest artifact '${String(d.field)}' at '${d.path}' recorded sha256='${d.recorded_sha256}' but recomputed sha256='${d.recomputed_sha256}' (CORRECTION09 C09-04).`,
+        artifact_path: pathResolve(repoRoot, d.path),
+        recorded_sha256: d.recorded_sha256,
+        recomputed_sha256: d.recomputed_sha256,
+      });
+    }
+    if (artifactDrift.length > 0) {
+      continue;
+    }
     const expectedMatches = evaluateCapabilityOracle({
       capability: k,
       invocation,
       parsedObservation: parsed.parsed,
       observed,
       observationArtifactAbsolute: absolute,
+      runtimeSessionFilePath: manifest.runtime_session_file_path,
+      repoRoot,
     });
     // CORRECTION06: also verify that the recorded
     // `expected` value is consistent with the
@@ -718,33 +918,38 @@ export function verifyLiveQualificationEvidence(
     // C05-02 invariant carried forward into
     // CORRECTION06.
     if (
-      axis.live_qualification === "LIVE_HALT" &&
+      (axis.live_qualification === "LIVE_HALT" ||
+        axis.live_qualification === "REPLAY_HALT") &&
       ev.evidence_relation.expected !== observed
     ) {
       errors.push({
         kind: "EVIDENCE_OBSERVATION_MISMATCH",
         key: k,
-        message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the observed halt reason '${observed}' (CORRECTION05 C05-02).`,
+        message: `Capability ${k} is ${axis.live_qualification} but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the observed halt reason '${observed}' (CORRECTION05 C05-02).`,
         artifact_path: absolute,
         recorded_observed: ev.evidence_relation.expected,
         recomputed_observed: observed,
       });
       continue;
     }
-    if (axis.live_qualification === "LIVE_QUALIFIED") {
+    if (
+      axis.live_qualification === "LIVE_QUALIFIED" ||
+      axis.live_qualification === "REPLAY_QUALIFIED"
+    ) {
       if (ev.disposition !== "PASS" || !expectedMatches) {
         errors.push({
           kind: "EVIDENCE_ORACLE_FAILED",
           key: k,
-          message: `Capability ${k} is LIVE_QUALIFIED but invocation-aware oracle recomputation says FAIL (recorded expected='${ev.evidence_relation.expected}', observed='${observed}', recorded disposition='${ev.disposition}', derived.headless='${invocation.derived.headless}', derived.protocol='${invocation.derived.protocol}', derived.session_dir=${invocation.derived.session_dir}).`,
+          message: `Capability ${k} is ${axis.live_qualification} but invocation-aware oracle recomputation says FAIL (recorded expected='${ev.evidence_relation.expected}', observed='${observed}', recorded disposition='${ev.disposition}', derived.headless='${invocation.derived.headless}', derived.protocol='${invocation.derived.protocol}', derived.session_dir=${invocation.derived.session_dir}).`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,
         });
       }
     } else {
-      // CORRECTION05 C05-02: LIVE_HALT must enforce the
-      // same oracle relation as LIVE_QUALIFIED —
+      // CORRECTION05 C05-02: LIVE_HALT (and its
+      // CORRECTION09 sibling REPLAY_HALT) must enforce
+      // the same oracle relation as LIVE_QUALIFIED —
       // `evaluateOracle(k, expected, observed)` — with
       // the meaning that the recorded `expected` is the
       // canonical halt reason the artifact must prove.
@@ -755,7 +960,7 @@ export function verifyLiveQualificationEvidence(
         errors.push({
           kind: "EVIDENCE_ORACLE_FAILED",
           key: k,
-          message: `Capability ${k} is LIVE_HALT but recorded disposition is '${ev.disposition}', not 'HALT'.`,
+          message: `Capability ${k} is ${axis.live_qualification} but recorded disposition is '${ev.disposition}', not 'HALT'.`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,
@@ -764,7 +969,7 @@ export function verifyLiveQualificationEvidence(
         errors.push({
           kind: "EVIDENCE_OBSERVATION_MISMATCH",
           key: k,
-          message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the recomputed observed halt reason '${observed}' (invocation-aware oracle rejected; derived.headless='${invocation.derived.headless}').`,
+          message: `Capability ${k} is ${axis.live_qualification} but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the recomputed observed halt reason '${observed}' (invocation-aware oracle rejected; derived.headless='${invocation.derived.headless}').`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,

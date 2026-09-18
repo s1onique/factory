@@ -76,12 +76,21 @@ export function buildProbeEvidence(args: {
   readonly artifact_sha256: string;
   readonly expected: string;
   readonly observed: string;
+  /**
+   * CORRECTION08 C08-03: stable execution_id of the
+   * OS process run that produced the captured
+   * observation. Must match the execution-capture
+   * manifest's `execution_id`. Defaults to empty string
+   * for `NOT_RUN` placeholders.
+   */
+  readonly execution_id?: string;
 }): CapabilityProbeEvidence {
   return {
     capability: args.capability,
     probe_kind: args.probe_kind,
     artifact_path: args.artifact_path,
     artifact_sha256: args.artifact_sha256,
+    execution_id: args.execution_id ?? "",
     evidence_relation: {
       expected: args.expected,
       observed: args.observed,
@@ -105,6 +114,7 @@ export function notRunProbeEvidence(
       "0000000000000000000000000000000000000000000000000000000000000000",
     evidence_relation: { expected: "", observed: "" },
     disposition: "FAIL",
+    execution_id: "",
   };
 }
 
@@ -118,12 +128,18 @@ export function haltProbeEvidence(args: {
   readonly artifact_sha256: string;
   readonly expected: string;
   readonly observed: string;
+  /**
+   * CORRECTION08 C08-03: stable execution_id of the
+   * halted process run.
+   */
+  readonly execution_id?: string;
 }): CapabilityProbeEvidence {
   return {
     capability: args.capability,
     probe_kind: "CANCELLATION_HALT",
     artifact_path: args.artifact_path,
     artifact_sha256: args.artifact_sha256,
+    execution_id: args.execution_id ?? "",
     evidence_relation: { expected: args.expected, observed: args.observed },
     disposition: "HALT",
   };
@@ -142,6 +158,7 @@ export function buildIsolatedDataDirEvidence(args: {
   readonly artifact_sha256: string;
   readonly isolated_session_dir: string;
   readonly observed_artifact_path: string;
+  readonly execution_id?: string;
 }): CapabilityProbeEvidence {
   const observed = args.observed_artifact_path;
   const expected = args.isolated_session_dir;
@@ -151,6 +168,7 @@ export function buildIsolatedDataDirEvidence(args: {
     probe_kind: "SESSION_ENVELOPE",
     artifact_path: args.artifact_path,
     artifact_sha256: args.artifact_sha256,
+    execution_id: args.execution_id ?? "",
     evidence_relation: { expected, observed },
     disposition: passes ? "PASS" : "FAIL",
   };
