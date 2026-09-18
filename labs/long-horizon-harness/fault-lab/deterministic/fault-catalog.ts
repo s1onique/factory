@@ -276,7 +276,7 @@ const F05: FaultExperiment = {
   expected_authority: "execution_id_relationship",
   expected_error_kind: "EVIDENCE_EXECUTION_MISMATCH",
   mutated_dimension: "probe_evidence_execution_id",
-  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_invocation_sha256",
@@ -574,7 +574,7 @@ const F11: FaultExperiment = {
   expected_authority: "path",
   expected_error_kind: "EVIDENCE_PATH_ESCAPE",
   mutated_dimension: "probe_evidence_artifact_path",
-  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
+  mutation_taxonomy: "GUARD_REACHABILITY_CONSTRUCTION",
   preserved_dimensions: [
     "manifest_invocation_sha256",
     "execution_id_binding",
@@ -828,7 +828,7 @@ const F17: FaultExperiment = {
   expected_authority: "oracle_semantic",
   expected_error_kind: "EVIDENCE_OBSERVATION_MISMATCH",
   mutated_dimension: "evidence_relation_observed",
-  mutation_taxonomy: "COMPOUND_AXIS_SPLICE",
+  mutation_taxonomy: "SINGLE_DIMENSION",
   preserved_dimensions: [
     "manifest_bytes",
     "manifest_paths",

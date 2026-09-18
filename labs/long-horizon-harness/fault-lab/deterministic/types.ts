@@ -32,22 +32,26 @@
  *   fixture_source           — which fixture tree the
  *                              experiment copies
  *
- * `mutation_taxonomy` (L04-C04 — review pass 1):
+ * `mutation_taxonomy` (L04-C04 — review pass 1, refined in
+ * CORRECTION02):
  *
  *   SINGLE_DIMENSION
  *     The fault tampers with exactly one verifier
- *     authority (e.g. one byte in one artifact) and
- *     leaves every other authority dimension identical
- *     to the canonical baseline. The rejection must be
- *     at that single axis or the experiment is wrong.
+ *     authority (e.g. one byte in one artifact, or one
+ *     relationship field) and leaves every other
+ *     authority dimension identical to the canonical
+ *     baseline. The rejection must be at that single
+ *     axis or the experiment is wrong.
+ *     Used by: F05, F08, F09, F10, F12, F13, F14, F17.
  *
  *   GUARD_REACHABILITY_CONSTRUCTION
  *     The fault tampers with one verifier authority,
- *     but also re-binds recorded SHAs/identifiers so
- *     earlier guards agree and the verifier reaches the
- *     intended later guard. The mutation still
+ *     but also re-binds recorded SHAs/identifiers —
+ *     or lays down matching bytes at a new path —
+ *     so earlier guards agree and the verifier reaches
+ *     the intended later guard. The mutation still
  *     *targets* one axis; the rewires are bookkeeping.
- *     (F01, F02, F12, F15, F16 use `postBuild` for this.)
+ *     Used by: F01, F02, F03, F11, F15, F16.
  *
  *   COMPOUND_FORGERY
  *     The fault must construct a multi-axis adversarial
@@ -58,13 +62,14 @@
  *     so that the verifier agrees the axes are
  *     internally consistent before the capability
  *     mismatch fires).
+ *     Used by: F06, F07.
  *
  *   COMPOUND_AXIS_SPLICE
  *     The fault intentionally reassigns a relationship
  *     between two axes that each remain internally
- *     valid (e.g. F05 execution_id splice, F11
- *     hash-valid unauthorized path, F17 oracle
- *     observation mismatch).
+ *     valid (e.g. F04 binds manifest.path to a
+ *     different evidence axis without rewriting bytes).
+ *     Used by: F04.
  */
 export type Authority =
   | "byte_hash"
@@ -168,9 +173,30 @@ export interface FaultExperimentResult {
    * rejection, not a structured verifier field.
    */
   readonly classified_authority: Authority | "verifier_ok";
+  /**
+   * How the lab reached `classified_authority`. Two values:
+   *
+   *   "structured_error_kind"
+   *     The verifier's structured `errorKind` alone
+   *     uniquely identifies the authority. No message
+   *     inspection was performed.
+   *
+   *   "message_prefix_inference"
+   *     The lab read the verbatim error `message` to
+   *     decide which authority the rejection belongs to.
+   *     This includes both positive matches and
+   *     negative-matching fallbacks (the lab reached
+   *     the default branch only because no positive
+   *     discriminator matched).
+   *
+   * There is intentionally NO third value
+   * ("structured_error_kind_plus_axis_context"). The
+   * frozen LH-03 verifier does not expose a typed axis
+   * identifier alongside `errorKind`; pretending otherwise
+   * would mis-state the evidence the lab has access to.
+   */
   readonly classified_authority_method:
     | "structured_error_kind"
-    | "structured_error_kind_plus_axis_context"
     | "message_prefix_inference";
   readonly observed_first_rejection_message: string | null;
   readonly disposition: FaultDisposition;

@@ -96,11 +96,6 @@ test("LH-04 result artifact emitter: write deterministic-faults.json", async () 
       structured_error_kind: a.filter(
         (r) => r.classified_authority_method === "structured_error_kind",
       ).length,
-      structured_error_kind_plus_axis_context: a.filter(
-        (r) =>
-          r.classified_authority_method ===
-          "structured_error_kind_plus_axis_context",
-      ).length,
       message_prefix_inference: a.filter(
         (r) => r.classified_authority_method === "message_prefix_inference",
       ).length,

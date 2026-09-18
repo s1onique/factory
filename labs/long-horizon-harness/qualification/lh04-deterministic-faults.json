@@ -1,6 +1,6 @@
 {
   "schema": "lh04-deterministic-faults/v1",
-  "emitted_at": "2026-09-18T21:26:30.053Z",
+  "emitted_at": "2026-09-18T21:55:45.078Z",
   "subject": {
     "commit": "7be31164b939f327c557847eb9a8b0c4ffd16b87",
     "predecessor": "qualification/lh03-frozen.json",
@@ -22,9 +22,8 @@
     "wrong_authority": 0
   },
   "classification_method_summary": {
-    "structured_error_kind": 12,
-    "structured_error_kind_plus_axis_context": 0,
-    "message_prefix_inference": 5
+    "structured_error_kind": 5,
+    "message_prefix_inference": 12
   },
   "fault_matrix": [
     {
@@ -44,7 +43,7 @@
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
       "classified_authority": "byte_hash",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -107,7 +106,7 @@
       "expected_authority": "execution_relationship",
       "expected_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
       "classified_authority": "execution_relationship",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_EXECUTION_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -116,7 +115,7 @@
       "id": "F05",
       "description": "Execution ID splice: probe evidence execution_id != manifest.execution_id.",
       "mutated_dimension": "probe_evidence_execution_id",
-      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_invocation_sha256",
@@ -240,7 +239,7 @@
       "id": "F11",
       "description": "Hash-valid bytes at an unauthorized (absolute) path are rejected.",
       "mutated_dimension": "probe_evidence_artifact_path",
-      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
+      "mutation_taxonomy": "GUARD_REACHABILITY_CONSTRUCTION",
       "preserved_dimensions": [
         "manifest_invocation_sha256",
         "execution_id_binding",
@@ -276,7 +275,7 @@
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
       "classified_authority": "byte_hash",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -298,7 +297,7 @@
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
       "classified_authority": "byte_hash",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -320,7 +319,7 @@
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
       "classified_authority": "byte_hash",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -344,7 +343,7 @@
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
       "classified_authority": "byte_hash",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -366,7 +365,7 @@
       "expected_authority": "byte_hash",
       "expected_error_kind": "EVIDENCE_HASH_MISMATCH",
       "classified_authority": "byte_hash",
-      "classified_authority_method": "structured_error_kind",
+      "classified_authority_method": "message_prefix_inference",
       "observed_error_kind": "EVIDENCE_HASH_MISMATCH",
       "disposition": "PASS",
       "baseline_passed": true
@@ -375,7 +374,7 @@
       "id": "F17",
       "description": "All bytes + SHAs + paths correct, but recorded observed mismatches recomputed observed.",
       "mutated_dimension": "evidence_relation_observed",
-      "mutation_taxonomy": "COMPOUND_AXIS_SPLICE",
+      "mutation_taxonomy": "SINGLE_DIMENSION",
       "preserved_dimensions": [
         "manifest_bytes",
         "manifest_paths",

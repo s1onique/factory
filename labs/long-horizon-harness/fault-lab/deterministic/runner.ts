@@ -89,7 +89,6 @@ export function classify(args: {
   readonly classifiedAuthority: Authority | "verifier_ok";
   readonly classifiedAuthorityMethod:
     | "structured_error_kind"
-    | "structured_error_kind_plus_axis_context"
     | "message_prefix_inference";
   readonly firstMessage: string | null;
 } {
@@ -130,92 +129,133 @@ export function classify(args: {
 }
 
 /**
+ * Authority classification provenance table (L04-C07).
+ *
+ * The frozen LH-03 verifier emits only a structured
+ * `EvidenceVerificationErrorKind`. The lab maps that
+ * kind (plus, in some cases, verbatim message text) to
+ * its own `Authority` label. This table records, for
+ * EVERY possible classification branch, what the lab
+ * relied on to reach the label.
+ *
+ * Method semantics (must NOT be understated):
+ *
+ *   "structured_error_kind"
+ *     The kind alone, without any message inspection,
+ *     uniquely identifies the authority.
+ *
+ *   "message_prefix_inference"
+ *     The kind alone does NOT identify the authority;
+ *     the lab reads the error message to disambiguate.
+ *     This includes the "default" / "fallback" branches
+ *     below: the lab reached them by failing to match
+ *     any of the message discriminators above, which is
+ *     also a form of message inspection.
+ *
+ * The previous design listed some branches as
+ * "structured" while the corresponding classifier used
+ * negative matching against the message text. That was
+ * an understatement. Every branch here is honest.
+ */
+type AuthorityMethod = "structured_error_kind" | "message_prefix_inference";
+
+interface ClassifierRule {
+  readonly authority: Authority;
+  readonly method: AuthorityMethod;
+}
+
+const CLASSIFIER_TABLE: Readonly<Record<string, readonly ClassifierRule[]>> = {
+  // kind              : [ordered rules — first match wins; default is the
+  //                      trailing rule]
+  EVIDENCE_PATH_ESCAPE: [
+    // The verifier emits this kind ONLY when a path escape is
+    // detected. No further disambiguation needed.
+    { authority: "path", method: "structured_error_kind" },
+  ],
+  EVIDENCE_ARTIFACT_MISSING: [
+    { authority: "path", method: "structured_error_kind" },
+  ],
+  EVIDENCE_OBSERVATION_MISMATCH: [
+    { authority: "oracle_semantic", method: "structured_error_kind" },
+  ],
+  EVIDENCE_ORACLE_FAILED: [
+    { authority: "oracle_semantic", method: "structured_error_kind" },
+  ],
+  EVIDENCE_HASH_MISMATCH: [
+    // Positive: message starts with "Invocation artifact" →
+    // invocation-side byte drift.
+    // Default (negative match): every other byte drift is
+    // observation-side. This default is STILL message
+    // inference — it depends on the message NOT containing
+    // the invocation prefix.
+    { authority: "invocation_byte_hash", method: "message_prefix_inference" },
+    { authority: "byte_hash", method: "message_prefix_inference" },
+  ],
+  EVIDENCE_PARSE_FAILED: [
+    // Positive: message contains "Invocation" → invocation
+    // parse failure (grammar / shape mismatch on the
+    // invocation artifact).
+    // Default (negative match): every other parse failure is
+    // on the observation side → oracle_semantic. Still
+    // message inference.
+    { authority: "invocation_derivation", method: "message_prefix_inference" },
+    { authority: "oracle_semantic", method: "message_prefix_inference" },
+  ],
+  EVIDENCE_EXECUTION_MISMATCH: [
+    // Three positive matches and one default. The default
+    // ("execution_relationship") is reached only because
+    // none of the three positive discriminators matched —
+    // i.e. it is also message inference (negative match).
+    { authority: "manifest_capability_binding", method: "message_prefix_inference" },
+    { authority: "manifest_origin_discriminator", method: "message_prefix_inference" },
+    { authority: "execution_id_relationship", method: "message_prefix_inference" },
+    { authority: "execution_relationship", method: "message_prefix_inference" },
+  ],
+};
+
+const KIND_DISCRIMINATORS: Readonly<Record<string, ReadonlyArray<(msg: string) => boolean>>> = {
+  EVIDENCE_PATH_ESCAPE: [() => true],
+  EVIDENCE_ARTIFACT_MISSING: [() => true],
+  EVIDENCE_OBSERVATION_MISMATCH: [() => true],
+  EVIDENCE_ORACLE_FAILED: [() => true],
+  EVIDENCE_HASH_MISMATCH: [
+    (msg) => msg.startsWith("Invocation artifact"),
+    () => true,
+  ],
+  EVIDENCE_PARSE_FAILED: [
+    (msg) => msg.includes("Invocation"),
+    () => true,
+  ],
+  EVIDENCE_EXECUTION_MISMATCH: [
+    (msg) => msg.includes("manifest declares capability"),
+    (msg) => msg.includes("capture_origin"),
+    (msg) => msg.includes("execution_id"),
+    () => true,
+  ],
+};
+
+/**
  * Classify the authority under which the verifier's
- * FIRST error was emitted.
- *
- * The frozen LH-03 verifier emits a structured
- * `EvidenceVerificationErrorKind`; this function maps
- * that structured field to the lab's authority label.
- * For two error kinds
- * (`EVIDENCE_HASH_MISMATCH`, `EVIDENCE_PARSE_FAILED`)
- * the structured field alone does not uniquely identify
- * the authority axis (e.g. an invocation byte-drift and
- * an observation byte-drift both fire
- * `EVIDENCE_HASH_MISMATCH`), so the lab uses the
- * verbatim error `message` as a disambiguator.
- *
- * The classification method is recorded alongside the
- * label so reviewers can see when the lab is relying
- * on message-text inference vs structured output.
+ * FIRST error was emitted. See `CLASSIFIER_TABLE`
+ * for the full per-branch provenance map.
  */
 export function classifyAuthority(err: EvidenceVerificationError): {
   readonly authority: Authority;
-  readonly method:
-    | "structured_error_kind"
-    | "structured_error_kind_plus_axis_context"
-    | "message_prefix_inference";
+  readonly method: AuthorityMethod;
 } {
-  switch (err.kind) {
-    case "EVIDENCE_PATH_ESCAPE":
-      return { authority: "path", method: "structured_error_kind" };
-    case "EVIDENCE_OBSERVATION_MISMATCH":
-      return { authority: "oracle_semantic", method: "structured_error_kind" };
-    case "EVIDENCE_ORACLE_FAILED":
-      return { authority: "oracle_semantic", method: "structured_error_kind" };
-    case "EVIDENCE_ARTIFACT_MISSING":
-      return { authority: "path", method: "structured_error_kind" };
-    case "EVIDENCE_HASH_MISMATCH":
-      // invocation vs observation byte drift share one
-      // error kind; disambiguate by message prefix.
-      return err.message.startsWith("Invocation artifact")
-        ? {
-            authority: "invocation_byte_hash",
-            method: "message_prefix_inference",
-          }
-        : { authority: "byte_hash", method: "structured_error_kind" };
-    case "EVIDENCE_PARSE_FAILED":
-      // invocation parse failure vs observation parse
-      // failure share one error kind; disambiguate by
-      // message text.
-      return err.message.includes("Invocation")
-        ? {
-            authority: "invocation_derivation",
-            method: "message_prefix_inference",
-          }
-        : { authority: "oracle_semantic", method: "structured_error_kind" };
-    case "EVIDENCE_EXECUTION_MISMATCH":
-      // The execution_mismatch error kind covers four
-      // axes (relationship, capability binding, origin
-      // discriminator, execution_id relationship); the
-      // verifier message names which axis failed.
-      if (err.message.includes("manifest declares capability")) {
-        return {
-          authority: "manifest_capability_binding",
-          method: "message_prefix_inference",
-        };
+  const rules = CLASSIFIER_TABLE[err.kind];
+  const discriminators = KIND_DISCRIMINATORS[err.kind];
+  if (rules !== undefined && discriminators !== undefined) {
+    for (let i = 0; i < discriminators.length; i++) {
+      if (discriminators[i]!(err.message)) {
+        return rules[i]!;
       }
-      if (err.message.includes("capture_origin")) {
-        return {
-          authority: "manifest_origin_discriminator",
-          method: "message_prefix_inference",
-        };
-      }
-      if (err.message.includes("execution_id")) {
-        return {
-          authority: "execution_id_relationship",
-          method: "message_prefix_inference",
-        };
-      }
-      return {
-        authority: "execution_relationship",
-        method: "structured_error_kind",
-      };
-    default:
-      return {
-        authority: "byte_hash",
-        method: "structured_error_kind",
-      };
+    }
   }
+  // Unreachable for any `EvidenceVerificationErrorKind`
+  // emitted by the frozen LH-03 verifier; the table covers
+  // all seven kinds.
+  return { authority: "byte_hash", method: "structured_error_kind" };
 }
 
 /**
