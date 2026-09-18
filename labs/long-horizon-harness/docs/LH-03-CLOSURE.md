@@ -1,14 +1,17 @@
-# LH-03 Closure Report (CORRECTION01)
+# LH-03 Closure Report (CORRECTION01 + CORRECTION02)
 
 > FOUNDATION04 — Long-Horizon Harness Lab — LH-03
 >
 > ACT name: `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01`
-> CORRECTION name: `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION01`
+> CORRECTION names:
+> - `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION01`
+> - `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION02`
 >
 > This file is the durable closure-of-record for LH-03 after
-> CORRECTION01 (the response to the reviewer's corrections).
-> The patch lives on the canonical `main` branch. No
-> linked worktree was used. No detachment was used.
+> CORRECTION01 + CORRECTION02 (the two responses to the
+> reviewer's corrections). The patches live on the canonical
+> `main` branch. No linked worktree was used. No detachment
+> was used.
 
 ## Subject binding
 
@@ -23,8 +26,9 @@ ENTRY_HEAD                = 715e6390d78228f089270259e1bd1307140adb75
 DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
 LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
+LH03_CORRECTION02_COMMIT  = f5524f012c0ec1747b19b54ff724ada05ab4e7ab
 CLOSURE_RECORD_COMMIT     = 961a6c8d9e6f09487d6561c436de25bc258f1256
-CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION01; cosmetic rebinds stop here, no further self-referential edit>
+CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION02; cosmetic rebinds stop here, no further self-referential edit>
 
 The closure-of-record binds three immutable SHAs:
 
@@ -197,31 +201,53 @@ KNOWN_BUT_UNMAPPED (14):
   bash_execution_update
 ```
 
-## Pi capability matrix (CORRECTION01 axes)
+## Pi capability matrix (CORRECTION02 axes)
 
-Two axes are bound independently for every key:
+Two axes are bound independently for every key. Every
+`LIVE_QUALIFIED` and `LIVE_HALT` claim is backed by a
+non-null `probe_evidence_path`; the contract enforces
+`LIVE_QUALIFIED ⇒ probe_evidence_path !== null` via
+`validateLiveQualification()` and `defaultPiCapabilities()`
+refuses to build an overclaim (throws).
 
 ```text
-Key                       HARNESS_CAPABILITY   LIVE_QUALIFICATION_STATE
-HEADLESS                  SUPPORTED            LIVE_QUALIFIED
-STREAMING_EVENTS          SUPPORTED            LIVE_QUALIFIED
-FINAL_JSON                SUPPORTED            LIVE_QUALIFIED
-JSONL                     SUPPORTED            LIVE_QUALIFIED
-RPC                       SUPPORTED            LIVE_QUALIFIED
-SESSION_RESUME            SUPPORTED            LIVE_UNQUALIFIED
-SESSION_FORK              SUPPORTED            LIVE_UNQUALIFIED
-EXPLICIT_CWD              SUPPORTED            LIVE_QUALIFIED
-ISOLATED_DATA_DIR         SUPPORTED            LIVE_QUALIFIED
-MODEL_SELECTION           SUPPORTED            LIVE_UNQUALIFIED
-PROVIDER_SELECTION        SUPPORTED            LIVE_UNQUALIFIED
-TIMEOUT                   UNSUPPORTED          NOT_APPLICABLE
-CANCELLATION              SUPPORTED            LIVE_HALT
-AUTO_APPROVAL             UNSUPPORTED          NOT_APPLICABLE
-TOOL_EVENT_VISIBILITY     SUPPORTED            LIVE_UNQUALIFIED
-TOKEN_USAGE               SUPPORTED            LIVE_QUALIFIED
-RESOURCE_USAGE            UNAVAILABLE          NOT_APPLICABLE
-SESSION_ARTIFACTS         SUPPORTED            LIVE_UNQUALIFIED
+Key                       HARNESS_CAPABILITY   LIVE_QUALIFICATION_STATE   probe_evidence_path
+HEADLESS                  SUPPORTED            LIVE_QUALIFIED             raw-artifacts/pi.session.jsonl
+STREAMING_EVENTS          SUPPORTED            LIVE_QUALIFIED             raw-artifacts/pi.session.jsonl
+FINAL_JSON                SUPPORTED            LIVE_UNQUALIFIED           null
+JSONL                     SUPPORTED            LIVE_QUALIFIED             raw-artifacts/pi.session.jsonl
+RPC                       SUPPORTED            LIVE_UNQUALIFIED           null
+SESSION_RESUME            SUPPORTED            LIVE_UNQUALIFIED           null
+SESSION_FORK              SUPPORTED            LIVE_UNQUALIFIED           null
+EXPLICIT_CWD              SUPPORTED            LIVE_QUALIFIED             raw-artifacts/pi.session.jsonl
+ISOLATED_DATA_DIR         SUPPORTED            LIVE_QUALIFIED             raw-artifacts/pi.session.jsonl
+MODEL_SELECTION           SUPPORTED            LIVE_UNQUALIFIED           null
+PROVIDER_SELECTION        SUPPORTED            LIVE_UNQUALIFIED           null
+TIMEOUT                   UNSUPPORTED          NOT_APPLICABLE             null
+CANCELLATION              SUPPORTED            LIVE_HALT                  process-result.json
+AUTO_APPROVAL             UNSUPPORTED          NOT_APPLICABLE             null
+TOOL_EVENT_VISIBILITY     SUPPORTED            LIVE_UNQUALIFIED           null
+TOKEN_USAGE               SUPPORTED            LIVE_UNQUALIFIED           null
+RESOURCE_USAGE            UNAVAILABLE          NOT_APPLICABLE             null
+SESSION_ARTIFACTS         SUPPORTED            LIVE_UNQUALIFIED           null
 ```
+
+`FINAL_JSON`, `RPC`, and `TOKEN_USAGE` are demoted to
+`LIVE_UNQUALIFIED` because no probe evidence exists for
+them in this qualification campaign:
+
+  - `FINAL_JSON` (CORRECTION02 explicit semantics) means
+    the JSON event-stream mode. The capture holds a single
+    session envelope, which is sufficient for
+    `STREAMING_EVENTS`/`JSONL` but NOT sufficient for a
+    `LIVE_QUALIFIED` claim on the full event stream shape.
+  - `RPC` is per upstream v0.85.1 a real bidirectional
+    stdin/stdout protocol; qualifying it requires a probe
+    that opens the session and exchanges messages. No such
+    probe ran.
+  - `TOKEN_USAGE` is provider-reported on `message_update.usage`;
+    our capture halted at the session envelope, so no such
+    event was observed.
 
 Cline capability matrix (binary not installed):
 
@@ -353,6 +379,44 @@ MODIFY_PHASE_E_FROZEN_FILE -> FAIL (verified by lh03-frozen-contract-guard.test.
 MODIFY_LH02_FROZEN_FILE    -> FAIL (verified by lh03-frozen-contract-guard.test.ts)
 ```
 
+## CORRECTION02 corrections (reviewer-driven, post-CORRECTION01)
+
+The reviewer flagged four defects in CORRECTION01; each
+is closed by a specific bounded correction. Each
+correction is pinned to a contract-level axiom and to a
+machine-checked oracle test in `lh03-correction02-axioms.test.ts`.
+
+| ID | Reviewer defect | CORRECTION02 fix |
+|---|---|---|
+| C02-01 | `RPC`/`TOKEN_USAGE`/`FINAL_JSON` were `LIVE_QUALIFIED` without evidence; no `LIVE_QUALIFIED ⇒ evidence` invariant existed | New `validateLiveQualification()` contract validator; `defaultPiCapabilities()` refuses to build an overclaim (throws); RPC, TOKEN_USAGE, FINAL_JSON demoted to `LIVE_UNQUALIFIED` with `probe_evidence_path = null`; LIVE_QUALIFIED claims bound to the captured `raw-artifacts/pi.session.jsonl`; CANCELLATION bound to `process-result.json`. FINAL_JSON semantics stated explicitly (JSON event-stream mode, not a terminal JSON result). |
+| C02-02 | `qualification/lh03-emit.json` was 0 bytes — claimed as a deterministic consolidated emit but contained nothing | `qualification/lh03-emit.json` populated with the real consolidated emit: input identity, raw-line count, native event classifications, adapter_errors, normalization completeness, halt disposition, normalized event stream, live_qualification overlay, and full evidence_paths map. |
+| C02-03 | `events()` mutated `adapter_errors` on every consume → one UNKNOWN line could produce N duplicate `adapter_errors` after N consumes | `events()` is now a pure projection over the pre-computed `run.classifications`. It NEVER mutates `adapter_errors`. The exact-one-error oracle test (`C02-03a/03b`) verifies that N consumes produce N=1 errors per violation. |
+| C02-04 | Hostile-object protection ran AFTER `Object.entries(record)` traversal in `redactJsonRecord`; an accessor own-key could fire its getter during redaction | New `isPlainInertRecord()` rejects unexpected prototypes (`Object.prototype` or `null` only). `redactJsonRecord()` validates prototype + own-property descriptors BEFORE recursive descent; throws `RedactionError` on violation. The getter oracle (`C02-04a`) proves an accessor is never invoked. |
+
+### Total regression (post-CORRECTION02)
+
+```text
+test/run/*.test.ts        = 86  (Phase E — frozen, unchanged)
+test/metrics/*.test.ts    = 61  (LH-02 — frozen, unchanged)
+test:lh03                 = 99  (was 86; +13 C02-* axiom tests)
+test/fake-adapter.test.ts = 3
+check:trust-boundary      = 2
+check:domain-purity       = 3
+TOTAL                     = 254 tests, all passing
+```
+
+### Exit of CORRECTION02 (axiom-by-axiom)
+
+```text
+C02-01 LIVE_QUALIFIED ⇒ probe_evidence_path != null        ENFORCED
+C02-01 LIVE_HALT     ⇒ probe_evidence_path != null         ENFORCED
+C02-01 RPC / TOKEN_USAGE / FINAL_JSON are LIVE_UNQUALIFIED  ENFORCED
+C02-02 lh03-emit.json is non-empty, JSON-valid, DETERMINISTIC_CONSOLIDATED_EMIT  ENFORCED
+C02-03 events() is observationally pure (no adapter_errors mutation)  ENFORCED
+C02-04 redactJsonRecord rejects non-plain-inert / accessor own-keys BEFORE recursion  ENFORCED
+C02-04 getter is never invoked during redaction          PROVEN
+```
+
 ## CORRECTION01 working-tree state (final, before commit)
 
 Modified:
@@ -448,9 +512,23 @@ Each clause is proven by a test in `test/lh03/`:
 - `UNKNOWN_EVENT_SILENT_DROP IMPOSSIBLE`     -> `PI-SCHEMA07`, `HNEG01 (adapter path)`
 - `MALFORMED_EVENT_SILENT_DROP IMPOSSIBLE`   -> `PI-DEC01..04`, `HNEG02 (adapter path)`
 - `LIVE_ARTIFACT_SECRET_LEAK IMPOSSIBLE`     -> `LIVESECRET01..07`
-- `CAPABILITY_TAXONOMY_IS_HONEST`            -> `test/lh03/lh03-identity.test.ts` (axes)
+- `CAPABILITY_TAXONOMY_IS_HONEST`            -> `validateLiveQualification()` + `C02-01a..01g` + `C02-01f` (qualification matrix validates) + `C02-01g` (test fixture matrix validates)
 - `CLINE_SYNTHETIC_SCHEMA_PRESENTED_AS_REAL` -> `test/lh03/lh03-cross-adapter-conformance.test.ts` (Cline rows do not claim native evidence)
 - `PATCH_HYGIENE PASS`                       -> `git diff --check` clean; `verify_factory.sh` OK
+- `EVENTS_OBSERVATIONALLY_PURE`              -> `C02-03a/03b` (one error per violation regardless of consume count)
+- `REDACTION_HOSTILE_OBJECT_BEFORE_RECURSION` -> `C02-04a/04b/04c` (RedactionError before any getter fires)
+- `LH03_EMIT_NONEMPTY_AND_DETERMINISTIC`      -> `C02-02a` (lh03-emit.json is a real consolidated emit)
 
-LH-03 CORRECTION01 is GREEN with halt disposition.
+LH-03 CORRECTION01 + CORRECTION02 is GREEN with halt
+disposition. The architecture introduced by CORRECTION01
+was preserved; CORRECTION02 only added axioms, validators,
+and oracle tests. The remaining blockers are the
+intended real-world ones (provider-backed Pi execution
+and a real Cline/ClineMM installation) — not defects in
+Factory's evidence machinery.
+
+READY_FOR_LH_04_FAULT_LABORATORY = NO (halt disposition
+remains first-class evidence; LH-04 was NOT started in
+this correction).
+
 CLOSED.
