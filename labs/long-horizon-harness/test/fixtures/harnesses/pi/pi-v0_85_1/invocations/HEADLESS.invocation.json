@@ -1,0 +1,19 @@
+{
+  "capability": "HEADLESS",
+  "executable": "/usr/bin/env",
+  "argv": [
+    "node",
+    "pi",
+    "--mode",
+    "headless"
+  ],
+  "spawn_cwd": "/private/tmp/pi-live",
+  "protocol": "headless",
+  "invocation_mode": "headless",
+  "session_dir": "test/fixtures/harnesses/pi/pi-v0_85_1",
+  "no_session": false,
+  "env_subset": {
+    "PI_CODING_AGENT_DIR": "test/fixtures/harnesses/pi/pi-v0_85_1"
+  },
+  "recorded_at": "2026-09-18T00:00:00Z"
+}

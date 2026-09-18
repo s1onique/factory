@@ -63,6 +63,30 @@ const FIXTURE_SESSION =
 const FIXTURE_PROCESS =
   "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json";
 
+const REPO_ROOT = resolve(import.meta.dirname, "../..");
+
+import {
+  loadInvocationFixture,
+} from "./_invocation_helper.js";
+
+/**
+ * CORRECTION06 helper: inject invocation evidence into
+ * a defaultPiCapabilities argument bundle.
+ */
+function withInvocation(
+  base: Record<string, unknown>,
+): Parameters<typeof defaultPiCapabilities>[2] {
+  const inv = loadInvocationFixture({
+    repoRoot: REPO_ROOT,
+    capability: "HEADLESS",
+  });
+  return {
+    ...(base as Parameters<typeof defaultPiCapabilities>[2]),
+    invocation_evidence: inv.evidence,
+    invocation_evidence_path: inv.repo_relative_path,
+  } as Parameters<typeof defaultPiCapabilities>[2];
+}
+
 /* ------------------------------------------------------------------ *
  * C03-01 — typed semantic probe evidence.                            *
  * ------------------------------------------------------------------ */
@@ -75,11 +99,11 @@ test("C03-01a: defaultPiCapabilities binds typed probe_evidence (not just a path
   // LIVE_QUALIFIED (canonical Factory name for the
   // upstream JSON Event Stream Mode) and EXPLICIT_CWD
   // is LIVE_QUALIFIED (cwd match).
-  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-  });
+  }));
   for (const k of ["JSONL", "EXPLICIT_CWD"] as const) {
     const ev = caps.capability_axes[k].probe_evidence;
     assert.ok(ev !== null, `${k} must have probe_evidence`);
@@ -119,6 +143,7 @@ test("C03-01b: validateLiveQualification rejects LIVE_QUALIFIED with disposition
           observed: "WRONG_VALUE",
         }),
         probe_evidence_path: FIXTURE_SESSION,
+        invocation_evidence_path: null,
       },
     },
     live_qualification_by_key: {
@@ -158,6 +183,7 @@ test("C03-01c: validateLiveQualification rejects LIVE_QUALIFIED with probe_kind 
           disposition: "FAIL" as const,
         },
         probe_evidence_path: null,
+        invocation_evidence_path: null,
       },
     },
     live_qualification_by_key: {
@@ -191,6 +217,7 @@ test("C03-01d: validateLiveQualification rejects probe_evidence.capability misma
           observed: "session",
         }),
         probe_evidence_path: FIXTURE_SESSION,
+        invocation_evidence_path: null,
       },
     },
     live_qualification_by_key: {
@@ -224,6 +251,7 @@ test("C03-01e: validateLiveQualification rejects probe_evidence_path vs probe_ev
           observed: "session",
         }),
         probe_evidence_path: "/some/other/path.jsonl",
+        invocation_evidence_path: null,
       },
     },
     live_qualification_by_key: {
@@ -244,11 +272,15 @@ test("C03-01e: validateLiveQualification rejects probe_evidence_path vs probe_ev
 
 test("C03-02a: EXPLICIT_CWD oracle PASSes iff requested_cwd === observed session cwd", () => {
   // First: matching cwd -> LIVE_QUALIFIED with PASS oracle.
-  const pass = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  // CORRECTION06 C06-02: the expected cwd is the
+  // invocation artifact's spawn_cwd, not the caller-
+  // supplied requested_cwd. We use an invocation that
+  // matches the fixture session cwd.
+  const pass = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-  });
+  }));
   assert.equal(pass.capability_axes.EXPLICIT_CWD.live_qualification, "LIVE_QUALIFIED");
   assert.equal(
     pass.capability_axes.EXPLICIT_CWD.probe_evidence?.disposition,
@@ -257,18 +289,31 @@ test("C03-02a: EXPLICIT_CWD oracle PASSes iff requested_cwd === observed session
   // Second: mismatched cwd is REJECTED at builder time —
   // the builder refuses to fabricate a LIVE_QUALIFIED with
   // a failed oracle, so defaultPiCapabilities throws.
-  // This is the correct closed-world behavior: an adapter
-  // cannot publish an axis whose evidence doesn't match
-  // its claim. The validator (C03-01b) is the alternative
-  // entry point for forged documents.
+  // CORRECTION06: the cwd mismatch is detected at the
+  // invocation evidence level. We build an invocation
+  // whose spawn_cwd disagrees with the session cwd.
   assert.throws(
-    () =>
-      defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    () => {
+      const base = withInvocation({
         session_capture: FIXTURE_SESSION,
         cancellation_halt: FIXTURE_PROCESS,
-        requested_cwd: "/tmp/different-cwd",
-      }),
-    /LIVE_QUALIFIED with failed oracle.*EXPLICIT_CWD/,
+        requested_cwd: "/private/tmp/pi-live",
+      });
+      const forgedBase = base as Record<string, unknown>;
+      const inv = forgedBase.invocation_evidence as { spawn_cwd: string };
+      return defaultPiCapabilities(
+        QUALIFIED_PI_IDENTITY,
+        0,
+        {
+          ...(forgedBase as Parameters<typeof defaultPiCapabilities>[2]),
+          invocation_evidence: {
+            ...inv,
+            spawn_cwd: "/tmp/different-cwd",
+          },
+        } as unknown as Parameters<typeof defaultPiCapabilities>[2],
+      );
+    },
+    /LIVE_QUALIFIED with failed oracle|invocation_evidence.*EXPLICIT_CWD/,
   );
 });
 
@@ -281,11 +326,11 @@ test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION
   // directory. Without it, the axis is demoted to
   // LIVE_UNQUALIFIED even when requested_cwd happens
   // to match the observed cwd.
-  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-  });
+  }));
   assert.equal(
     caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
     "LIVE_UNQUALIFIED",
@@ -296,29 +341,47 @@ test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION
     null,
     "ISOLATED_DATA_DIR must have probe_evidence=null without isolated_session_dir",
   );
-  // CORRECTION05 C05-01: passing an isolated_session_dir
-  // that only matches cwd (not artifact path) is still
-  // LIVE_UNQUALIFIED — the artifact must live under the
-  // dedicated session-storage directory.
-  const cwdOnly = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  // CORRECTION05 C05-01 + CORRECTION06 C06-05:
+  // passing a caller-supplied isolated_session_dir that
+  // does NOT match the invocation-recorded session_dir
+  // is still LIVE_UNQUALIFIED — the artifact must live
+  // under the invocation-recorded session-storage
+  // directory. The caller-supplied isolated_session_dir
+  // argument is no longer authoritative on its own.
+  const baseForCwdOnly = withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
     isolated_session_dir: "/private/tmp/pi-live",
-  });
+  }) as Record<string, unknown>;
+  const invCwdOnly = baseForCwdOnly.invocation_evidence as {
+    session_dir: string | null;
+  };
+  const cwdOnly = defaultPiCapabilities(
+    QUALIFIED_PI_IDENTITY,
+    0,
+    {
+      ...(baseForCwdOnly as Parameters<typeof defaultPiCapabilities>[2]),
+      invocation_evidence: {
+        ...(baseForCwdOnly.invocation_evidence as Record<string, unknown>),
+        session_dir: "/private/tmp/pi-live",
+      },
+    } as unknown as Parameters<typeof defaultPiCapabilities>[2],
+  );
+  void invCwdOnly;
   assert.equal(
     cwdOnly.capability_axes.ISOLATED_DATA_DIR.live_qualification,
     "LIVE_UNQUALIFIED",
-    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when isolated_session_dir matches cwd but not artifact path (C05-01)",
+    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED when invocation-recorded session_dir does not contain artifact path (C06-05)",
   );
   // The artifact_path lives under the parent of the
   // fixture directory; with that as isolated_session_dir
   // the axis qualifies.
-  const isoCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  const isoCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     isolated_session_dir: "test/fixtures/harnesses/pi/pi-v0_85_1",
-  });
+  }));
   assert.equal(
     isoCaps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
     "LIVE_QUALIFIED",
@@ -348,12 +411,17 @@ test("C03-02c: HEADLESS requires invocation_mode=headless (CORRECTION04)", () =>
   );
   // With invocation_mode === "headless", HEADLESS
   // qualifies from the session envelope.
-  const withInvocation = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  //
+  // CORRECTION06 C06-03: the invocation_mode argument
+  // is no longer authoritative; the invocation artifact
+  // is. The fixture invocation's invocation_mode ===
+  // "headless", so HEADLESS qualifies.
+  const qualifiedHeadless = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     invocation_mode: "headless",
-  });
-  const ev = withInvocation.capability_axes.HEADLESS.probe_evidence;
+  }));
+  const ev = qualifiedHeadless.capability_axes.HEADLESS.probe_evidence;
   assert.ok(ev !== null);
   assert.equal(ev.evidence_relation.expected, "session");
   assert.equal(ev.evidence_relation.observed, "session");
@@ -367,10 +435,13 @@ test("C03-02c: HEADLESS requires invocation_mode=headless (CORRECTION04)", () =>
  * ------------------------------------------------------------------ */
 
 test("C03-03a: FINAL_JSON harness_capability is UNSUPPORTED (canonical name is JSONL)", () => {
-  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+  // CORRECTION06: JSONL requires invocation evidence to
+  // be LIVE_QUALIFIED (the recorded expected must agree
+  // with the invocation-derived expected).
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
-  });
+  }));
   assert.equal(caps.capabilities.FINAL_JSON, "UNSUPPORTED");
   assert.equal(caps.capabilities.JSONL, "SUPPORTED");
   assert.equal(caps.capability_axes.FINAL_JSON.live_qualification, "LIVE_UNQUALIFIED");
@@ -480,6 +551,7 @@ test("C03-05c: artifact hash drift fails closed (CORRECTION04 verifyLiveQualific
           observed: "session",
         }),
         probe_evidence_path: FIXTURE_SESSION,
+        invocation_evidence_path: null,
       },
     },
     live_qualification_by_key: {
@@ -500,11 +572,11 @@ test("C03-05c: artifact hash drift fails closed (CORRECTION04 verifyLiveQualific
   );
   assert.equal(hashError!.key, "JSONL");
   // Sanity: a real document with the real sha256 must PASS.
-  const validCaps = defaultPiCapabilities(id, 0, {
+  const validCaps = defaultPiCapabilities(id, 0, withInvocation({
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
-  });
+  }));
   assert.equal(
     validCaps.capability_axes.JSONL.probe_evidence?.artifact_sha256,
     realSha,
@@ -518,17 +590,31 @@ test("C03-05c: artifact hash drift fails closed (CORRECTION04 verifyLiveQualific
 });
 
 test("C03-05d: right artifact / wrong cwd cannot qualify EXPLICIT_CWD (builder throws)", () => {
-  // The builder refuses to publish a LIVE_QUALIFIED axis
-  // whose oracle failed. This is the negative oracle:
-  // right artifact + wrong cwd cannot qualify.
+  // CORRECTION06: the cwd mismatch is detected at the
+  // invocation evidence level. We build an invocation
+  // whose spawn_cwd disagrees with the session cwd.
   assert.throws(
-    () =>
-      defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    () => {
+      const base = withInvocation({
         session_capture: FIXTURE_SESSION,
         cancellation_halt: FIXTURE_PROCESS,
-        requested_cwd: "/nonexistent/isolation/path",
-      }),
-    /LIVE_QUALIFIED with failed oracle/,
+        requested_cwd: "/private/tmp/pi-live",
+      });
+      const forgedBase = base as Record<string, unknown>;
+      const inv = forgedBase.invocation_evidence as { spawn_cwd: string };
+      return defaultPiCapabilities(
+        QUALIFIED_PI_IDENTITY,
+        0,
+        {
+          ...(forgedBase as Parameters<typeof defaultPiCapabilities>[2]),
+          invocation_evidence: {
+            ...inv,
+            spawn_cwd: "/nonexistent/isolation/path",
+          },
+        } as unknown as Parameters<typeof defaultPiCapabilities>[2],
+      );
+    },
+    /LIVE_QUALIFIED with failed oracle|invocation_evidence.*EXPLICIT_CWD/,
   );
 });
 

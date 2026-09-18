@@ -55,19 +55,22 @@
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "STREAMING_EVENTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "FINAL_JSON": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "JSONL": {
       "harness_capability": "SUPPORTED",
@@ -83,25 +86,29 @@
         },
         "disposition": "PASS"
       },
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json"
     },
     "RPC": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "SESSION_RESUME": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "SESSION_FORK": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "EXPLICIT_CWD": {
       "harness_capability": "SUPPORTED",
@@ -117,31 +124,36 @@
         },
         "disposition": "PASS"
       },
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/EXPLICIT_CWD.invocation.json"
     },
     "ISOLATED_DATA_DIR": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "MODEL_SELECTION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "PROVIDER_SELECTION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "TIMEOUT": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "NOT_APPLICABLE",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "CANCELLATION": {
       "harness_capability": "SUPPORTED",
@@ -157,37 +169,43 @@
         },
         "disposition": "HALT"
       },
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/CANCELLATION.invocation.json"
     },
     "AUTO_APPROVAL": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "NOT_APPLICABLE",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "TOOL_EVENT_VISIBILITY": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "TOKEN_USAGE": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "RESOURCE_USAGE": {
       "harness_capability": "UNAVAILABLE",
       "live_qualification": "NOT_APPLICABLE",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     },
     "SESSION_ARTIFACTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence": null,
-      "probe_evidence_path": null
+      "probe_evidence_path": null,
+      "invocation_evidence_path": null
     }
   }
 }

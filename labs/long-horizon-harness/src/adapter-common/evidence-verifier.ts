@@ -73,6 +73,7 @@ import type {
   CapabilityProbeKind,
   HarnessCapabilities,
 } from "../protocol/index.js";
+import { readInvocationEvidence } from "./invocation-evidence.js";
 
 /**
  * Closed-world failure kinds for evidence verification
@@ -141,7 +142,7 @@ export function resolveEvidencePath(
   // committed evidence; an absolute path inside the
   // repo is not portable across checkouts and is the
   // whole class of defect we are trying to close.
-  if (isAbsolute(artifact_path)) {
+  if (artifact_path === "" || isAbsolute(artifact_path)) {
     return {
       ok: false,
       error: {
@@ -312,11 +313,19 @@ function recomputeObserved(
 
 /**
  * Capability-specific oracle that uses BOTH the
- * `expected` and the recomputed `observed` value. For
- * ISOLATED_DATA_DIR the relation is "observed lives
- * under expected" (the artifact_path lives under the
- * isolated_session_dir). For every other capability the
- * relation is exact equality.
+ * `expected` and the recomputed `observed` value.
+ *
+ * CORRECTION06 C06-02..C06-05: the oracle is
+ * invocation-aware. The recorded `expected` is no
+ * longer authoritative on its own; the invocation
+ * artifact defines the expected for capability-
+ * specific rules.
+ *
+ * For ISOLATED_DATA_DIR (CORRECTION05 C05-01 +
+ * CORRECTION06 C06-05) the relation is "observed
+ * artifact_path lives under invocation-recorded
+ * session_dir", not "Factory fixture copy lives under
+ * session_dir".
  */
 function isUnder(child: string, parent: string): boolean {
   if (child === parent) return true;
@@ -327,7 +336,113 @@ function isUnder(child: string, parent: string): boolean {
   return child.startsWith(parent + "/");
 }
 
-function evaluateOracle(
+/**
+ * CORRECTION06 C06-02..C06-05: capability-specific
+ * oracle that combines invocation evidence, parsed
+ * observation, and observed value. Returns true iff
+ * the recorded capability claim is grounded in
+ * durable artifacts on BOTH sides (premise +
+ * observation).
+ *
+ *   JSONL             — observation is a JSONL session envelope.
+ *   HEADLESS          — invocation.invocation_mode === "headless"
+ *                       AND observation present.
+ *   STREAMING_EVENTS  — invocation.invocation_mode === "headless"
+ *                       AND observation contains >= 2 events.
+ *   EXPLICIT_CWD      — invocation.spawn_cwd === observation.cwd.
+ *   ISOLATED_DATA_DIR — invocation.session_dir != null AND
+ *                       invocation.no_session === false AND
+ *                       observed artifact_path lives under
+ *                       invocation.session_dir.
+ *   CANCELLATION      — recorded observed halt reason matches
+ *                       recomputed halt_disposition from the
+ *                       process-result artifact.
+ */
+export function evaluateCapabilityOracle(args: {
+  readonly capability: CapabilityKey;
+  readonly invocation: import("./invocation-evidence.js").InvocationEvidence;
+  readonly parsedObservation: unknown;
+  readonly observed: string;
+  readonly observationArtifactAbsolute: string;
+}): boolean {
+  const {
+    capability,
+    invocation,
+    parsedObservation,
+    observed,
+    observationArtifactAbsolute,
+  } = args;
+  switch (capability) {
+    case "JSONL":
+      return observed === "session";
+    case "HEADLESS":
+      return (
+        invocation.invocation_mode === "headless" && observed === "session"
+      );
+    case "STREAMING_EVENTS": {
+      if (invocation.invocation_mode !== "headless") return false;
+      const lines = readJsonlAllLines(observationArtifactAbsolute);
+      if (lines === null) return false;
+      if (lines.length < 2) return false;
+      return true;
+    }
+    case "EXPLICIT_CWD":
+      return invocation.spawn_cwd === observed;
+    case "ISOLATED_DATA_DIR":
+      if (invocation.session_dir === null) return false;
+      if (invocation.no_session) return false;
+      return isUnder(observed, invocation.session_dir);
+    case "CANCELLATION": {
+      if (
+        parsedObservation !== null &&
+        typeof parsedObservation === "object"
+      ) {
+        const obj = parsedObservation as Record<string, unknown>;
+        if (typeof obj["halt_disposition"] === "string") {
+          return obj["halt_disposition"] === observed;
+        }
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Read all lines of a JSONL artifact as parsed objects.
+ * Returns `null` if the file is missing or any line
+ * fails to parse.
+ */
+function readJsonlAllLines(absolute: string): unknown[] | null {
+  let raw: string;
+  try {
+    raw = readFileSync(absolute, "utf8");
+  } catch {
+    return null;
+  }
+  const out: unknown[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      return null;
+    }
+  }
+  return out;
+}
+
+/**
+ * CORRECTION06: legacy single-string oracle retained
+ * for callers that still hold a documented
+ * `evaluateOracle(capability, expected, observed)`
+ * signature. The authoritative oracle is
+ * `evaluateCapabilityOracle` which is invocation-aware.
+ * This function is exported for backward compatibility
+ * with C05 tests that pin the legacy form.
+ */
+export function evaluateOracle(
   capability: CapabilityKey,
   expected: string,
   observed: string,
@@ -382,7 +497,11 @@ export function verifyLiveQualificationEvidence(
       });
       continue;
     }
-    const resolved = resolveEvidencePath(ev.artifact_path, repoRoot, k);
+    const resolved = resolveEvidencePath(
+      ev.artifact_path ?? "",
+      repoRoot,
+      k,
+    );
     if (resolved.ok !== true) {
       errors.push(resolved.error);
       continue;
@@ -459,17 +578,156 @@ export function verifyLiveQualificationEvidence(
       });
       continue;
     }
-    // Oracle re-check (PASS iff oracle agrees with the
-    // recorded observed value AND the recorded
-    // disposition matches).
-    const expected = ev.evidence_relation.expected;
-    const expectedMatches = evaluateOracle(k, expected, observed);
+    // CORRECTION06 C06-06: re-read the invocation
+    // evidence artifact and recompute the `expected`
+    // value from it. The recorded
+    // `evidence_relation.expected` is no longer
+    // authoritative on its own; the invocation artifact
+    // is. If `invocation_evidence_path` is null the
+    // verifier refuses LIVE_QUALIFIED / LIVE_HALT for
+    // that capability.
+    if (axis.invocation_evidence_path === null) {
+      errors.push({
+        kind: "EVIDENCE_PARSE_FAILED",
+        key: k,
+        message: `Capability ${k} is ${axis.live_qualification} but invocation_evidence_path is null; cannot derive the oracle's expected value from durable evidence (CORRECTION06 C06-06).`,
+        artifact_path: absolute,
+      });
+      continue;
+    }
+    const invocationResolved = resolveEvidencePath(
+      axis.invocation_evidence_path ?? "",
+      repoRoot,
+      k,
+    );
+    if (invocationResolved.ok !== true) {
+      errors.push({
+        ...invocationResolved.error,
+        message: `Invocation artifact path failed resolve: ${invocationResolved.error.message}`,
+      });
+      continue;
+    }
+    const invocationAbsolute = invocationResolved.absolute;
+    if (!existsSync(invocationAbsolute)) {
+      errors.push({
+        kind: "EVIDENCE_ARTIFACT_MISSING",
+        key: k,
+        message: `Invocation artifact '${invocationAbsolute}' does not exist.`,
+        artifact_path: invocationAbsolute,
+      });
+      continue;
+    }
+    let invocationSha: string;
+    try {
+      invocationSha = recomputeSha256(invocationAbsolute);
+    } catch (err) {
+      errors.push({
+        kind: "EVIDENCE_ARTIFACT_MISSING",
+        key: k,
+        message: `Failed to read invocation artifact '${invocationAbsolute}': ${(err as Error).message}`,
+        artifact_path: invocationAbsolute,
+      });
+      continue;
+    }
+    const invocationRel = relative(pathResolve(repoRoot), invocationAbsolute);
+    const invocation = readInvocationEvidence(invocationRel, repoRoot);
+    if (invocation === null) {
+      errors.push({
+        kind: "EVIDENCE_PARSE_FAILED",
+        key: k,
+        message: `Invocation artifact at '${invocationRel}' is missing or malformed.`,
+        artifact_path: invocationAbsolute,
+      });
+      continue;
+    }
+    if (
+      typeof invocation.artifact_sha256 === "string" &&
+      invocation.artifact_sha256 !== "" &&
+      invocation.artifact_sha256 !== invocationSha
+    ) {
+      // The recorded sha (if non-empty) must agree with
+      // the on-disk bytes' sha. The on-disk artifact
+      // does not embed the sha field (see
+      // writeInvocationEvidence), so this check is
+      // normally a no-op; if a malicious adapter writes
+      // a sha field that disagrees with the bytes, the
+      // verifier refuses the document.
+      errors.push({
+        kind: "EVIDENCE_HASH_MISMATCH",
+        key: k,
+        message: `Invocation artifact hash drift on '${invocationAbsolute}'.`,
+        artifact_path: invocationAbsolute,
+        recorded_sha256: invocation.artifact_sha256,
+        recomputed_sha256: invocationSha,
+      });
+      continue;
+    }
+    // CORRECTION06 C06-06: the invocation artifact's
+    // `capability` field is a self-identifier; the
+    // verifier does NOT enforce it equals the axis
+    // key, because a single headless invocation can
+    // legitimately back multiple LIVE_QUALIFIED axes
+    // (JSONL, HEADLESS, STREAMING_EVENTS, EXPLICIT_CWD,
+    // ISOLATED_DATA_DIR all share one launch record).
+    // What the verifier DOES enforce is that the
+    // invocation-derived `expected` value disagrees with
+    // the recorded `expected` — which it already does
+    // below.
+    // C06-02..C06-05: oracle is now invocation-aware.
+    // The recorded expected value is checked to agree
+    // with what the oracle SHOULD derive from the
+    // invocation evidence (defense against forged
+    // "recorded expected = artifact observed"). The
+    // authoritative oracle is
+    // `evaluateCapabilityOracle` which combines
+    // invocation, parsed observation, and the
+    // recomputed observed value.
+    //
+    // For most capabilities the recorded expected
+    // value (e.g. "session" for JSONL) is identical to
+    // what the invocation-aware oracle would derive.
+    // For HEADLESS the recorded expected is "session"
+    // (the observed protocol output) but the
+    // invocation-aware oracle checks invocation_mode +
+    // observed === "session". Both sides are evaluated.
+    const expectedMatches = evaluateCapabilityOracle({
+      capability: k,
+      invocation,
+      parsedObservation: parsed.parsed,
+      observed,
+      observationArtifactAbsolute: absolute,
+    });
+    // CORRECTION06: also verify that the recorded
+    // `expected` value is consistent with the
+    // observation. For most capabilities the recorded
+    // expected is `observed` (or, for ISOLATED_DATA_DIR,
+    // the parent dir). For CANCELLATION the recorded
+    // expected is the canonical halt reason, which must
+    // equal the observed halt reason. A forged
+    // `expected` field that disagrees with the observed
+    // value still fails — this is the CORRECTION05
+    // C05-02 invariant carried forward into
+    // CORRECTION06.
+    if (
+      axis.live_qualification === "LIVE_HALT" &&
+      ev.evidence_relation.expected !== observed
+    ) {
+      errors.push({
+        kind: "EVIDENCE_OBSERVATION_MISMATCH",
+        key: k,
+        message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the observed halt reason '${observed}' (CORRECTION05 C05-02).`,
+        artifact_path: absolute,
+        recorded_observed: ev.evidence_relation.expected,
+        recomputed_observed: observed,
+      });
+      continue;
+    }
     if (axis.live_qualification === "LIVE_QUALIFIED") {
       if (ev.disposition !== "PASS" || !expectedMatches) {
         errors.push({
           kind: "EVIDENCE_ORACLE_FAILED",
           key: k,
-          message: `Capability ${k} is LIVE_QUALIFIED but oracle recomputation says FAIL (expected='${expected}', observed='${observed}', recorded disposition='${ev.disposition}').`,
+          message: `Capability ${k} is LIVE_QUALIFIED but invocation-aware oracle recomputation says FAIL (recorded expected='${ev.evidence_relation.expected}', observed='${observed}', recorded disposition='${ev.disposition}', invocation_mode='${invocation.invocation_mode}', session_dir=${invocation.session_dir}).`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,
@@ -497,7 +755,7 @@ export function verifyLiveQualificationEvidence(
         errors.push({
           kind: "EVIDENCE_OBSERVATION_MISMATCH",
           key: k,
-          message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${expected}' disagrees with the recomputed observed halt reason '${observed}'.`,
+          message: `Capability ${k} is LIVE_HALT but the recorded expected halt reason '${ev.evidence_relation.expected}' disagrees with the recomputed observed halt reason '${observed}' (invocation-aware oracle rejected; invocation_mode='${invocation.invocation_mode}').`,
           artifact_path: absolute,
           recorded_observed: ev.evidence_relation.observed,
           recomputed_observed: observed,

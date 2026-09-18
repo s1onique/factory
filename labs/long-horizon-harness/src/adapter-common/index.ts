@@ -42,3 +42,15 @@ export {
   type EvidenceVerificationError,
   type EvidenceVerificationResult,
 } from "./evidence-verifier.js";
+
+export {
+  writeInvocationEvidence,
+  readInvocationEvidence,
+  isInvocationProtocol,
+  isInvocationMode,
+  INVOCATION_PROTOCOLS,
+  INVOCATION_MODES,
+  type InvocationEvidence,
+  type InvocationProtocol,
+  type InvocationMode,
+} from "./invocation-evidence.js";

@@ -1,13 +1,14 @@
 {
   "lh03_emit_kind": "DETERMINISTIC_CONSOLIDATED_EMIT",
   "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
-  "lh03_correction": "CORRECTION05",
+  "lh03_correction": "CORRECTION06",
   "lh03_correction_history": [
     "CORRECTION01",
     "CORRECTION02",
     "CORRECTION03",
     "CORRECTION04",
-    "CORRECTION05"
+    "CORRECTION05",
+    "CORRECTION06"
   ],
   "generated_at_iso": "2026-09-18T01:00:00.000Z",
   "input_evidence": {
@@ -67,14 +68,21 @@
   },
   "semantic_probe_evidence_summary": {
     "HEADLESS": {
-      "probe_kind": "NOT_RUN",
+      "probe_kind": "SESSION_ENVELOPE",
       "harness_capability": "SUPPORTED",
-      "rationale": "CORRECTION04 C04-05: a single session envelope is not sufficient evidence of headless mode. Until invocation_mode=headless is captured by the adapter, HEADLESS stays LIVE_UNQUALIFIED."
+      "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+      "expected": "session",
+      "observed": "session",
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json",
+      "invocation_invocation_mode": "headless",
+      "disposition": "PASS",
+      "rationale": "CORRECTION06 C06-03: HEADLESS is now LIVE_QUALIFIED iff the durable invocation artifact's invocation_mode field equals 'headless'. The verifier re-reads the invocation from disk and recomputes expected from it."
     },
     "STREAMING_EVENTS": {
       "probe_kind": "NOT_RUN",
       "harness_capability": "SUPPORTED",
-      "rationale": "CORRECTION04 C04-05: a single session envelope is not sufficient evidence of streaming. Until invocation_mode=headless is captured, STREAMING_EVENTS stays LIVE_UNQUALIFIED."
+      "rationale": "CORRECTION06 C06-04: STREAMING_EVENTS requires invocation.invocation_mode === 'headless' AND the observation artifact must contain >= 2 events. The canonical single-event session header is not sufficient evidence of streaming behavior. Until Factory wires up multi-event capture, STREAMING_EVENTS stays LIVE_UNQUALIFIED."
     },
     "JSONL": {
       "probe_kind": "SESSION_ENVELOPE",
@@ -93,9 +101,15 @@
       "disposition": "PASS"
     },
     "ISOLATED_DATA_DIR": {
-      "probe_kind": "NOT_RUN",
+      "probe_kind": "ISOLATED_DATA_DIR",
       "harness_capability": "SUPPORTED",
-      "rationale": "CORRECTION04 C04-04 + CORRECTION05 C05-01: cwd match alone is not sufficient evidence of session/state isolation. Upstream Pi defines --session-dir as the directory where session files are stored; the captured session artifact (pi.session.jsonl) is a session file. ISOLATED_DATA_DIR qualifies only when an explicit isolated_session_dir is captured AND the captured session artifact_path lives under it. Until then ISOLATED_DATA_DIR stays LIVE_UNQUALIFIED."
+      "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+      "isolated_session_dir": "test/fixtures/harnesses/pi/pi-v0_85_1",
+      "invocation_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json",
+      "invocation_session_dir": "test/fixtures/harnesses/pi/pi-v0_85_1",
+      "disposition": "PASS",
+      "rationale": "CORRECTION06 C06-05: ISOLATED_DATA_DIR is LIVE_QUALIFIED iff invocation.session_dir is non-null AND invocation.no_session is false AND the observation artifact_path lives under invocation.session_dir. The durable invocation artifact is the sole authority for session_dir."
     },
     "CANCELLATION": {
       "probe_kind": "CANCELLATION_HALT",
@@ -129,11 +143,29 @@
       "EVIDENCE_OBSERVATION_MISMATCH raised on LIVE_HALT where expected disagrees with recomputed observed (CORRECTION05 C05-02)",
       "EVIDENCE_ORACLE_FAILED raised on impossible oracle (CORRECTION04)",
       "EVIDENCE_PARSE_FAILED raised on malformed JSON (CORRECTION04)",
-      "EVIDENCE_ARTIFACT_MISSING raised on missing file (CORRECTION04)"
+      "EVIDENCE_ARTIFACT_MISSING raised on missing file (CORRECTION04)",
+      "ALL_ORACLE_INPUTS_DERIVED_FROM_REVERIFIABLE_ARTIFACTS (CORRECTION06): verifier re-reads invocation.json and recomputes expected for every per-capability oracle",
+      "INVOCATION_EVIDENCE_PATH_REQUIRED for every LIVE_QUALIFIED axis (CORRECTION06 C06-06)",
+      "VALIDATOR_REJECTS_LIVE_QUALIFIED_WITHOUT_INVOCATION_EVIDENCE_PATH (CORRECTION06 C06-07)",
+      "EVALUATE_CAPABILITY_ORACLE is the per-axis oracle function (CORRECTION06 C06-08)"
     ],
-    "is_isolated_data_dir_oracle": "captured_artifact_path under isolated_session_dir (CORRECTION05 C05-01)",
-    "is_halt_oracle": "expected === recomputed_observed (CORRECTION05 C05-02)",
+    "invocation_artifacts": {
+      "JSONL": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/JSONL.invocation.json",
+      "HEADLESS": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/HEADLESS.invocation.json",
+      "STREAMING_EVENTS": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/STREAMING_EVENTS.invocation.json",
+      "EXPLICIT_CWD": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/EXPLICIT_CWD.invocation.json",
+      "ISOLATED_DATA_DIR": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/ISOLATED_DATA_DIR.invocation.json",
+      "CANCELLATION": "test/fixtures/harnesses/pi/pi-v0_85_1/invocations/CANCELLATION.invocation.json"
+    },
+    "is_isolated_data_dir_oracle": "captured_artifact_path under invocation.session_dir (CORRECTION06 C06-05, supersedes C05-01)",
+    "is_halt_oracle": "expected === recomputed_observed (CORRECTION05 C05-02, retained)",
+    "is_explicit_cwd_oracle": "expected := invocation.spawn_cwd (CORRECTION06 C06-02)",
+    "is_headless_oracle": "expected := invocation.invocation_mode (CORRECTION06 C06-03)",
+    "is_streaming_events_oracle": "invocation.invocation_mode === 'headless' AND observation has >= 2 events (CORRECTION06 C06-04)",
+    "is_cancellation_oracle": "expected := parsed.halt_disposition (CORRECTION06 C06-08)",
     "path_policy": "isAbsolute(artifact_path) rejected outright (CORRECTION05 C05-03)",
+    "invocation_policy": "invocation_evidence_path is mandatory on every LIVE_QUALIFIED axis (CORRECTION06 C06-06)",
+    "validator_policy": "validateLiveQualification refuses LIVE_QUALIFIED without invocation_evidence_path (CORRECTION06 C06-07)",
     "pinned_fixture_result": "PASS",
     "qualification_matrix_result": "PASS"
   },

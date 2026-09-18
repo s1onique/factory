@@ -267,6 +267,22 @@ export type CapabilityAxis = {
    * consistency between the two.
    */
   readonly probe_evidence_path: string | null;
+  /**
+   * CORRECTION06 C06-06: durable, repo-relative path to
+   * the invocation evidence artifact that records the
+   * executable, argv, spawn cwd, protocol, invocation
+   * mode, session-dir setting, and a sanitized env
+   * subset used by Factory to invoke the harness. The
+   * verifier re-reads this artifact and uses it as the
+   * authoritative source for the oracle's `expected`
+   * value (C06-02..C06-05). Required for every
+   * LIVE_QUALIFIED and LIVE_HALT axis.
+   *
+   * `null` is the typed default for axes that have not
+   * been probed. The validator refuses LIVE_QUALIFIED
+   * axes with a null invocation_evidence_path.
+   */
+  readonly invocation_evidence_path: string | null;
 };
 
 /**
@@ -344,6 +360,7 @@ export function emptyCapabilities(
       live_qualification: live[k],
       probe_evidence: null,
       probe_evidence_path: null,
+      invocation_evidence_path: null,
     };
   }
   return {
@@ -464,6 +481,14 @@ export type LiveQualificationViolation =
       readonly probe_evidence_artifact_path: string;
     }
   | {
+      readonly kind: "live_qualified_without_invocation_evidence";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_without_invocation_evidence";
+      readonly key: CapabilityKey;
+    }
+  | {
       readonly kind: "axis_views_disagree";
       readonly key: CapabilityKey;
       readonly axes_axis: LiveQualificationState;
@@ -560,6 +585,19 @@ export function validateLiveQualification(
           probe_evidence_artifact_path: ev.artifact_path,
         });
       }
+      // CORRECTION06 C06-06: every LIVE_QUALIFIED axis
+      // must bind to a durable invocation evidence
+      // artifact. The verifier refuses LIVE_QUALIFIED
+      // claims whose `expected` is purely caller-
+      // asserted; the invocation artifact is the
+      // authoritative source for the oracle's `expected`
+      // value.
+      if (axis.invocation_evidence_path === null) {
+        violations.push({
+          kind: "live_qualified_without_invocation_evidence",
+          key: k,
+        });
+      }
     }
     if (axis.live_qualification === "LIVE_HALT") {
       if (axis.probe_evidence === null) {
@@ -588,6 +626,18 @@ export function validateLiveQualification(
           key: k,
           probe_evidence_path_field: axis.probe_evidence_path,
           probe_evidence_artifact_path: axis.probe_evidence.artifact_path,
+        });
+      }
+      // CORRECTION06 C06-06: LIVE_HALT also requires a
+      // durable invocation artifact (C06-06). The halt
+      // disposition itself is the recorded fact, but the
+      // invocation must be re-verifiable from disk so a
+      // forged "I claim I halted" with no launch record
+      // cannot pass.
+      if (axis.invocation_evidence_path === null) {
+        violations.push({
+          kind: "live_halt_without_invocation_evidence",
+          key: k,
         });
       }
     }

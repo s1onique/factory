@@ -768,4 +768,124 @@ FORGED_HALT_REASON_ACCEPTED                = IMPOSSIBLE   (C05-02)
 ABSOLUTE_INSIDE_ROOT_PATH_ACCEPTED         = IMPOSSIBLE   (C05-03, C05-03a, C05-03b)
 ```
 
+---
+
+## CORRECTION06 - invocation evidence is a first-class durable artifact
+
+### Motivation
+
+CORRECTION05 closed every reviewer defect that attacked the
+**observation** side of the oracle (artifact_path, sha, halt
+disposition, path-escape policy). But the oracle's **expected**
+side was still caller-asserted: the adapter code that built the
+probe_evidence record wrote `expected = argv[3]` (the `--mode
+headless` flag) into the document, then the verifier accepted it
+on the honor system. A caller could submit any plausible-looking
+expected string and the verifier would mark the axis LIVE_QUALIFIED.
+
+CORRECTION06 promotes **InvocationEvidence** to a first-class
+durable artifact, sibling to the observation artifact. The
+oracle's `expected` value is now derived from re-verifiable bytes
+on disk, not from caller-asserted inputs. The verifier re-reads
+the invocation artifact, recomputes its SHA, and refuses any
+document where the recorded expected value disagrees with the
+value that the invocation artifact itself implies.
+
+### What changed
+
+| Layer | Change |
+|---|---|
+| `src/adapter-common/invocation-evidence.ts` (NEW) | Typed `InvocationEvidence` interface + `writeInvocationEvidence` / `readInvocationEvidence`. |
+| `CapabilityAxis` schema | New required field `invocation_evidence_path` on every axis. |
+| Validator | Two new violation kinds: `live_qualified_without_invocation_evidence`, `live_halt_without_invocation_evidence`. |
+| `evaluateCapabilityOracle(...)` | New per-capability oracle in the verifier. The oracle re-reads the invocation artifact and asserts `expected === invocation-derived expected`. |
+| `pi-adapter` builder | For every LIVE_QUALIFIED / LIVE_HALT axis, the recorded `expected` is now derived from the invocation evidence on disk. |
+| Test fixtures | 6 new `*.invocation.json` files under `test/fixtures/harnesses/pi/pi-v0_85_1/invocations/`. |
+| Test helper | New `test/lh03/_invocation_helper.ts` with `loadInvocationFixture` / `loadHeadlessInvocationForAxis`. |
+| Test wrapper | `withInvocation(base, capabilities)` injects typed invocation evidence into `defaultPiCapabilities` arguments. |
+
+### Per-capability oracle (CORRECTION06)
+
+```text
+JSONL              : observed == "session"                                              C06-08
+HEADLESS           : invocation.invocation_mode == "headless" AND observed == "session"  C06-03
+STREAMING_EVENTS   : invocation.invocation_mode == "headless" AND >=2 events observed    C06-04
+EXPLICIT_CWD       : invocation.spawn_cwd === observed                                  C06-02
+ISOLATED_DATA_DIR  : invocation.session_dir != null AND !no_session AND
+                     captured_artifact_path lives under invocation.session_dir          C06-05
+CANCELLATION       : parsed.halt_disposition === observed                               C06-08
+LIVE_HALT          : recorded expected === observed (C05-02 retained)                   C05-02
+```
+
+### Reviewer-driven hardening items (CORRECTION06)
+
+| ID | Reviewer defect | CORRECTION06 fix |
+|---|---|---|
+| C06-01 | `InvocationEvidence` was an untyped, undocumented parameter bag; the verifier could not enforce structural shape. | New typed interface in `src/adapter-common/invocation-evidence.ts` with required fields: `capability`, `executable`, `argv`, `spawn_cwd`, `protocol`, `invocation_mode`, `session_dir`, `no_session`, `env_subset`, `recorded_at`. `readInvocationEvidence` parses + type-checks. |
+| C06-02 | `EXPLICIT_CWD` expected value was the caller-supplied `requested_cwd`. The oracle compared observed cwd to caller-supplied cwd - useless if both sides are caller-asserted. | Expected is now `invocation.spawn_cwd`, re-read from the invocation artifact. The adapter builder no longer trusts `requested_cwd` for evidence-record `expected`. |
+| C06-03 | `HEADLESS` expected value was caller-supplied `invocation_mode` flag. A caller could submit `"headless"` without ever having run headless. | Expected is now `invocation.invocation_mode` from the on-disk artifact. `headlessQualified` is gated on `invocationEvidence !== null && invocationEvidence.invocation_mode === "headless"`. |
+| C06-04 | `STREAMING_EVENTS` expected value was caller-supplied `invocation_mode`. Single-event session header was sufficient for the verifier. | Expected is now derived from `invocation.invocation_mode === "headless"` AND the observation must contain **>= 2 events**. Single-event artifacts are rejected by both the builder and the verifier. |
+| C06-05 | `ISOLATED_DATA_DIR` expected value was the caller-supplied `isolated_session_dir`. A caller could submit any path string. | Expected is now `invocation.session_dir`, re-read from the invocation artifact. The oracle additionally requires `!no_session` and `isUnder(captured_artifact_path, invocation.session_dir)`. |
+| C06-06 | `LIVE_QUALIFIED` axes could be authored without any invocation evidence at all. | The verifier refuses any `LIVE_QUALIFIED` axis where `invocation_evidence_path` is `null` (or the file is missing / unparseable). Negative test: `C06-06`. |
+| C06-07 | `validateLiveQualification` (structural validator) did not check `invocation_evidence_path`. | New violation kinds `live_qualified_without_invocation_evidence` and `live_halt_without_invocation_evidence`. Negative test: `C06-07`. |
+| C06-08 | Cumulative post-CORRECTION06 fixture/qualification matrix must pass. | `C06-08` re-runs `verifyLiveQualificationEvidence` end-to-end on both the fixture matrix and the qualification matrix. Both PASS. |
+
+### Frame-level findings (CORRECTION06 additions)
+
+```text
+CALLER_ASSERTED_EXPECTED_ACCEPTED     = IMPOSSIBLE   (C06-02, C06-03, C06-04, C06-05, C06-08)
+INVOCATION_PREMISE_RECOVERABLE        = TRUE         (C06-01, writeInvocationEvidence/readInvocationEvidence)
+LIVE_QUALIFIED_WITHOUT_INVOCATION     = IMPOSSIBLE   (C06-06, C06-07)
+```
+
+### Total regression (post-CORRECTION06)
+
+```text
+test/run/*.test.ts        = 86  (Phase E - frozen, unchanged)
+test/metrics/*.test.ts    = 61  (LH-02 - frozen, unchanged)
+test:lh03                 = 158 (was 150; +8 C06-* axiom tests)
+test/fake-adapter.test.ts = 3
+check:trust-boundary      = 2
+check:domain-purity       = 3
+TOTAL                     = 313 tests, all passing
+```
+
+### Exit of CORRECTION06 (axiom-by-axiom)
+
+```text
+C06-01 InvocationEvidence typed schema enforced                                  ENFORCED
+C06-02 EXPLICIT_CWD expected := invocation.spawn_cwd                            ENFORCED
+C06-03 HEADLESS expected := invocation.invocation_mode                           ENFORCED
+C06-04 STREAMING_EVENTS requires >=2 events                                     ENFORCED
+C06-05 ISOLATED_DATA_DIR expected := invocation.session_dir                     ENFORCED
+C06-06 LIVE_QUALIFIED axes require invocation_evidence_path                     ENFORCED
+C06-07 validateLiveQualification refuses LIVE_QUALIFIED without invocation      ENFORCED
+C06-08 cumulative post-C06 fixture/qualification matrix passes verifier         PROVEN
+```
+
+### Verdict after CORRECTION06
+
+```text
+LH_03_DETERMINISTIC_SUBSTRATE = GREEN_FROZEN
+LH_03 = FULL_INVOCATION_AWARE
+PI_LIVE = HALT_CREDENTIALS
+CLINE_LIVE = HALT_NOT_INSTALLED
+READY_FOR_LH_04 = NO (halt disposition remains first-class
+                     evidence; LH-04 was NOT started in
+                     this correction)
+
+The reviewer-supplied FRAME-LEVEL FINDINGS:
+
+FORGED_HASH_ACCEPTED                       = IMPOSSIBLE   (C04-02, C04-HASH01, C04-HASH02, C04-HASH03, C04-ACCEPTANCE01)
+ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED    = IMPOSSIBLE   (C04-02, C04-ACCEPTANCE02)
+CWD_MATCH_IMPLIES_ISOLATED_DATA_DIR        = FALSE        (C04-04 + C05-01, C04-ISOLATED01, C05-01a)
+MACHINE_LOCAL_ABSOLUTE_PATH_REQUIRED       = FALSE        (C04-03, C05-03, C04-PATH01, C04-PATH02, C04-ACCEPTANCE04, C05-03a, C05-03b)
+LIVE_QUALIFIED_WITHOUT_REVERIFIABLE_ARTIFACT = IMPOSSIBLE (C04-01, C04-ACCEPTANCE05)
+FORGED_HALT_REASON_ACCEPTED                = IMPOSSIBLE   (C05-02)
+ABSOLUTE_INSIDE_ROOT_PATH_ACCEPTED         = IMPOSSIBLE   (C05-03, C05-03a, C05-03b)
+CALLER_ASSERTED_EXPECTED_ACCEPTED          = IMPOSSIBLE   (C06-02, C06-03, C06-04, C06-05, C06-08)
+INVOCATION_PREMISE_RECOVERABLE             = TRUE         (C06-01, typed schema)
+LIVE_QUALIFIED_WITHOUT_INVOCATION          = IMPOSSIBLE   (C06-06, C06-07)
+```
+
 CLOSED.

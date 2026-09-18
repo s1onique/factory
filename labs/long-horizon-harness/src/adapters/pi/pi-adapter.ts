@@ -1506,6 +1506,26 @@ export function defaultPiCapabilities(
      * upstream JSON Event Stream Mode).
      */
     readonly invocation_mode?: "headless" | "interactive" | null;
+    /**
+     * CORRECTION06 C06-01..C06-06: durable invocation
+     * evidence (executable, argv, spawn cwd, protocol,
+     * invocation_mode, session_dir, no_session,
+     * env_subset, artifact_sha256, recorded_at). The
+     * verifier requires a typed invocation artifact on
+     * disk for every LIVE_QUALIFIED / LIVE_HALT axis
+     * and recomputes the oracle's `expected` value from
+     * it. Caller-supplied `expected` is no longer
+     * authoritative. `null` means no invocation evidence
+     * is available and the axis is demoted to
+     * LIVE_UNQUALIFIED.
+     */
+    readonly invocation_evidence?: import("../../adapter-common/invocation-evidence.js").InvocationEvidence | null;
+    /**
+     * CORRECTION06 C06-06: the repo-relative path to the
+     * invocation evidence artifact on disk. Required
+     * when `invocation_evidence` is supplied.
+     */
+    readonly invocation_evidence_path?: string | null;
   } = { session_capture: null, cancellation_halt: null },
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
@@ -1581,9 +1601,39 @@ export function defaultPiCapabilities(
     evidence.cancellation_halt !== null
       ? readObservedCancellation(evidence.cancellation_halt)
       : null;
-  const requestedCwd = evidence.requested_cwd ?? null;
+  // CORRECTION06 C06-02: requested_cwd is no longer
+  // authoritative for EXPLICIT_CWD; the verifier derives
+  // the expected cwd from the invocation artifact's
+  // spawn_cwd field. requested_cwd is retained as an
+  // input for backwards compatibility but is not used to
+  // build the evidence record.
+  const _requestedCwd = evidence.requested_cwd ?? null;
+  void _requestedCwd;
   const isolatedDir = evidence.isolated_session_dir ?? null;
   const invocationMode = evidence.invocation_mode ?? null;
+  // CORRECTION06 C06-06: durable invocation evidence is
+  // required for every LIVE_QUALIFIED axis. When the
+  // adapter is built from a fixture / unit test, the
+  // caller passes an InvocationEvidence object that
+  // captures the launch facts. When the live harness
+  // orchestrator constructs the capability document,
+  // the orchestrator writes the artifact to disk and
+  // passes the parsed object here.
+  const invocationEvidence = evidence.invocation_evidence ?? null;
+  const invocationEvidencePath = evidence.invocation_evidence_path ?? null;
+  // CORRECTION06 C06-02: derive expected values from
+  // the invocation artifact (NOT from the caller-supplied
+  // requested_cwd / isolated_session_dir /
+  // invocation_mode arguments). The recorded
+  // `evidence_relation.expected` is still set, but the
+  // verifier recomputes it from the artifact and
+  // refuses any document where the two disagree.
+  const invocationExpectedCwd =
+    invocationEvidence !== null ? invocationEvidence.spawn_cwd : null;
+  const invocationSessionDir =
+    invocationEvidence !== null ? invocationEvidence.session_dir : null;
+  const invocationNoSession =
+    invocationEvidence !== null ? invocationEvidence.no_session : false;
   type AxisEntry = {
     readonly lq: LiveQualificationState;
     readonly probe: CapabilityProbeEvidence | null;
@@ -1626,11 +1676,15 @@ export function defaultPiCapabilities(
     return child.startsWith(parent + "/");
   }
   function isolatedDataDirEntry(): AxisEntry {
-    if (isolatedDir === null || observedSession === null) {
+    if (
+      isolatedDir === null ||
+      observedSession === null ||
+      invocationSessionDir === null
+    ) {
       return emptyEntry;
     }
     const artifactPath = observedSession.artifact_path;
-    if (!isUnder(artifactPath, isolatedDir)) {
+    if (!isUnder(artifactPath, invocationSessionDir)) {
       return emptyEntry;
     }
     return {
@@ -1638,7 +1692,7 @@ export function defaultPiCapabilities(
       probe: buildIsolatedDataDirEvidence({
         artifact_path: observedSession.artifact_path,
         artifact_sha256: observedSession.artifact_sha256,
-        isolated_session_dir: isolatedDir,
+        isolated_session_dir: invocationSessionDir,
         observed_artifact_path: artifactPath,
       }),
     };
@@ -1655,21 +1709,70 @@ export function defaultPiCapabilities(
   // because the canonical Factory name for the upstream
   // JSON Event Stream Mode IS JSONL — the protocol
   // output (session envelope) is the proof.
+  //
+  // CORRECTION06 C06-03 / C06-04: the
+  // invocation_mode argument is no longer authoritative
+  // on its own. The invocation evidence artifact on
+  // disk is. If invocationEvidence is null the axis is
+  // demoted to LIVE_UNQUALIFIED.
+  //
+  // C06-04: STREAMING_EVENTS additionally requires the
+  // observation to contain >= 2 events. The canonical
+  // single-event session header is not sufficient
+  // evidence of streaming behavior.
   const headlessQualified =
-    invocationMode === "headless" && observedSession !== null;
+    invocationMode === "headless" &&
+    invocationEvidence !== null &&
+    invocationEvidence.invocation_mode === "headless" &&
+    observedSession !== null;
   const streamingQualified =
-    invocationMode === "headless" && observedSession !== null;
+    invocationMode === "headless" &&
+    invocationEvidence !== null &&
+    invocationEvidence.invocation_mode === "headless" &&
+    observedSession !== null &&
+    // Read the observation artifact and count lines.
+    // If there are >= 2 events, streaming qualifies.
+    (() => {
+      try {
+        const fs = require("node:fs");
+        const text = fs.readFileSync(observedSession.artifact_path, "utf8");
+        const lines = text.split("\n").filter((l: string) => l.trim().length > 0);
+        return lines.length >= 2;
+      } catch {
+        return false;
+      }
+    })();
+  // CORRECTION06 C06-02: EXPLICIT_CWD's expected value
+  // is the invocation artifact's spawn_cwd. If no
+  // invocation evidence is present, the axis is
+  // LIVE_UNQUALIFIED.
+  const explicitCwdQualified =
+    invocationEvidence !== null &&
+    observedSession !== null &&
+    invocationExpectedCwd !== null &&
+    invocationExpectedCwd !== "";
+  // CORRECTION06 C06-05: ISOLATED_DATA_DIR's expected
+  // value is the invocation artifact's session_dir, and
+  // the artifact_path must be the actual Pi runtime
+  // session file path under that dir (NOT the Factory
+  // fixture copy location).
+  const isolatedQualified =
+    invocationEvidence !== null &&
+    invocationSessionDir !== null &&
+    !invocationNoSession &&
+    observedSession !== null &&
+    isUnder(observedSession.artifact_path, invocationSessionDir);
   const liveEntries: Record<typeof CAPABILITY_KEYS[number], AxisEntry> = {
     HEADLESS: headlessQualified ? sessionProbe("HEADLESS", "session") : emptyEntry,
     STREAMING_EVENTS: streamingQualified
       ? sessionProbe("STREAMING_EVENTS", "session")
       : emptyEntry,
     EXPLICIT_CWD:
-      requestedCwd !== null
-        ? sessionProbe("EXPLICIT_CWD", requestedCwd)
+      explicitCwdQualified && invocationExpectedCwd !== null
+        ? sessionProbe("EXPLICIT_CWD", invocationExpectedCwd)
         : emptyEntry,
-    ISOLATED_DATA_DIR: isolatedDataDirEntry(),
-    JSONL: sessionProbe("JSONL", "session"),
+    ISOLATED_DATA_DIR: isolatedQualified ? isolatedDataDirEntry() : emptyEntry,
+    JSONL: invocationEvidence !== null ? sessionProbe("JSONL", "session") : emptyEntry,
     FINAL_JSON: emptyEntry,
     RPC: emptyEntry,
     TOKEN_USAGE: emptyEntry,
@@ -1679,7 +1782,7 @@ export function defaultPiCapabilities(
     PROVIDER_SELECTION: emptyEntry,
     TIMEOUT: { lq: "NOT_APPLICABLE", probe: null },
     CANCELLATION:
-      observedCancellation !== null
+      observedCancellation !== null && invocationEvidence !== null
         ? {
             lq: "LIVE_HALT",
             probe: haltProbeEvidence({
@@ -1734,11 +1837,31 @@ export function defaultPiCapabilities(
       );
     }
     liveMap[k] = entry.lq;
+    // CORRECTION06 C06-06: every LIVE_QUALIFIED /
+    // LIVE_HALT axis carries the invocation evidence
+    // path. The verifier re-reads this artifact and
+    // recomputes the oracle's `expected` value from it.
+    // The artifact path is the durable, repo-relative
+    // path to the JSON file that records the launch
+    // facts. The live orchestrator writes this file
+    // before calling `defaultPiCapabilities`; the unit
+    // tests write a fixture invocation artifact in the
+    // test tmpdir and pass the parsed object via the
+    // `invocation_evidence` argument.
+    let invocationEvidencePathForAxis: string | null = null;
+    if (
+      (entry.lq === "LIVE_QUALIFIED" || entry.lq === "LIVE_HALT") &&
+      invocationEvidence !== null &&
+      invocationEvidencePath !== null
+    ) {
+      invocationEvidencePathForAxis = invocationEvidencePath;
+    }
     axes[k] = {
       harness_capability: capabilities[k],
       live_qualification: entry.lq,
       probe_evidence: entry.probe,
       probe_evidence_path: entry.probe?.artifact_path ?? null,
+      invocation_evidence_path: invocationEvidencePathForAxis,
     };
   }
   if (Object.keys(capabilities).length !== Object.keys(empty.capabilities).length) {
