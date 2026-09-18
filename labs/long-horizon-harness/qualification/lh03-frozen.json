@@ -1,0 +1,53 @@
+{
+  "schema": "lh03-frozen-record/v1",
+  "frozen_at": "2026-09-18T00:00:00Z",
+  "subject": {
+    "commit": "7be31164b939f327c557847eb9a8b0c4ffd16b87",
+    "subject": "LH-03 CORRECTION10: route manifest artifact paths through resolveEvidencePath; bind manifest.capability to axis key"
+  },
+  "predecessor_chain": [
+    "d767e97 LH-03 CORRECTION09: capture_origin discriminator + full artifact reverification",
+    "1ae1a74 LH-03 CORRECTION07: bind terminal commit SHA into closure doc",
+    "8a0003d LH-03 CORRECTION07: invocation SHA bound externally, semantics derived from raw launch tuple",
+    "07c6b75 LH-03 CORRECTION06: bind terminal commit SHA into closure doc"
+  ],
+  "qualification": {
+    "deterministic_substrate": "GREEN_FROZEN",
+    "live_substrate": {
+      "pi": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+      "cline": "HALT_CLINE_NOT_INSTALLED"
+    }
+  },
+  "invariants_pinned_at_freeze": [
+    "REPLAY_VS_LIVE_SEPARATION = PASS",
+    "INVOCATION_BYTES_BOUND = PASS",
+    "INVOCATION_SEMANTICS_DERIVED = PASS",
+    "EXECUTION_MANIFEST_BYTES_BOUND = PASS",
+    "PROBE_EXECUTION_ID_BOUND = PASS",
+    "MANIFEST_CAPABILITY_AXIS_BOUND = PASS",
+    "OBSERVATION_BYTES_BOUND = PASS",
+    "STDOUT_BYTES_BOUND = PASS",
+    "STDERR_BYTES_BOUND = PASS",
+    "PROCESS_RESULT_BYTES_BOUND = PASS",
+    "NATIVE_ARTIFACT_BYTES_BOUND = PASS",
+    "ALL_DURABLE_PATHS_UNDER_COMMON_AUTHORITY = PASS",
+    "ORACLE_RECOMPUTED = PASS",
+    "REPLAY_FIXTURE_CAN_AUTHORIZE_LIVE = IMPOSSIBLE",
+    "CROSS_AXIS_MANIFEST_REUSE = IMPOSSIBLE",
+    "OUT_OF_REPO_MANIFEST_ARTIFACT_READ = IMPOSSIBLE",
+    "SYMLINK_ESCAPE_MANIFEST_ARTIFACT_READ = IMPOSSIBLE",
+    "HASH_VALID_BUT_UNAUTHORIZED_PATH_ACCEPTED = IMPOSSIBLE"
+  ],
+  "evidence_files": {
+    "lh03_targeted_tests": "test/lh03/lh03-correction*.test.ts + test/trust-boundary.test.ts",
+    "verifier_path": "src/adapter-common/evidence-verifier.ts",
+    "evidence_reader_path": "src/adapter-common/evidence-reader.ts",
+    "invocation_path": "src/adapter-common/invocation-evidence.ts",
+    "execution_capture_path": "src/adapter-common/execution-capture.ts",
+    "frozen_contract_guard": "scripts/verify_lh03_frozen.sh"
+  },
+  "doctrine": [
+    "Evidence is valid only when its bytes, identity, provenance, relationships, and authority to name those bytes are all independently checkable.",
+    "Replay can qualify determinism; only capture at the execution authority can qualify liveness."
+  ]
+}

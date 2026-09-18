@@ -28,6 +28,6 @@
     "resolveJsonModule": false,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "fault-lab/**/*.ts"],
   "exclude": ["build", "node_modules"]
 }
