@@ -1,5 +1,6 @@
 /**
- * Deterministic structural secret redaction (LH-03 §9).
+ * Deterministic structural secret redaction (LH-03 §9,
+ * CORRECTION02 C02-04).
  *
  * The redaction layer MUST defend against:
  *
@@ -9,6 +10,8 @@
  *   - Known provider token env values
  *   - Auth/session credential files
  *   - CLI --api-key arguments
+ *   - Exotic prototypes / accessor own-keys in incoming
+ *     records (validated BEFORE recursive traversal)
  *
  * Redaction operates at structural layers, not on the
  * combined output stream:
@@ -24,10 +27,20 @@
  *   - text: any bearer/api-key token-shaped substring is
  *     replaced (regex-based but bounded)
  *
+ * CORRECTION02 (C02-04): the recursive descent now
+ * validates prototype + own-property descriptors via
+ * `inspectOwnProperties()` BEFORE recursing. A record with
+ * an unexpected prototype or an accessor own-key is
+ * rejected with a redaction error rather than silently
+ * walked (which could trigger the accessor and produce a
+ * different output on every call).
+ *
  * The result is deterministic: same input always produces
  * the same redacted output. Re-parsing the redacted output
  * must still succeed (structural integrity is preserved).
  */
+
+import { inspectOwnProperties, isPlainInertRecord } from "../adapter-common/hostile-object.js";
 
 const REDACTION_TOKEN = "__FACTORY_REDACTED__";
 
@@ -194,20 +207,50 @@ export function redactArgv(argv: ReadonlyArray<string>): string[] {
  * for token-shaped substrings; this is the durable layer
  * defence that catches tokens embedded in message.text,
  * tool args, or any other free-text field.
+ *
+ * CORRECTION02 (C02-04): BEFORE recursing into a nested
+ * record or reading any value, the function checks the
+ * record's prototype. Anything that is not a plain inert
+ * record (Object.prototype or null) is rejected with
+ * `RedactionError`. This prevents an attacker from
+ * smuggling a class instance, exotic proxy, or accessor
+ * own-key into the durable ingest path. The redactor never
+ * invokes a value while walking the structure.
  */
+export class RedactionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RedactionError";
+  }
+}
+
 export function redactJsonRecord(
-  record: Readonly<Record<string, unknown>>,
+  record: unknown,
 ): Record<string, unknown> {
+  if (!isPlainInertRecord(record)) {
+    throw new RedactionError(
+      "redactJsonRecord: refusing to walk a non-plain-inert record (prototype check)",
+    );
+  }
+  // Admit all keys; this is the durable layer, not the
+  // closed-world decoder. We only reject accessors here so
+  // a getter cannot fire during redaction.
+  const own = inspectOwnProperties(record, new Set(Object.keys(record)));
+  if (!own.ok) {
+    throw new RedactionError(
+      `redactJsonRecord: hostile own-property (${own.violation.kind})`,
+    );
+  }
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(record)) {
     if (SENSITIVE_JSON_FIELDS.has(k) || SENSITIVE_JSON_FIELDS.has(k.toLowerCase())) {
       out[k] = REDACTION_TOKEN;
     } else if (typeof v === "string") {
       out[k] = redactText(v);
-    } else if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      out[k] = redactJsonRecord(v as Record<string, unknown>);
     } else if (Array.isArray(v)) {
       out[k] = redactJsonArray(v);
+    } else if (v !== null && typeof v === "object") {
+      out[k] = redactJsonRecord(v);
     } else {
       out[k] = v;
     }
@@ -217,11 +260,11 @@ export function redactJsonRecord(
 
 function redactJsonArray(arr: ReadonlyArray<unknown>): unknown[] {
   return arr.map((v) => {
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      return redactJsonRecord(v as Record<string, unknown>);
-    }
     if (Array.isArray(v)) {
       return redactJsonArray(v);
+    }
+    if (v !== null && typeof v === "object") {
+      return redactJsonRecord(v);
     }
     return v;
   });

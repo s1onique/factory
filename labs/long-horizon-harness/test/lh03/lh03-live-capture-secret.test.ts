@@ -45,7 +45,10 @@ const CANARIES = {
 function buildAdapter(): PiAdapter {
   return new PiAdapter({
     qualification: QUALIFIED_PI_IDENTITY,
-    capabilities: defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 1700000000000),
+    capabilities: defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 1700000000000, {
+      session_capture: "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      cancellation_halt: "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+    }),
     captured_at_ms: 1700000000000,
   });
 }

@@ -259,3 +259,92 @@ export function assertCapabilitiesComplete(
   if (missing.length === 0) return { ok: true };
   return { ok: false, missing };
 }
+
+/**
+ * Live-qualification invariant violation (LH-03 CORRECTION02,
+ * C02-01). A capability axis is illegal when:
+ *
+ *   - LIVE_QUALIFIED with `probe_evidence_path === null`
+ *     (the adapter claims a live probe ran, but no evidence
+ *     path binds it to a fixture).
+ *   - LIVE_HALT with `probe_evidence_path === null` (a
+ *     halt disposition must also be backed by the artifact
+ *     that recorded the halt).
+ *   - live_qualification axis disagrees with
+ *     live_qualification_by_key[k] or with capabilities[k]
+ *     at a SUPPORTED/LIVE_QUALIFIED pair (axes are the
+ *     canonical binding; both views must agree).
+ *   - capability_axes omits a key (every key in
+ *     CAPABILITY_KEYS must have an axis).
+ *
+ * The validator never throws; it returns the full list of
+ * violations so callers can report each one. The contract
+ * rejects `LIVE_QUALIFIED` claims that are not bound to a
+ * non-null evidence path. This is the axiom that closed
+ * the overclaim of CORRECTION01.
+ */
+export type LiveQualificationViolation =
+  | {
+      readonly kind: "live_qualified_without_evidence";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "live_halt_without_evidence";
+      readonly key: CapabilityKey;
+    }
+  | {
+      readonly kind: "axis_views_disagree";
+      readonly key: CapabilityKey;
+      readonly axes_axis: LiveQualificationState;
+      readonly map_axis: LiveQualificationState;
+    }
+  | {
+      readonly kind: "missing_axis";
+      readonly key: CapabilityKey;
+    };
+
+export function validateLiveQualification(
+  caps: HarnessCapabilities,
+):
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly violations: readonly LiveQualificationViolation[];
+    } {
+  const violations: LiveQualificationViolation[] = [];
+  for (const k of CAPABILITY_KEYS) {
+    const axis = caps.capability_axes[k];
+    if (axis === undefined) {
+      violations.push({ kind: "missing_axis", key: k });
+      continue;
+    }
+    if (axis.live_qualification !== caps.live_qualification_by_key[k]) {
+      violations.push({
+        kind: "axis_views_disagree",
+        key: k,
+        axes_axis: axis.live_qualification,
+        map_axis: caps.live_qualification_by_key[k],
+      });
+    }
+    if (
+      axis.live_qualification === "LIVE_QUALIFIED" &&
+      axis.probe_evidence_path === null
+    ) {
+      violations.push({
+        kind: "live_qualified_without_evidence",
+        key: k,
+      });
+    }
+    if (
+      axis.live_qualification === "LIVE_HALT" &&
+      axis.probe_evidence_path === null
+    ) {
+      violations.push({
+        kind: "live_halt_without_evidence",
+        key: k,
+      });
+    }
+  }
+  if (violations.length === 0) return { ok: true };
+  return { ok: false, violations };
+}

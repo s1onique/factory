@@ -879,9 +879,23 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
   /**
    * V1 surface. CORRECTION01 H-C03: UNKNOWN / MALFORMED
    * events are NOT silently dropped because `event === null`.
-   * The generator still emits a candidate_error so the run
-   * projector records the failure, and `awaitExit` exposes
-   * the corresponding adapter_errors.
+   * The generator emits a candidate_error so the run
+   * projector records the failure.
+   *
+   * CORRECTION02 (C02-03): `events()` is now a PURE
+   * projection over the durable classification log. It
+   * NEVER mutates `run.adapter_errors`. Classification
+   * happens exactly once at durable ingest (in
+   * `injectCapturedRun`/`ingestLiveCapture`), so
+   *
+   *   ONE_RAW_PROTOCOL_VIOLATION
+   *     =>
+   *   ONE_DURABLE_ADAPTER_ERROR
+   *
+   * Repeatedly consuming `events()` yields the same event
+   * stream and does NOT add new adapter_errors. The
+   * generator is observationally pure (modulo `state`
+   * transitions, which are idempotent).
    */
   async *events(handle: HarnessHandle): AsyncIterable<HarnessEvent> {
     const run = this.runs.get(handle);
@@ -890,40 +904,32 @@ export class PiAdapter implements HarnessAdapter, HarnessAdapterV2 {
     }
     run.state = "running";
     yield { type: "candidate_started", attemptId: handle };
-    let line = 0;
+    // Re-decode from `run.raw_events` to emit a HarnessEvent
+    // for every NORMALIZED classification. Decoder output is
+    // deterministic; this is a pure projection.
     for (const raw of run.raw_events) {
       const result = decodePiEvent(handle, raw);
-      line++;
-      // Always record classification (for normalization
-      // completeness audit), but only emit a HarnessEvent
-      // when one is produced.
       if (result.classification === "NORMALIZED" && result.event !== null) {
         yield result.event;
-      } else if (
-        result.classification === "MALFORMED" ||
-        result.classification === "UNKNOWN"
-      ) {
-        const code = result.classification === "MALFORMED"
+      }
+    }
+    // For every UNKNOWN/MALFORMED classification recorded
+    // at durable ingest time, yield a candidate_error.
+    // These do NOT mutate `adapter_errors`; they project the
+    // existing classifications back through the event
+    // channel.
+    for (const c of run.classifications) {
+      if (c.classification === "MALFORMED" || c.classification === "UNKNOWN") {
+        const code = c.classification === "MALFORMED"
           ? "MALFORMED_NATIVE_EVENT"
           : "UNKNOWN_NATIVE_EVENT";
-        run.adapter_errors.push(
-          adapterError(code, JSON.stringify({
-            line,
-            kind: result.kind,
-            classification: result.classification,
-            hostile_reason: result.hostile_reason,
-          })),
-        );
         yield {
           type: "candidate_error",
           attemptId: handle,
           code,
-          message: `line ${line} ${code} (kind=${result.kind}, reason=${result.hostile_reason})`,
+          message: `line ${c.line} ${code} (kind=${c.kind}, reason=${c.hostile_reason ?? "n/a"})`,
         };
       }
-      // META_OBSERVATION and KNOWN_BUT_UNMAPPED are silent
-      // on the events() channel but ARE recorded on
-      // run.classifications for the normalization audit.
     }
     if (run.process_exit_code === 0) {
       run.state = "completed";
@@ -1336,8 +1342,14 @@ export function makePiAdapter(args: {
 /**
  * Build the default capability document for Pi 0.85.1.
  *
- * CORRECTION01 (H-C06): the two axes are bound
- * independently:
+ * CORRECTION01 (H-C06) split the two axes; CORRECTION02
+ * (C02-01) makes every `LIVE_QUALIFIED` claim bind to a
+ * concrete probe evidence path. The contract-level
+ * invariant `LIVE_QUALIFIED ⇒ probe_evidence_path !== null`
+ * is enforced by `validateLiveQualification()` and by the
+ * assertion inside this function (an axis with state
+ * `LIVE_QUALIFIED` or `LIVE_HALT` cannot be paired with
+ * a null evidence path).
  *
  *   HARNESS_CAPABILITY:
  *     HEADLESS / STREAMING_EVENTS / FINAL_JSON / JSONL /
@@ -1350,29 +1362,61 @@ export function makePiAdapter(args: {
  *     TIMEOUT                           — UNSUPPORTED
  *     RESOURCE_USAGE                    — UNAVAILABLE
  *
- *   LIVE_QUALIFICATION_STATE:
- *     HEADLESS / STREAMING_EVENTS / FINAL_JSON / JSONL /
- *     EXPLICIT_CWD / ISOLATED_DATA_DIR / RPC /
- *     TOKEN_USAGE                       — LIVE_QUALIFIED
+ *   LIVE_QUALIFICATION_STATE (CORRECTION02):
+ *     HEADLESS / STREAMING_EVENTS / EXPLICIT_CWD /
+ *       ISOLATED_DATA_DIR / JSONL        — LIVE_QUALIFIED
+ *       (observable from the captured `session` envelope +
+ *        a basic prompt)
  *     CANCELLATION                      — LIVE_HALT
  *       (probe was attempted; halted at
  *        HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE)
- *     TOOL_EVENT_VISIBILITY             — LIVE_UNQUALIFIED
- *       (cannot be live-qualified from a capture containing
- *        only a session envelope; requires a multi-event
- *        capture with at least one tool_execution_* event.)
- *     MODEL_SELECTION / PROVIDER_SELECTION /
- *     SESSION_RESUME / SESSION_FORK /
- *     SESSION_ARTIFACTS                 — LIVE_UNQUALIFIED
+ *     FINAL_JSON / RPC / TOKEN_USAGE /
+ *       TOOL_EVENT_VISIBILITY /
+ *       SESSION_RESUME / SESSION_FORK /
+ *       MODEL_SELECTION /
+ *       PROVIDER_SELECTION /
+ *       SESSION_ARTIFACTS                — LIVE_UNQUALIFIED
+ *       (no live probe evidence exists for this run; the
+ *        harness exposes them but we have not run a probe
+ *        that exercises them yet)
  *     AUTO_APPROVAL / TIMEOUT /
- *     RESOURCE_USAGE                    — NOT_APPLICABLE
+ *       RESOURCE_USAGE                   — NOT_APPLICABLE
+ *
+ * FINAL_JSON semantics (CORRECTION02 explicit): the harness
+ *   capability `FINAL_JSON` is the JSON event-stream mode
+ *   ("JSONL — one JSON object per line"), NOT a single
+ *   terminal JSON result. The capability is bound to the
+ *   stream shape; a single `session` envelope is sufficient
+ *   evidence for `STREAMING_EVENTS`/`JSONL` but is not
+ *   sufficient evidence to call this capability
+ *   `LIVE_QUALIFIED`. To live-qualify `FINAL_JSON`, a probe
+ *   must observe a real terminal payload event from the
+ *   stream.
+ *
+ * RPC semantics: per upstream v0.85.1
+ *   `packages/coding-agent/docs/rpc.md`, RPC is a real
+ *   bidirectional stdin/stdout protocol. A LIVE_QUALIFIED
+ *   claim requires a probe that opens the RPC session,
+ *   sends a command, and validates a response. No such
+ *   evidence exists in this qualification campaign, so
+ *   RPC stays LIVE_UNQUALIFIED.
+ *
+ * TOKEN_USAGE semantics: per upstream
+ *   `packages/coding-agent/docs/json.md`, token usage is
+ *   provider-reported and may remain zero until completion.
+ *   Our captured run halted at the session envelope, so
+ *   no `message_update.usage` event was observed; the
+ *   capability stays LIVE_UNQUALIFIED.
  */
 export function defaultPiCapabilities(
   identity: HarnessQualificationIdentity,
   discovered_at_ms: number,
-  live: {
-    readonly probe_evidence_path: string | null;
-  } = { probe_evidence_path: null },
+  evidence: {
+    /** Path to the captured envelope evidence (session). */
+    readonly session_capture: string | null;
+    /** Path to the cancellation-halt evidence artifact. */
+    readonly cancellation_halt: string | null;
+  } = { session_capture: null, cancellation_halt: null },
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
   const capabilities: Record<typeof CAPABILITY_KEYS[number], CapabilityState> = {
@@ -1395,40 +1439,74 @@ export function defaultPiCapabilities(
     RESOURCE_USAGE: "UNAVAILABLE",
     SESSION_ARTIFACTS: "SUPPORTED",
   };
-  const liveMap: Record<typeof CAPABILITY_KEYS[number], LiveQualificationState> = {
-    HEADLESS: "LIVE_QUALIFIED",
-    STREAMING_EVENTS: "LIVE_QUALIFIED",
-    FINAL_JSON: "LIVE_QUALIFIED",
-    JSONL: "LIVE_QUALIFIED",
-    RPC: "LIVE_QUALIFIED",
-    SESSION_RESUME: "LIVE_UNQUALIFIED",
-    SESSION_FORK: "LIVE_UNQUALIFIED",
-    EXPLICIT_CWD: "LIVE_QUALIFIED",
-    ISOLATED_DATA_DIR: "LIVE_QUALIFIED",
-    MODEL_SELECTION: "LIVE_UNQUALIFIED",
-    PROVIDER_SELECTION: "LIVE_UNQUALIFIED",
-    TIMEOUT: "NOT_APPLICABLE",
-    CANCELLATION: "LIVE_HALT",
-    AUTO_APPROVAL: "NOT_APPLICABLE",
-    TOOL_EVENT_VISIBILITY: "LIVE_UNQUALIFIED",
-    TOKEN_USAGE: "LIVE_QUALIFIED",
-    RESOURCE_USAGE: "NOT_APPLICABLE",
-    SESSION_ARTIFACTS: "LIVE_UNQUALIFIED",
-  };
+  // (live_qualification, evidence_path) — must satisfy the
+  // invariant `LIVE_QUALIFIED ⇒ evidence_path !== null`
+  // and `LIVE_HALT ⇒ evidence_path !== null`. Any entry
+  // claiming LIVE_QUALIFIED without a non-null evidence
+  // path is a CORRECTION02 defect.
+  const liveEntries: ReadonlyArray<
+    readonly [
+      typeof CAPABILITY_KEYS[number],
+      LiveQualificationState,
+      string | null,
+    ]
+  > = [
+    ["HEADLESS", "LIVE_QUALIFIED", evidence.session_capture],
+    ["STREAMING_EVENTS", "LIVE_QUALIFIED", evidence.session_capture],
+    ["EXPLICIT_CWD", "LIVE_QUALIFIED", evidence.session_capture],
+    ["ISOLATED_DATA_DIR", "LIVE_QUALIFIED", evidence.session_capture],
+    ["JSONL", "LIVE_QUALIFIED", evidence.session_capture],
+    ["FINAL_JSON", "LIVE_UNQUALIFIED", null],
+    ["RPC", "LIVE_UNQUALIFIED", null],
+    ["TOKEN_USAGE", "LIVE_UNQUALIFIED", null],
+    ["SESSION_RESUME", "LIVE_UNQUALIFIED", null],
+    ["SESSION_FORK", "LIVE_UNQUALIFIED", null],
+    ["MODEL_SELECTION", "LIVE_UNQUALIFIED", null],
+    ["PROVIDER_SELECTION", "LIVE_UNQUALIFIED", null],
+    ["TIMEOUT", "NOT_APPLICABLE", null],
+    ["CANCELLATION", "LIVE_HALT", evidence.cancellation_halt],
+    ["AUTO_APPROVAL", "NOT_APPLICABLE", null],
+    ["TOOL_EVENT_VISIBILITY", "LIVE_UNQUALIFIED", null],
+    ["SESSION_ARTIFACTS", "LIVE_UNQUALIFIED", null],
+    ["RESOURCE_USAGE", "NOT_APPLICABLE", null],
+  ];
+  const liveMap: Record<typeof CAPABILITY_KEYS[number], LiveQualificationState> =
+    {} as Record<typeof CAPABILITY_KEYS[number], LiveQualificationState>;
   const axes: Record<typeof CAPABILITY_KEYS[number], CapabilityAxis> = {} as Record<
     typeof CAPABILITY_KEYS[number],
     CapabilityAxis
   >;
-  for (const k of CAPABILITY_KEYS) {
+  for (const [k, lq, ev] of liveEntries) {
+    if (lq === "LIVE_QUALIFIED" && ev === null) {
+      throw new Error(
+        `Pi default capability document attempted LIVE_QUALIFIED with null evidence for key ${k}`,
+      );
+    }
+    if (lq === "LIVE_HALT" && ev === null) {
+      throw new Error(
+        `Pi default capability document attempted LIVE_HALT with null evidence for key ${k}`,
+      );
+    }
+    liveMap[k] = lq;
     axes[k] = {
       harness_capability: capabilities[k],
-      live_qualification: liveMap[k],
-      probe_evidence_path: live.probe_evidence_path,
+      live_qualification: lq,
+      probe_evidence_path: ev,
     };
   }
   if (Object.keys(capabilities).length !== Object.keys(empty.capabilities).length) {
     throw new Error(
       "Pi default capability document does not match the closed-world key list",
+    );
+  }
+  if (Object.keys(liveMap).length !== Object.keys(empty.capabilities).length) {
+    throw new Error(
+      "Pi live_qualification_by_key does not match the closed-world key list",
+    );
+  }
+  if (Object.keys(axes).length !== Object.keys(empty.capabilities).length) {
+    throw new Error(
+      "Pi capability_axes does not match the closed-world key list",
     );
   }
   return {

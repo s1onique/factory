@@ -36,7 +36,10 @@ function pi(): PiAdapter {
   });
   return new PiAdapter({
     qualification: id,
-    capabilities: defaultPiCapabilities(id, 0),
+    capabilities: defaultPiCapabilities(id, 0, {
+      session_capture: "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      cancellation_halt: "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+    }),
     captured_at_ms: 0,
   });
 }

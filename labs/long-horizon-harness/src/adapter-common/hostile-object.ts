@@ -30,11 +30,39 @@ export type HostileFieldViolation =
   | { readonly kind: "extra_string_key"; readonly key: string }
   | { readonly kind: "symbol_own_key"; readonly description: string }
   | { readonly kind: "accessor_own_key"; readonly key: string }
-  | { readonly kind: "non_enumerable_own_key"; readonly key: string };
+  | { readonly kind: "non_enumerable_own_key"; readonly key: string }
+  | { readonly kind: "unexpected_prototype"; readonly got: string }
+  | { readonly kind: "not_record" };
 
 export type HostileObjectReport =
   | { readonly ok: true }
   | { readonly ok: false; readonly violation: HostileFieldViolation };
+
+/**
+ * Whether a parsed value is an inert, prototype-clean
+ * record (CORRECTION02 C02-04).
+ *
+ * A "plain" record is a non-null, non-array object whose
+ * prototype is exactly `Object.prototype` or `null`. Any
+ * other prototype (class instance, exotic proxy, etc.)
+ * is rejected. This is the durable-path safety net: a
+ * hand-crafted native event must not be able to smuggle
+ * class methods or callable prototypes past redaction.
+ *
+ * The check is intentionally cheap: it does NOT invoke
+ * any value, only inspects `Object.getPrototypeOf`. That
+ * means an object with a getter on `__proto__` cannot
+ * trigger the getter through this call.
+ */
+export function isPlainInertRecord(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 /**
  * Inspect a parsed native record for hostile own-property
@@ -50,8 +78,17 @@ export function inspectOwnProperties(
   value: unknown,
   admitted: ReadonlySet<string>,
 ): HostileObjectReport {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, violation: { kind: "non_enumerable_own_key", key: "<not-an-object>" } };
+  if (!isPlainInertRecord(value)) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return { ok: false, violation: { kind: "not_record" } };
+    }
+    return {
+      ok: false,
+      violation: {
+        kind: "unexpected_prototype",
+        got: String(Object.getPrototypeOf(value)),
+      },
+    };
   }
   const obj = value as object;
   // Detect non-enumerable own keys (Object.defineProperty

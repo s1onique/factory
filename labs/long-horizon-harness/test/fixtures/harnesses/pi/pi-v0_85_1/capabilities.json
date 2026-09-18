@@ -33,9 +33,9 @@
   "live_qualification_by_key": {
     "HEADLESS": "LIVE_QUALIFIED",
     "STREAMING_EVENTS": "LIVE_QUALIFIED",
-    "FINAL_JSON": "LIVE_QUALIFIED",
+    "FINAL_JSON": "LIVE_UNQUALIFIED",
     "JSONL": "LIVE_QUALIFIED",
-    "RPC": "LIVE_QUALIFIED",
+    "RPC": "LIVE_UNQUALIFIED",
     "SESSION_RESUME": "LIVE_UNQUALIFIED",
     "SESSION_FORK": "LIVE_UNQUALIFIED",
     "EXPLICIT_CWD": "LIVE_QUALIFIED",
@@ -46,7 +46,7 @@
     "CANCELLATION": "LIVE_HALT",
     "AUTO_APPROVAL": "NOT_APPLICABLE",
     "TOOL_EVENT_VISIBILITY": "LIVE_UNQUALIFIED",
-    "TOKEN_USAGE": "LIVE_QUALIFIED",
+    "TOKEN_USAGE": "LIVE_UNQUALIFIED",
     "RESOURCE_USAGE": "NOT_APPLICABLE",
     "SESSION_ARTIFACTS": "LIVE_UNQUALIFIED"
   },
@@ -54,26 +54,26 @@
     "HEADLESS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": null
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "STREAMING_EVENTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": null
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "FINAL_JSON": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
+      "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence_path": null
     },
     "JSONL": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": null
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "RPC": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
+      "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence_path": null
     },
     "SESSION_RESUME": {
@@ -89,12 +89,12 @@
     "EXPLICIT_CWD": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": null
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "ISOLATED_DATA_DIR": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": null
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "MODEL_SELECTION": {
       "harness_capability": "SUPPORTED",
@@ -114,7 +114,7 @@
     "CANCELLATION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_HALT",
-      "probe_evidence_path": null
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
     },
     "AUTO_APPROVAL": {
       "harness_capability": "UNSUPPORTED",
@@ -128,7 +128,7 @@
     },
     "TOKEN_USAGE": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
+      "live_qualification": "LIVE_UNQUALIFIED",
       "probe_evidence_path": null
     },
     "RESOURCE_USAGE": {

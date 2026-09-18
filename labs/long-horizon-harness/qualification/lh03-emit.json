@@ -1,0 +1,66 @@
+{
+  "lh03_emit_kind": "DETERMINISTIC_CONSOLIDATED_EMIT",
+  "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
+  "lh03_correction": "CORRECTION02",
+  "generated_at_iso": "2026-09-18T00:00:00.000Z",
+  "input_evidence": {
+    "identity": {
+      "harness_name": "pi",
+      "package_name": "@earendil-works/pi-coding-agent",
+      "package_version": "0.85.1",
+      "executable_path": "/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+      "executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
+      "reported_cli_version": "0.85.1",
+      "protocol_mode": "JSONL_EVENTS",
+      "native_schema_fingerprint": "411f371861a4a564052194e954efb52d0ab891add3398285a640edac4bde7cf1"
+    },
+    "session_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+    "process_result_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
+  },
+  "raw_protocol_lines_seen": 1,
+  "native_event_classifications": [
+    {
+      "line": 1,
+      "kind": "session",
+      "classification": "META_OBSERVATION",
+      "normalized_to_harness_event": false
+    }
+  ],
+  "adapter_errors_after_ingest": 0,
+  "normalization_completeness": "NORMALIZATION_COMPLETE",
+  "halt_disposition": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+  "halt_reason": "No API key found for the selected model.",
+  "normalized_event_stream": [
+    { "type": "candidate_started", "attemptId": "pi-0_85_1-envelope" }
+  ],
+  "live_qualification_overlay": {
+    "HEADLESS": "LIVE_QUALIFIED",
+    "STREAMING_EVENTS": "LIVE_QUALIFIED",
+    "FINAL_JSON": "LIVE_UNQUALIFIED",
+    "JSONL": "LIVE_QUALIFIED",
+    "RPC": "LIVE_UNQUALIFIED",
+    "SESSION_RESUME": "LIVE_UNQUALIFIED",
+    "SESSION_FORK": "LIVE_UNQUALIFIED",
+    "EXPLICIT_CWD": "LIVE_QUALIFIED",
+    "ISOLATED_DATA_DIR": "LIVE_QUALIFIED",
+    "MODEL_SELECTION": "LIVE_UNQUALIFIED",
+    "PROVIDER_SELECTION": "LIVE_UNQUALIFIED",
+    "TIMEOUT": "NOT_APPLICABLE",
+    "CANCELLATION": "LIVE_HALT",
+    "AUTO_APPROVAL": "NOT_APPLICABLE",
+    "TOOL_EVENT_VISIBILITY": "LIVE_UNQUALIFIED",
+    "TOKEN_USAGE": "LIVE_UNQUALIFIED",
+    "RESOURCE_USAGE": "NOT_APPLICABLE",
+    "SESSION_ARTIFACTS": "LIVE_UNQUALIFIED"
+  },
+  "evidence_paths": {
+    "session_capture": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+    "cancellation_halt": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+    "stdout": "test/fixtures/harnesses/pi/pi-v0_85_1/stdout.jsonl",
+    "stderr": "test/fixtures/harnesses/pi/pi-v0_85_1/stderr.txt",
+    "environment": "test/fixtures/harnesses/pi/pi-v0_85_1/environment.json",
+    "projection": "test/fixtures/harnesses/pi/pi-v0_85_1/projection.json",
+    "normalized_phase_e": "test/fixtures/harnesses/pi/pi-v0_85_1/normalized-phase-e.jsonl",
+    "metrics": "test/fixtures/harnesses/pi/pi-v0_85_1/metrics.json"
+  }
+}

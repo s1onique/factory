@@ -47,7 +47,10 @@ test("V1-PRES-02: Pi adapter exposes V1 methods", async () => {
   });
   const a = new PiAdapter({
     qualification: id,
-    capabilities: defaultPiCapabilities(id, 0),
+    capabilities: defaultPiCapabilities(id, 0, {
+      session_capture: "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      cancellation_halt: "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+    }),
     captured_at_ms: 0,
   });
   assert.equal(a.kind, "pi");

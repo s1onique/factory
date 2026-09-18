@@ -32,7 +32,27 @@
       "token_visibility": "SUPPORTED",
       "resource_visibility": "UNAVAILABLE",
       "replay_fixture": "test/fixtures/harnesses/pi/pi-v0_85_1",
-      "qualification_status": "QUALIFIED_WITH_LIMITATIONS"
+      "qualification_status": "QUALIFIED_WITH_LIMITATIONS",
+      "live_qualification": {
+        "HEADLESS": "LIVE_QUALIFIED",
+        "STREAMING_EVENTS": "LIVE_QUALIFIED",
+        "FINAL_JSON": "LIVE_UNQUALIFIED",
+        "JSONL": "LIVE_QUALIFIED",
+        "RPC": "LIVE_UNQUALIFIED",
+        "SESSION_RESUME": "LIVE_UNQUALIFIED",
+        "SESSION_FORK": "LIVE_UNQUALIFIED",
+        "EXPLICIT_CWD": "LIVE_QUALIFIED",
+        "ISOLATED_DATA_DIR": "LIVE_QUALIFIED",
+        "MODEL_SELECTION": "LIVE_UNQUALIFIED",
+        "PROVIDER_SELECTION": "LIVE_UNQUALIFIED",
+        "TIMEOUT": "NOT_APPLICABLE",
+        "CANCELLATION": "LIVE_HALT",
+        "AUTO_APPROVAL": "NOT_APPLICABLE",
+        "TOOL_EVENT_VISIBILITY": "LIVE_UNQUALIFIED",
+        "TOKEN_USAGE": "LIVE_UNQUALIFIED",
+        "RESOURCE_USAGE": "NOT_APPLICABLE",
+        "SESSION_ARTIFACTS": "LIVE_UNQUALIFIED"
+      }
     },
     {
       "candidate": "cline",

@@ -45,11 +45,13 @@ export {
   isLiveQualificationState,
   emptyCapabilities,
   assertCapabilitiesComplete,
+  validateLiveQualification,
   type HarnessCapabilities,
   type CapabilityKey,
   type CapabilityState,
   type LiveQualificationState,
   type CapabilityAxis,
+  type LiveQualificationViolation,
 } from "./harness-capabilities.js";
 
 export {
