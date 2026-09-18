@@ -133,6 +133,17 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // that may call JSON.parse; candidate-specific adapters
     // MUST route harness-native lines through it.
     "src/adapter-common/json-codec.ts",
+    // LH-03 CORRECTION03: the typed semantic probe
+    // evidence reader (artifact_sha256 + JSON.parse on
+    // the captured session envelope and cancellation-
+    // halt artifact). This is the trust boundary for
+    // raw-bytes -> typed `CapabilityProbeEvidence`
+    // conversion; candidate-specific adapters MUST
+    // route evidence through it. JSON.parse here is
+    // bounded to the closed-world session envelope
+    // and cancellation-halt shapes that the validator
+    // inspects downstream.
+    "src/adapter-common/evidence-reader.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

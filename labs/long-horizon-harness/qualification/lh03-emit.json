@@ -1,7 +1,12 @@
 {
   "lh03_emit_kind": "DETERMINISTIC_CONSOLIDATED_EMIT",
   "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
-  "lh03_correction": "CORRECTION02",
+  "lh03_correction": "CORRECTION03",
+  "lh03_correction_history": [
+    "CORRECTION01",
+    "CORRECTION02",
+    "CORRECTION03"
+  ],
   "generated_at_iso": "2026-09-18T00:00:00.000Z",
   "input_evidence": {
     "identity": {
@@ -15,7 +20,12 @@
       "native_schema_fingerprint": "411f371861a4a564052194e954efb52d0ab891add3398285a640edac4bde7cf1"
     },
     "session_capture_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
-    "process_result_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
+    "session_capture_sha256": "filled_at_emit_time",
+    "process_result_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+    "process_result_sha256": "filled_at_emit_time",
+    "requested_cwd": "/private/tmp/pi-live",
+    "observed_session_cwd": "/private/tmp/pi-live",
+    "observed_halt_disposition": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE"
   },
   "raw_protocol_lines_seen": 1,
   "native_event_classifications": [
@@ -52,6 +62,57 @@
     "TOKEN_USAGE": "LIVE_UNQUALIFIED",
     "RESOURCE_USAGE": "NOT_APPLICABLE",
     "SESSION_ARTIFACTS": "LIVE_UNQUALIFIED"
+  },
+  "semantic_probe_evidence_summary": {
+    "HEADLESS": {
+      "probe_kind": "SESSION_ENVELOPE",
+      "expected": "session",
+      "observed": "session",
+      "disposition": "PASS"
+    },
+    "STREAMING_EVENTS": {
+      "probe_kind": "SESSION_ENVELOPE",
+      "expected": "session",
+      "observed": "session",
+      "disposition": "PASS"
+    },
+    "JSONL": {
+      "probe_kind": "SESSION_ENVELOPE",
+      "expected": "session",
+      "observed": "session",
+      "disposition": "PASS"
+    },
+    "EXPLICIT_CWD": {
+      "probe_kind": "SESSION_ENVELOPE",
+      "expected": "/private/tmp/pi-live",
+      "observed": "/private/tmp/pi-live",
+      "disposition": "PASS"
+    },
+    "ISOLATED_DATA_DIR": {
+      "probe_kind": "SESSION_ENVELOPE",
+      "expected": "/private/tmp/pi-live",
+      "observed": "/private/tmp/pi-live",
+      "disposition": "PASS"
+    },
+    "CANCELLATION": {
+      "probe_kind": "CANCELLATION_HALT",
+      "expected": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+      "observed": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+      "disposition": "HALT"
+    },
+    "FINAL_JSON": {
+      "probe_kind": "NOT_RUN",
+      "harness_capability": "UNSUPPORTED",
+      "rationale": "FINAL_JSON is the JSON Event Stream Mode; the canonical Factory name is JSONL. FINAL_JSON is retained for backwards compatibility with the closed-world key list only."
+    },
+    "RPC": {
+      "probe_kind": "NOT_RUN",
+      "rationale": "No bidirectional RPC probe was executed in this qualification campaign."
+    },
+    "TOKEN_USAGE": {
+      "probe_kind": "NOT_RUN",
+      "rationale": "No message_update.usage event was observed; capture halted at the session envelope."
+    }
   },
   "evidence_paths": {
     "session_capture": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",

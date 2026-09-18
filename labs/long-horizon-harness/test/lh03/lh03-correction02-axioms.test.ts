@@ -52,6 +52,7 @@ test("C02-01a: validateLiveQualification rejects LIVE_QUALIFIED with null eviden
       HEADLESS: {
         harness_capability: "SUPPORTED" as const,
         live_qualification: "LIVE_QUALIFIED" as const,
+        probe_evidence: null,
         probe_evidence_path: null,
       },
     },
@@ -77,6 +78,7 @@ test("C02-01b: validateLiveQualification rejects LIVE_HALT with null evidence", 
       CANCELLATION: {
         harness_capability: "SUPPORTED" as const,
         live_qualification: "LIVE_HALT" as const,
+        probe_evidence: null,
         probe_evidence_path: null,
       },
     },
@@ -92,25 +94,42 @@ test("C02-01b: validateLiveQualification rejects LIVE_HALT with null evidence", 
   assert.ok(halt, "expected live_halt_without_evidence violation");
 });
 
-test("C02-01c: defaultPiCapabilities refuses to construct LIVE_QUALIFIED with null evidence", () => {
-  // Empty evidence -> HEADLESS would be LIVE_QUALIFIED
-  // without an evidence path. The builder must throw.
-  assert.throws(
-    () => defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0),
-    /LIVE_QUALIFIED with null evidence/,
+test("C02-01c: defaultPiCapabilities refuses to construct LIVE_QUALIFIED with null probe_evidence", () => {
+  // Empty evidence -> HEADLESS cannot be LIVE_QUALIFIED
+  // (the observed-session reader returns null and the
+  // builder demotes to LIVE_UNQUALIFIED, never fabricates
+  // a PASS).
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0);
+  assert.equal(
+    caps.capability_axes.HEADLESS.live_qualification,
+    "LIVE_UNQUALIFIED",
+    "HEADLESS must be LIVE_UNQUALIFIED with no evidence on disk",
+  );
+  assert.equal(
+    caps.capability_axes.HEADLESS.probe_evidence,
+    null,
+    "HEADLESS probe_evidence must be null with no evidence on disk",
   );
 });
 
-test("C02-01d: defaultPiCapabilities refuses to construct LIVE_HALT with null evidence", () => {
+test("C02-01d: defaultPiCapabilities refuses to construct LIVE_HALT with null probe_evidence", () => {
   // session_capture without cancellation_halt -> CANCELLATION
-  // is LIVE_HALT with null evidence. The builder must throw.
-  assert.throws(
-    () =>
-      defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
-        session_capture: "any/path.jsonl",
-        cancellation_halt: null,
-      }),
-    /LIVE_HALT with null evidence/,
+  // cannot be LIVE_HALT (the observed-cancellation reader
+  // returns null and the builder demotes to
+  // LIVE_UNQUALIFIED, never fabricates a HALT).
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    session_capture: "any/path.jsonl",
+    cancellation_halt: null,
+  });
+  assert.equal(
+    caps.capability_axes.CANCELLATION.live_qualification,
+    "LIVE_UNQUALIFIED",
+    "CANCELLATION must be LIVE_UNQUALIFIED without cancellation-halt evidence on disk",
+  );
+  assert.equal(
+    caps.capability_axes.CANCELLATION.probe_evidence,
+    null,
+    "CANCELLATION probe_evidence must be null without cancellation-halt evidence on disk",
   );
 });
 
@@ -145,7 +164,7 @@ test("C02-02a: qualification/lh03-emit.json exists and is non-empty", () => {
   assert.ok(text.length > 0, "lh03-emit.json must not be empty");
   const parsed = JSON.parse(text) as Record<string, unknown>;
   assert.equal(parsed.lh03_emit_kind, "DETERMINISTIC_CONSOLIDATED_EMIT");
-  assert.equal(parsed.lh03_correction, "CORRECTION02");
+  assert.equal(parsed.lh03_correction, "CORRECTION03");
   assert.ok(parsed.input_evidence, "must reference real input evidence");
   assert.ok(parsed.evidence_paths, "must list real evidence paths");
   const ep = parsed.evidence_paths as Record<string, unknown>;

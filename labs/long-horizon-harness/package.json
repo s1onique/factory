@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "node --import tsx scripts/run-tests.mjs",
     "test:lab": "node --import tsx scripts/run-tests.mjs",
-    "test:lh03": "node --import tsx --test --test-reporter=spec test/lh03/lh03-schema-fingerprint.test.ts test/lh03/lh03-identity.test.ts test/lh03/lh03-secret-redaction.test.ts test/lh03/lh03-unknown-events.test.ts test/lh03/lh03-cross-adapter-conformance.test.ts test/lh03/lh03-version-drift.test.ts test/lh03/lh03-negative-corpus.test.ts test/lh03/lh03-frozen-contract-guard.test.ts test/lh03/lh03-v1-contract-preservation.test.ts test/lh03/lh03-live-capture-secret.test.ts test/lh03/lh03-correction02-axioms.test.ts",
+    "test:lh03": "node --import tsx --test --test-reporter=spec test/lh03/lh03-schema-fingerprint.test.ts test/lh03/lh03-identity.test.ts test/lh03/lh03-secret-redaction.test.ts test/lh03/lh03-unknown-events.test.ts test/lh03/lh03-cross-adapter-conformance.test.ts test/lh03/lh03-version-drift.test.ts test/lh03/lh03-negative-corpus.test.ts test/lh03/lh03-frozen-contract-guard.test.ts test/lh03/lh03-v1-contract-preservation.test.ts test/lh03/lh03-live-capture-secret.test.ts test/lh03/lh03-correction02-axioms.test.ts test/lh03/lh03-correction03-axioms.test.ts",
     "test:process": "node --import tsx --test --test-reporter=spec test/process/process-group.test.ts test/process/supervised-process.test.ts",
     "qualify:process-live": "FACTORY_STRICT_PROCESS_LIVE=1 node --import tsx --test --test-reporter=spec --test-timeout=30000 test/process/process-live-qualification.test.ts",
     "test:fixture-contract": "node --import tsx --test --test-reporter=spec test/process/fixture-contract.test.ts",

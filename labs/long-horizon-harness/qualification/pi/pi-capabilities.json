@@ -13,7 +13,7 @@
   "capabilities": {
     "HEADLESS": "SUPPORTED",
     "STREAMING_EVENTS": "SUPPORTED",
-    "FINAL_JSON": "SUPPORTED",
+    "FINAL_JSON": "UNSUPPORTED",
     "JSONL": "SUPPORTED",
     "RPC": "SUPPORTED",
     "SESSION_RESUME": "SUPPORTED",
@@ -54,91 +54,169 @@
     "HEADLESS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence": {
+        "capability": "HEADLESS",
+        "probe_kind": "SESSION_ENVELOPE",
+        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+        "evidence_relation": {
+          "expected": "session",
+          "observed": "session"
+        },
+        "disposition": "PASS"
+      },
+      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "STREAMING_EVENTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence": {
+        "capability": "STREAMING_EVENTS",
+        "probe_kind": "SESSION_ENVELOPE",
+        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+        "evidence_relation": {
+          "expected": "session",
+          "observed": "session"
+        },
+        "disposition": "PASS"
+      },
+      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "FINAL_JSON": {
-      "harness_capability": "SUPPORTED",
+      "harness_capability": "UNSUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "JSONL": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence": {
+        "capability": "JSONL",
+        "probe_kind": "SESSION_ENVELOPE",
+        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+        "evidence_relation": {
+          "expected": "session",
+          "observed": "session"
+        },
+        "disposition": "PASS"
+      },
+      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "RPC": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "SESSION_RESUME": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "SESSION_FORK": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "EXPLICIT_CWD": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence": {
+        "capability": "EXPLICIT_CWD",
+        "probe_kind": "SESSION_ENVELOPE",
+        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+        "evidence_relation": {
+          "expected": "/private/tmp/pi-live",
+          "observed": "/private/tmp/pi-live"
+        },
+        "disposition": "PASS"
+      },
+      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "ISOLATED_DATA_DIR": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence": {
+        "capability": "ISOLATED_DATA_DIR",
+        "probe_kind": "SESSION_ENVELOPE",
+        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
+        "evidence_relation": {
+          "expected": "/private/tmp/pi-live",
+          "observed": "/private/tmp/pi-live"
+        },
+        "disposition": "PASS"
+      },
+      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "MODEL_SELECTION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "PROVIDER_SELECTION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "TIMEOUT": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "NOT_APPLICABLE",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "CANCELLATION": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_HALT",
-      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
+      "probe_evidence": {
+        "capability": "CANCELLATION",
+        "probe_kind": "CANCELLATION_HALT",
+        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+        "artifact_sha256": "14d6d2a62ae8c523d71e818fc38df01d750bca9f7aa4a9d17650823196d1473f",
+        "evidence_relation": {
+          "expected": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+          "observed": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE"
+        },
+        "disposition": "HALT"
+      },
+      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
     },
     "AUTO_APPROVAL": {
       "harness_capability": "UNSUPPORTED",
       "live_qualification": "NOT_APPLICABLE",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "TOOL_EVENT_VISIBILITY": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "TOKEN_USAGE": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "RESOURCE_USAGE": {
       "harness_capability": "UNAVAILABLE",
       "live_qualification": "NOT_APPLICABLE",
+      "probe_evidence": null,
       "probe_evidence_path": null
     },
     "SESSION_ARTIFACTS": {
       "harness_capability": "SUPPORTED",
       "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
       "probe_evidence_path": null
     }
   }

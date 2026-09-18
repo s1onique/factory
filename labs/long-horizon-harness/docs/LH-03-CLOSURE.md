@@ -1,4 +1,4 @@
-# LH-03 Closure Report (CORRECTION01 + CORRECTION02)
+# LH-03 Closure Report (CORRECTION01 + CORRECTION02 + CORRECTION03)
 
 > FOUNDATION04 — Long-Horizon Harness Lab — LH-03
 >
@@ -6,12 +6,13 @@
 > CORRECTION names:
 > - `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION01`
 > - `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION02`
+> - `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION03`
 >
 > This file is the durable closure-of-record for LH-03 after
-> CORRECTION01 + CORRECTION02 (the two responses to the
-> reviewer's corrections). The patches live on the canonical
-> `main` branch. No linked worktree was used. No detachment
-> was used.
+> CORRECTION01 + CORRECTION02 + CORRECTION03 (the three
+> responses to the reviewer's corrections). The patches
+> live on the canonical `main` branch. No linked worktree
+> was used. No detachment was used.
 
 ## Subject binding
 
@@ -27,8 +28,9 @@ DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
 LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
 LH03_CORRECTION02_COMMIT  = f5524f012c0ec1747b19b54ff724ada05ab4e7ab
+LH03_CORRECTION03_COMMIT  = <recorded at commit time>
 CLOSURE_RECORD_COMMIT     = 961a6c8d9e6f09487d6561c436de25bc258f1256
-CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION02; cosmetic rebinds stop here, no further self-referential edit>
+CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION03; cosmetic rebinds stop here, no further self-referential edit>
 
 The closure-of-record binds three immutable SHAs:
 
@@ -417,6 +419,58 @@ C02-04 redactJsonRecord rejects non-plain-inert / accessor own-keys BEFORE recur
 C02-04 getter is never invoked during redaction          PROVEN
 ```
 
+## CORRECTION03 corrections (reviewer-driven, post-CORRECTION02)
+
+The reviewer re-examined CORRECTION02 and identified
+one P0 and two P1 architectural defects: (a) the
+`probe_evidence_path != null` invariant was only a
+referential integrity constraint, not a semantic
+sufficiency proof; (b) `FINAL_JSON = SUPPORTED` was
+semantically dubious after redefinition; (c) the
+hostile-object doctrine overstated what
+`Object.getPrototypeOf()` guarantees against Proxies.
+Each defect is closed by a bounded architectural
+correction, each pinned to an oracle test in
+`lh03-correction03-axioms.test.ts`.
+
+| ID | Reviewer defect | CORRECTION03 fix |
+|---|---|---|
+| C03-01 | `probe_evidence_path != null` proves existence of a pointer, not the capability. The builder accepted arbitrary strings and the tests even used `"any/path.jsonl"` as a placeholder. | Introduced typed semantic probe evidence: every LIVE_QUALIFIED axis now carries a `CapabilityProbeEvidence` block with `artifact_path`, `artifact_sha256`, `probe_kind`, `evidence_relation: { expected, observed }`, and `disposition`. The validator enforces the semantic predicate: `LIVE_QUALIFIED ⇒ probe_evidence != null ∧ disposition === "PASS" ∧ expected === observed`. `defaultPiCapabilities()` reads the actual artifact on disk, computes the SHA256, evaluates the capability-specific oracle, and refuses to fabricate a PASS. |
+| C03-02 | Capability-specific oracles were missing. `EXPLICIT_CWD` needed `requested_cwd == observed_session_cwd`; `ISOLATED_DATA_DIR` needed evidence of selected session/state location. | Added capability-specific oracles inside `defaultPiCapabilities`: HEADLESS/STREAMING_EVENTS/JSONL bind `observed session.type == "session"`; EXPLICIT_CWD and ISOLATED_DATA_DIR bind `requested_cwd == observed session.cwd`; CANCELLATION binds `halt_disposition == "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE"`. The builder passes the matching-cwd case (PASS oracle) and throws on the mismatching case (FAIL oracle cannot be fabricated). |
+| C03-03 | `FINAL_JSON = SUPPORTED` was misleading after redefinition; upstream calls this "JSON Event Stream Mode" where every line is a JSON object. | `FINAL_JSON.harness_capability = UNSUPPORTED`. `JSONL = SUPPORTED`. The closed-world Factory key list keeps the FINAL_JSON slot for backwards compatibility only; the canonical name for the upstream JSON Event Stream Mode is JSONL. |
+| C03-04 | Hostile-object doctrine overstated "no attacker code executed before rejection" — `Object.getPrototypeOf(proxy)` invokes the proxy's `getPrototypeOf` trap per ECMAScript. | Tightened the doctrine: `GETTER_NOT_INVOKED = TRUE` (proven) but `NO_ATTACKER_CODE_EXECUTED` is NOT true in general. Bounded structural traps (`getPrototypeOf`, `ownKeys`, `getOwnPropertyDescriptor`) MAY execute on a Proxy and must fail closed. The redactor only reads structural metadata and rejects via prototype; `[[Get]]`, getters, `get`, `apply`, `call` traps are FORBIDDEN. |
+| C03-05 | Negative oracles were absent. The reviewer required: nonexistent evidence path cannot qualify; wrong artifact cannot qualify; hash drift cannot qualify; right artifact / wrong cwd cannot qualify; proxy `getPrototypeOf` trap may fire, getter may not. | Added 5 negative oracles (`C03-05a..05e`): (a) nonexistent session_capture demotes to LIVE_UNQUALIFIED, (b) malformed JSON session demotes to LIVE_UNQUALIFIED, (c) recorded sha256 != real on-disk sha256 is detectable by recomputation, (d) right artifact / wrong cwd throws at builder time, (e) Proxy getPrototypeOf trap fires; getter MUST NOT fire. All pinned to machine-checked tests. |
+
+### Total regression (post-CORRECTION03)
+
+```text
+test/run/*.test.ts        = 86  (Phase E — frozen, unchanged)
+test/metrics/*.test.ts    = 61  (LH-02 — frozen, unchanged)
+test:lh03                 = 115 (was 99; +16 C03-* axiom tests)
+test/fake-adapter.test.ts = 3
+check:trust-boundary      = 2
+check:domain-purity       = 3
+TOTAL                     = 270 tests, all passing
+```
+
+### Exit of CORRECTION03 (axiom-by-axiom)
+
+```text
+C03-01 LIVE_QUALIFIED ⇒ typed CapabilityProbeEvidence with disposition PASS and expected==observed  ENFORCED
+C03-01 LIVE_HALT     ⇒ typed CapabilityProbeEvidence with disposition HALT                       ENFORCED
+C03-01 probe_evidence.capability matches axis key                                              ENFORCED
+C03-01 probe_evidence_path vs probe_evidence.artifact_path are consistent                       ENFORCED
+C03-02 EXPLICIT_CWD oracle: requested_cwd == observed_session_cwd                              ENFORCED
+C03-02 ISOLATED_DATA_DIR oracle: requested_cwd == observed_session_cwd                         ENFORCED
+C03-02 HEADLESS / STREAMING_EVENTS / JSONL oracle: observed session.type == "session"         ENFORCED
+C03-03 FINAL_JSON.harness_capability == UNSUPPORTED; JSONL == SUPPORTED                       ENFORCED
+C03-04 Proxy getPrototypeOf trap MAY fire; getter MUST NOT fire                                PROVEN
+C03-05a nonexistent evidence path cannot qualify                                              ENFORCED
+C03-05b wrong artifact (malformed JSON) cannot qualify                                         ENFORCED
+C03-05c artifact hash drift is detectable by recomputation                                     PROVEN
+C03-05d right artifact / wrong cwd cannot qualify (builder throws)                            ENFORCED
+```
+
 ## CORRECTION01 working-tree state (final, before commit)
 
 Modified:
@@ -512,20 +566,26 @@ Each clause is proven by a test in `test/lh03/`:
 - `UNKNOWN_EVENT_SILENT_DROP IMPOSSIBLE`     -> `PI-SCHEMA07`, `HNEG01 (adapter path)`
 - `MALFORMED_EVENT_SILENT_DROP IMPOSSIBLE`   -> `PI-DEC01..04`, `HNEG02 (adapter path)`
 - `LIVE_ARTIFACT_SECRET_LEAK IMPOSSIBLE`     -> `LIVESECRET01..07`
-- `CAPABILITY_TAXONOMY_IS_HONEST`            -> `validateLiveQualification()` + `C02-01a..01g` + `C02-01f` (qualification matrix validates) + `C02-01g` (test fixture matrix validates)
+- `CAPABILITY_TAXONOMY_IS_HONEST`            -> `validateLiveQualification()` (typed semantic evidence) + `C02-01a..01g` + `C03-01a..01e` + `C03-fixture` (qualification matrix validates) + `C03-fixture` (test fixture matrix validates)
 - `CLINE_SYNTHETIC_SCHEMA_PRESENTED_AS_REAL` -> `test/lh03/lh03-cross-adapter-conformance.test.ts` (Cline rows do not claim native evidence)
 - `PATCH_HYGIENE PASS`                       -> `git diff --check` clean; `verify_factory.sh` OK
 - `EVENTS_OBSERVATIONALLY_PURE`              -> `C02-03a/03b` (one error per violation regardless of consume count)
-- `REDACTION_HOSTILE_OBJECT_BEFORE_RECURSION` -> `C02-04a/04b/04c` (RedactionError before any getter fires)
-- `LH03_EMIT_NONEMPTY_AND_DETERMINISTIC`      -> `C02-02a` (lh03-emit.json is a real consolidated emit)
+- `REDACTION_HOSTILE_OBJECT_BEFORE_RECURSION` -> `C02-04a/04b/04c` (RedactionError before any getter fires) + `C03-04a` (Proxy getPrototypeOf trap may fire; getter MUST NOT fire)
+- `LH03_EMIT_NONEMPTY_AND_DETERMINISTIC`      -> `C02-02a` (lh03-emit.json is a real consolidated emit) + `C03-01a` (semantic_probe_evidence_summary present and consistent with the matrix)
+- `FINAL_JSON_CANONICAL_NAME`                 -> `C03-03a` (FINAL_JSON.harness_capability = UNSUPPORTED; JSONL = SUPPORTED)
+- `CAPABILITY_SPECIFIC_ORACLE`               -> `C03-02a/02b/02c` (EXPLICIT_CWD, ISOLATED_DATA_DIR, HEADLESS oracles PASS iff expected === observed)
+- `NEGATIVE_ORACLE_PROVENANCE`               -> `C03-05a..05e` (nonexistent path, wrong artifact, hash drift, wrong cwd, proxy trap fire)
 
-LH-03 CORRECTION01 + CORRECTION02 is GREEN with halt
-disposition. The architecture introduced by CORRECTION01
-was preserved; CORRECTION02 only added axioms, validators,
-and oracle tests. The remaining blockers are the
-intended real-world ones (provider-backed Pi execution
-and a real Cline/ClineMM installation) — not defects in
-Factory's evidence machinery.
+LH-03 CORRECTION01 + CORRECTION02 + CORRECTION03 is
+GREEN with halt disposition. CORRECTION02 closed only
+referential integrity (probe_evidence_path != null).
+CORRECTION03 closed the deeper defect — semantic
+sufficiency (probe_evidence.expected === observed AND
+disposition === "PASS" AND artifact_sha256 binds the
+recorded hash). The remaining blockers are the intended
+real-world ones (provider-backed Pi execution and a real
+Cline/ClineMM installation) — not defects in Factory's
+evidence machinery.
 
 READY_FOR_LH_04_FAULT_LABORATORY = NO (halt disposition
 remains first-class evidence; LH-04 was NOT started in

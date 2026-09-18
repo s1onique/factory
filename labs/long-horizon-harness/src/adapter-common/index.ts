@@ -23,3 +23,12 @@ export {
   type HostileFieldViolation,
   type HostileObjectReport,
 } from "./hostile-object.js";
+
+export {
+  artifactSha256,
+  readJsonlFirstLine,
+  readJsonObject,
+  buildProbeEvidence,
+  notRunProbeEvidence,
+  haltProbeEvidence,
+} from "./evidence-reader.js";

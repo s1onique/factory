@@ -40,7 +40,8 @@ export type HostileObjectReport =
 
 /**
  * Whether a parsed value is an inert, prototype-clean
- * record (CORRECTION02 C02-04).
+ * record (CORRECTION02 C02-04; tightened in CORRECTION03
+ * C03-04 to bound what Proxy traps may execute).
  *
  * A "plain" record is a non-null, non-array object whose
  * prototype is exactly `Object.prototype` or `null`. Any
@@ -49,10 +50,38 @@ export type HostileObjectReport =
  * hand-crafted native event must not be able to smuggle
  * class methods or callable prototypes past redaction.
  *
- * The check is intentionally cheap: it does NOT invoke
- * any value, only inspects `Object.getPrototypeOf`. That
- * means an object with a getter on `__proto__` cannot
- * trigger the getter through this call.
+ * CORRECTION03 Proxy doctrine (C03-04):
+ *
+ *   GETTER_NOT_INVOKED             = TRUE
+ *   NO_ATTACKER_CODE_EXECUTED      = NOT TRUE in general
+ *
+ * Specifically, for a Proxy target:
+ *
+ *   - `Object.getPrototypeOf(proxy)` MAY invoke the
+ *     Proxy's `getPrototypeOf` trap (MDN: this is
+ *     specified; ECMAScript specifies the handler trap
+ *     being called). That trap IS attacker code; this
+ *     function does not promise to prevent its execution.
+ *   - `Object.getOwnPropertyNames(proxy)` MAY invoke
+ *     the Proxy's `ownKeys` and `getOwnPropertyDescriptor`
+ *     traps. Likewise attacker code; likewise not
+ *     prevented.
+ *   - However, this function and the surrounding
+ *     redactor MUST NOT trigger any value's
+ *     `[[Get]]` / accessor own-key. Getters, [[Get]],
+ *     and value-fetching traps (`get`, `apply`, `call`)
+ *     are forbidden.
+ *
+ * Concretely: the redactor reads only structural metadata
+ * (prototype, own-key names, own-property descriptors) and
+ * rejects a Proxy whose structural introspection returns
+ * anything outside `Object.prototype` / `null`. A Proxy
+ * is therefore rejected by virtue of its prototype; its
+ * structural traps are permitted to fire during that
+ * rejection. This matches the Phase-D doctrine and is the
+ * precise invariant that the C03-04 oracle test pins.
+ *
+ * The check does NOT invoke [[Get]] on any value.
  */
 export function isPlainInertRecord(
   value: unknown,

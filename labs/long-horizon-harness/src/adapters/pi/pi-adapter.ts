@@ -46,6 +46,8 @@ import type {
   HarnessCapabilities,
   CapabilityState,
   CapabilityAxis,
+  CapabilityKey,
+  CapabilityProbeEvidence,
   LiveQualificationState,
   HarnessAdapterV2,
   PreparedHarnessRun,
@@ -76,6 +78,13 @@ import {
   redactNativeEvent,
   redactStringValue,
 } from "../../redaction/secret-redaction.js";
+import {
+  artifactSha256,
+  readJsonlFirstLine,
+  readJsonObject,
+  buildProbeEvidence,
+  haltProbeEvidence,
+} from "../../adapter-common/index.js";
 
 
 /* ------------------------------------------------------------------ *
@@ -1407,6 +1416,30 @@ export function makePiAdapter(args: {
  *   Our captured run halted at the session envelope, so
  *   no `message_update.usage` event was observed; the
  *   capability stays LIVE_UNQUALIFIED.
+ *
+ * CORRECTION03 (C03-01, C03-02, C03-03): typed semantic
+ * probe evidence replaces the bare `probe_evidence_path`
+ * pointer. Each LIVE_QUALIFIED claim is bound to a
+ * `CapabilityProbeEvidence` whose `disposition === "PASS"`
+ * and whose `evidence_relation.expected === observed`.
+ * The capability-specific oracles are:
+ *
+ *   HEADLESS         — observed session `type === "session"`
+ *   STREAMING_EVENTS — observed session `type === "session"`
+ *   JSONL            — observed session `type === "session"`
+ *   EXPLICIT_CWD     — observed session `cwd === requested_cwd`
+ *   ISOLATED_DATA_DIR — observed session `cwd === requested_cwd`
+ *                       AND observed session is fresh (this
+ *                       campaign; required `requested_cwd`
+ *                       is the isolated directory).
+ *   CANCELLATION     — observed `halt_disposition ===
+ *                       "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE"`
+ *
+ * FINAL_JSON semantics (CORRECTION03): the canonical
+ *   Factory name for the upstream JSON Event Stream Mode
+ *   is JSONL. FINAL_JSON's `harness_capability` is now
+ *   UNSUPPORTED — the closed-world key list keeps the
+ *   FINAL_JSON slot for backwards compatibility only.
  */
 export function defaultPiCapabilities(
   identity: HarnessQualificationIdentity,
@@ -1416,13 +1449,26 @@ export function defaultPiCapabilities(
     readonly session_capture: string | null;
     /** Path to the cancellation-halt evidence artifact. */
     readonly cancellation_halt: string | null;
+    /**
+     * CWD the caller requested the harness to run in.
+     * The `EXPLICIT_CWD` and `ISOLATED_DATA_DIR`
+     * capability-specific oracles compare this string
+     * against the cwd observed in the captured session
+     * envelope.
+     */
+    readonly requested_cwd?: string;
   } = { session_capture: null, cancellation_halt: null },
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
+  // CORRECTION03 C03-03: FINAL_JSON is the JSON Event
+  // Stream Mode upstream name; the canonical Factory
+  // name is JSONL. The closed-world Factory key list
+  // keeps FINAL_JSON for backwards compatibility, but
+  // its harness_capability is UNSUPPORTED.
   const capabilities: Record<typeof CAPABILITY_KEYS[number], CapabilityState> = {
     HEADLESS: "SUPPORTED",
     STREAMING_EVENTS: "SUPPORTED",
-    FINAL_JSON: "SUPPORTED",
+    FINAL_JSON: "UNSUPPORTED",
     JSONL: "SUPPORTED",
     RPC: "SUPPORTED",
     SESSION_RESUME: "SUPPORTED",
@@ -1439,59 +1485,162 @@ export function defaultPiCapabilities(
     RESOURCE_USAGE: "UNAVAILABLE",
     SESSION_ARTIFACTS: "SUPPORTED",
   };
-  // (live_qualification, evidence_path) — must satisfy the
-  // invariant `LIVE_QUALIFIED ⇒ evidence_path !== null`
-  // and `LIVE_HALT ⇒ evidence_path !== null`. Any entry
-  // claiming LIVE_QUALIFIED without a non-null evidence
-  // path is a CORRECTION02 defect.
-  const liveEntries: ReadonlyArray<
-    readonly [
-      typeof CAPABILITY_KEYS[number],
-      LiveQualificationState,
-      string | null,
-    ]
-  > = [
-    ["HEADLESS", "LIVE_QUALIFIED", evidence.session_capture],
-    ["STREAMING_EVENTS", "LIVE_QUALIFIED", evidence.session_capture],
-    ["EXPLICIT_CWD", "LIVE_QUALIFIED", evidence.session_capture],
-    ["ISOLATED_DATA_DIR", "LIVE_QUALIFIED", evidence.session_capture],
-    ["JSONL", "LIVE_QUALIFIED", evidence.session_capture],
-    ["FINAL_JSON", "LIVE_UNQUALIFIED", null],
-    ["RPC", "LIVE_UNQUALIFIED", null],
-    ["TOKEN_USAGE", "LIVE_UNQUALIFIED", null],
-    ["SESSION_RESUME", "LIVE_UNQUALIFIED", null],
-    ["SESSION_FORK", "LIVE_UNQUALIFIED", null],
-    ["MODEL_SELECTION", "LIVE_UNQUALIFIED", null],
-    ["PROVIDER_SELECTION", "LIVE_UNQUALIFIED", null],
-    ["TIMEOUT", "NOT_APPLICABLE", null],
-    ["CANCELLATION", "LIVE_HALT", evidence.cancellation_halt],
-    ["AUTO_APPROVAL", "NOT_APPLICABLE", null],
-    ["TOOL_EVENT_VISIBILITY", "LIVE_UNQUALIFIED", null],
-    ["SESSION_ARTIFACTS", "LIVE_UNQUALIFIED", null],
-    ["RESOURCE_USAGE", "NOT_APPLICABLE", null],
-  ];
+  // Read observed evidence. If a session_capture or
+  // cancellation_halt is missing or malformed, the
+  // dependent LIVE_QUALIFIED/LIVE_HALT axes are demoted
+  // to LIVE_UNQUALIFIED below; the builder never
+  // fabricates evidence that is not on disk.
+  type ObservedSession = {
+    readonly artifact_path: string;
+    readonly artifact_sha256: string;
+    readonly session_type: string;
+    readonly cwd: string | null;
+  };
+  type ObservedCancellation = {
+    readonly artifact_path: string;
+    readonly artifact_sha256: string;
+    readonly halt_disposition: string | null;
+  };
+  function readObservedSession(p: string): ObservedSession | null {
+    const parsed = readJsonlFirstLine(p);
+    if (!isRecord(parsed)) return null;
+    if (parsed["type"] !== "session") return null;
+    const t = typeof parsed["type"] === "string" ? (parsed["type"] as string) : "";
+    const cwdRaw = parsed["cwd"];
+    return {
+      artifact_path: p,
+      artifact_sha256: artifactSha256(p),
+      session_type: t,
+      cwd: typeof cwdRaw === "string" ? cwdRaw : null,
+    };
+  }
+  function readObservedCancellation(p: string): ObservedCancellation | null {
+    const parsed = readJsonObject(p);
+    if (!isRecord(parsed)) return null;
+    const haltRaw = parsed["halt_disposition"];
+    return {
+      artifact_path: p,
+      artifact_sha256: artifactSha256(p),
+      halt_disposition: typeof haltRaw === "string" ? haltRaw : null,
+    };
+  }
+  const observedSession =
+    evidence.session_capture !== null
+      ? readObservedSession(evidence.session_capture)
+      : null;
+  const observedCancellation =
+    evidence.cancellation_halt !== null
+      ? readObservedCancellation(evidence.cancellation_halt)
+      : null;
+  const requestedCwd = evidence.requested_cwd ?? null;
+  type AxisEntry = {
+    readonly lq: LiveQualificationState;
+    readonly probe: CapabilityProbeEvidence | null;
+  };
+  const emptyEntry: AxisEntry = { lq: "LIVE_UNQUALIFIED", probe: null };
+  function sessionProbe(cap: CapabilityKey, expected: string): AxisEntry {
+    if (observedSession === null) return emptyEntry;
+    const observed =
+      cap === "EXPLICIT_CWD" || cap === "ISOLATED_DATA_DIR"
+        ? (observedSession.cwd ?? "")
+        : observedSession.session_type;
+    return {
+      lq: "LIVE_QUALIFIED",
+      probe: buildProbeEvidence({
+        capability: cap,
+        probe_kind: "SESSION_ENVELOPE",
+        artifact_path: observedSession.artifact_path,
+        artifact_sha256: observedSession.artifact_sha256,
+        expected,
+        observed,
+      }),
+    };
+  }
+  const liveEntries: Record<typeof CAPABILITY_KEYS[number], AxisEntry> = {
+    HEADLESS: sessionProbe("HEADLESS", "session"),
+    STREAMING_EVENTS: sessionProbe("STREAMING_EVENTS", "session"),
+    EXPLICIT_CWD:
+      requestedCwd !== null
+        ? sessionProbe("EXPLICIT_CWD", requestedCwd)
+        : emptyEntry,
+    // C03-02: ISOLATED_DATA_DIR oracle binds session
+    // cwd == requested_cwd. The captured session
+    // envelope from this run MUST carry the requested
+    // isolated directory.
+    ISOLATED_DATA_DIR:
+      requestedCwd !== null
+        ? sessionProbe("ISOLATED_DATA_DIR", requestedCwd)
+        : emptyEntry,
+    JSONL: sessionProbe("JSONL", "session"),
+    FINAL_JSON: emptyEntry,
+    RPC: emptyEntry,
+    TOKEN_USAGE: emptyEntry,
+    SESSION_RESUME: emptyEntry,
+    SESSION_FORK: emptyEntry,
+    MODEL_SELECTION: emptyEntry,
+    PROVIDER_SELECTION: emptyEntry,
+    TIMEOUT: { lq: "NOT_APPLICABLE", probe: null },
+    CANCELLATION:
+      observedCancellation !== null
+        ? {
+            lq: "LIVE_HALT",
+            probe: haltProbeEvidence({
+              capability: "CANCELLATION",
+              artifact_path: observedCancellation.artifact_path,
+              artifact_sha256: observedCancellation.artifact_sha256,
+              expected: "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
+              observed: observedCancellation.halt_disposition ?? "",
+            }),
+          }
+        : { lq: "LIVE_UNQUALIFIED", probe: null },
+    AUTO_APPROVAL: { lq: "NOT_APPLICABLE", probe: null },
+    TOOL_EVENT_VISIBILITY: emptyEntry,
+    SESSION_ARTIFACTS: emptyEntry,
+    RESOURCE_USAGE: { lq: "NOT_APPLICABLE", probe: null },
+  };
   const liveMap: Record<typeof CAPABILITY_KEYS[number], LiveQualificationState> =
     {} as Record<typeof CAPABILITY_KEYS[number], LiveQualificationState>;
   const axes: Record<typeof CAPABILITY_KEYS[number], CapabilityAxis> = {} as Record<
     typeof CAPABILITY_KEYS[number],
     CapabilityAxis
   >;
-  for (const [k, lq, ev] of liveEntries) {
-    if (lq === "LIVE_QUALIFIED" && ev === null) {
+  for (const k of CAPABILITY_KEYS) {
+    const entry = liveEntries[k];
+    if (entry.lq === "LIVE_QUALIFIED" && entry.probe === null) {
       throw new Error(
-        `Pi default capability document attempted LIVE_QUALIFIED with null evidence for key ${k}`,
+        `Pi default capability document attempted LIVE_QUALIFIED with null probe_evidence for key ${k}`,
       );
     }
-    if (lq === "LIVE_HALT" && ev === null) {
+    if (entry.lq === "LIVE_QUALIFIED" && entry.probe?.disposition !== "PASS") {
       throw new Error(
-        `Pi default capability document attempted LIVE_HALT with null evidence for key ${k}`,
+        `Pi default capability document attempted LIVE_QUALIFIED with failed oracle for key ${k}: expected=${entry.probe?.evidence_relation.expected} observed=${entry.probe?.evidence_relation.observed} disposition=${entry.probe?.disposition}`,
       );
     }
-    liveMap[k] = lq;
+    if (entry.lq === "LIVE_QUALIFIED" && entry.probe?.probe_kind === "NOT_RUN") {
+      throw new Error(
+        `Pi default capability document attempted LIVE_QUALIFIED with NOT_RUN probe for key ${k}`,
+      );
+    }
+    if (entry.lq === "LIVE_HALT" && entry.probe === null) {
+      throw new Error(
+        `Pi default capability document attempted LIVE_HALT with null probe_evidence for key ${k}`,
+      );
+    }
+    if (
+      entry.lq === "LIVE_HALT" &&
+      entry.probe !== null &&
+      entry.probe.disposition !== "HALT"
+    ) {
+      throw new Error(
+        `Pi default capability document attempted LIVE_HALT with non-HALT probe disposition for key ${k}: ${entry.probe.disposition}`,
+      );
+    }
+    liveMap[k] = entry.lq;
     axes[k] = {
       harness_capability: capabilities[k],
-      live_qualification: lq,
-      probe_evidence_path: ev,
+      live_qualification: entry.lq,
+      probe_evidence: entry.probe,
+      probe_evidence_path: entry.probe?.artifact_path ?? null,
     };
   }
   if (Object.keys(capabilities).length !== Object.keys(empty.capabilities).length) {

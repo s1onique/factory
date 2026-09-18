@@ -753,6 +753,7 @@ export function defaultClineCapabilities(
     axes[k] = {
       harness_capability: capabilities[k],
       live_qualification: "LIVE_HALT",
+      probe_evidence: null,
       probe_evidence_path: null,
     };
   }
