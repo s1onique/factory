@@ -29,8 +29,9 @@ LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
 LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
 LH03_CORRECTION02_COMMIT  = f5524f012c0ec1747b19b54ff724ada05ab4e7ab
 LH03_CORRECTION03_COMMIT  = 73dc4979a6290a0048fdfac0ae47d42e661ecb22
+LH03_CORRECTION04_COMMIT  = <recorded at commit time>
 CLOSURE_RECORD_COMMIT     = 961a6c8d9e6f09487d6561c436de25bc258f1256
-CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION03; cosmetic rebinds stop here, no further self-referential edit>
+CURRENT_HEAD_AT_VERIFICATION = <terminal `git rev-parse HEAD` at end of CORRECTION04; cosmetic rebinds stop here, no further self-referential edit>
 
 The closure-of-record binds three immutable SHAs:
 
@@ -471,7 +472,113 @@ C03-05c artifact hash drift is detectable by recomputation                      
 C03-05d right artifact / wrong cwd cannot qualify (builder throws)                            ENFORCED
 ```
 
-## CORRECTION01 working-tree state (final, before commit)
+## CORRECTION04 corrections (reviewer-driven, post-CORRECTION03)
+
+The reviewer re-examined CORRECTION03 and identified
+four architectural defects: (a) `validateLiveQualification`
+was the only check and it never re-read the artifact
+from disk, so a forged document could pass even if the
+recorded sha256 disagreed with the bytes; (b) hash drift
+was "detectable by recomputation" rather than rejected;
+(c) the committed fixtures recorded absolute paths
+(`/Volumes/...`), making them machine-local; (d) cwd
+match alone was used as evidence of `ISOLATED_DATA_DIR`
+and a single session envelope as evidence of headless
+mode. Each defect is closed by a bounded architectural
+correction, each pinned to an oracle test in
+`lh03-correction04-axioms.test.ts`.
+
+| ID | Reviewer defect | CORRECTION04 fix |
+|---|---|---|
+| C04-01 | `validateLiveQualification` was the only structural gate and never re-read disk. The validator and the artifact verifier were conflated. | Introduced `verifyLiveQualificationEvidence(caps, repoRoot)` in `src/adapter-common/evidence-verifier.ts`. The validator stays pure; the verifier re-reads the artifact, recomputes SHA256, parses, recomputes observed, and re-evaluates the oracle. The two are independent gates. |
+| C04-02 | Hash drift was "detectable by recomputation" — i.e. it could be detected, not rejected. | The verifier rejects hash drift with `EVIDENCE_HASH_MISMATCH`. Forge, mutation, and drift all fail closed. Three negative-oracle tests: `C04-HASH01` (mutate after record), `C04-HASH02` (forge recorded sha256), `C04-HASH03` (correct bytes PASS). |
+| C04-03 | Committed fixtures recorded absolute machine-local paths. | Serialized qualification fixtures now use canonical repo-relative paths (`test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl`). The verifier accepts an explicit trusted root and refuses `../`, absolute-escape, and symlink-outside-repo via `EVIDENCE_PATH_ESCAPE`. Five tests: `C04-PATH01..PATH05`. |
+| C04-04 | Cwd match alone was used as evidence of `ISOLATED_DATA_DIR`. | `ISOLATED_DATA_DIR` now requires an explicit `isolated_session_dir` argument (a dedicated `--session-dir <dir>` directory whose path the captured session artifact lives under). Until that evidence exists, the axis is `SUPPORTED + LIVE_UNQUALIFIED`. |
+| C04-05 | A single session envelope was used as evidence of `HEADLESS` and `STREAMING_EVENTS`. | `HEADLESS` and `STREAMING_EVENTS` now require invocation facts (`invocation_mode === "headless"`). JSONL remains LIVE_QUALIFIED because the canonical Factory name for the upstream JSON Event Stream Mode IS JSONL — the protocol output (session envelope) is the proof. |
+| C04-06 | Verifier failures had no closed-world failure kinds. | Added `EVIDENCE_VERIFICATION_ERROR_KINDS` = `EVIDENCE_ARTIFACT_MISSING \| EVIDENCE_PATH_ESCAPE \| EVIDENCE_HASH_MISMATCH \| EVIDENCE_PARSE_FAILED \| EVIDENCE_OBSERVATION_MISMATCH \| EVIDENCE_ORACLE_FAILED`. No generic thrown-string authority. |
+| C04-07 | Acceptance tests for the 5 impossibility results. | All five are pinned: `FORGED_HASH_ACCEPTED = IMPOSSIBLE`, `ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED = IMPOSSIBLE`, `CWD_MATCH_IMPLIES_ISOLATED_DATA_DIR = FALSE`, `MACHINE_LOCAL_ABSOLUTE_PATH_REQUIRED = FALSE`, `LIVE_QUALIFIED_WITHOUT_REVERIFIABLE_ARTIFACT = IMPOSSIBLE`. |
+
+### Total regression (post-CORRECTION04)
+
+```text
+test/run/*.test.ts        = 86  (Phase E — frozen, unchanged)
+test/metrics/*.test.ts    = 61  (LH-02 — frozen, unchanged)
+test:lh03                 = 143 (was 115; +28 C04-* axiom tests)
+test/fake-adapter.test.ts = 3
+check:trust-boundary      = 2
+check:domain-purity       = 3
+TOTAL                     = 298 tests, all passing
+```
+
+### Exit of CORRECTION04 (axiom-by-axiom)
+
+```text
+C04-01 validateLiveQualification is pure; verifyLiveQualificationEvidence re-reads disk  PROVEN
+C04-02 C04-HASH01 mutate artifact bytes after record -> EVIDENCE_HASH_MISMATCH           ENFORCED
+C04-02 C04-HASH02 forge recorded sha256            -> EVIDENCE_HASH_MISMATCH           ENFORCED
+C04-02 C04-HASH03 correct bytes + correct sha256   -> PASS                             ENFORCED
+C04-03 C04-PATH01 checkout root A                  -> PASS                             ENFORCED
+C04-03 C04-PATH02 checkout root B                  -> PASS                             ENFORCED
+C04-03 C04-PATH03 ../escape                        -> EVIDENCE_PATH_ESCAPE             ENFORCED
+C04-03 C04-PATH04 absolute escape                  -> EVIDENCE_PATH_ESCAPE             ENFORCED
+C04-03 C04-PATH05 symlink escape                   -> EVIDENCE_PATH_ESCAPE             ENFORCED
+C04-04 C04-ISOLATED01 cwd match alone              -> LIVE_UNQUALIFIED                  ENFORCED
+C04-04 C04-ISOLATED02 isolated_session_dir+cwd     -> LIVE_QUALIFIED                    ENFORCED
+C04-04 C04-ISOLATED03 isolated_session_dir, no cwd -> LIVE_UNQUALIFIED                  ENFORCED
+C04-05 C04-INVOCATION01 HEADLESS without mode      -> LIVE_UNQUALIFIED                  ENFORCED
+C04-05 C04-INVOCATION02 HEADLESS with mode=headless -> LIVE_QUALIFIED                   ENFORCED
+C04-05 C04-INVOCATION03 STREAMING_EVENTS without   -> LIVE_UNQUALIFIED                  ENFORCED
+C04-05 C04-INVOCATION04 JSONL from session envelope -> LIVE_QUALIFIED                   ENFORCED
+C04-06 closed-world error kinds exhaustive                                              ENFORCED
+C04-06 missing artifact       -> EVIDENCE_ARTIFACT_MISSING                              ENFORCED
+C04-06 parse failure          -> EVIDENCE_PARSE_FAILED                                  ENFORCED
+C04-06 observation mismatch   -> EVIDENCE_OBSERVATION_MISMATCH                          ENFORCED
+C04-06 oracle failed          -> EVIDENCE_ORACLE_FAILED                                 ENFORCED
+C04-07 FORGED_HASH_ACCEPTED                       = IMPOSSIBLE                          PROVEN
+C04-07 ARTIFACT_MUTATION_AFTER_RECORD_ACCEPTED    = IMPOSSIBLE                          PROVEN
+C04-07 CWD_MATCH_IMPLIES_ISOLATED_DATA_DIR        = FALSE                               PROVEN
+C04-07 MACHINE_LOCAL_ABSOLUTE_PATH_REQUIRED       = FALSE                               PROVEN
+C04-07 LIVE_QUALIFIED_WITHOUT_REVERIFIABLE_ARTIFACT = IMPOSSIBLE                         PROVEN
+```
+
+### CORRECTION04 capability matrix (semantic evidence, re-verifiable)
+
+The Pi capability matrix is now bound to typed
+semantic probe evidence AND bound to on-disk artifacts
+that the verifier can re-read. Every LIVE_QUALIFIED
+claim has a PASS oracle; every LIVE_HALT has a HALT
+oracle; every recorded sha256 matches the recomputed
+sha256; every recorded path resolves inside the trusted
+repoRoot.
+
+```text
+Key                  Capability   LiveQual       probe_kind        expected                              observed                              disposition
+HEADLESS             SUPPORTED    LIVE_UNQUALIFIED (none — C04-05: invocation facts required)                                    (none)                                (none)
+STREAMING_EVENTS     SUPPORTED    LIVE_UNQUALIFIED (none — C04-05: invocation facts required)                                    (none)                                (none)
+JSONL                SUPPORTED    LIVE_QUALIFIED  SESSION_ENVELOPE  "session"                             "session"                             PASS
+EXPLICIT_CWD         SUPPORTED    LIVE_QUALIFIED  SESSION_ENVELOPE  "/private/tmp/pi-live"                "/private/tmp/pi-live"                PASS
+ISOLATED_DATA_DIR    SUPPORTED    LIVE_UNQUALIFIED (none — C04-04: --session-dir evidence required)                               (none)                                (none)
+CANCELLATION         SUPPORTED    LIVE_HALT       CANCELLATION_HALT "HALT_LIVE_PROVIDER_CREDENTIALS..."  "HALT_LIVE_PROVIDER_CREDENTIALS..."  HALT
+FINAL_JSON           UNSUPPORTED  LIVE_UNQUALIFIED (none — canonical Factory name is JSONL)                                      (none)                                (none)
+RPC                  SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+TOKEN_USAGE          SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+TIMEOUT              UNSUPPORTED  NOT_APPLICABLE   (none)                                                                       (none)                                (none)
+AUTO_APPROVAL        UNSUPPORTED  NOT_APPLICABLE   (none)                                                                       (none)                                (none)
+RESOURCE_USAGE       UNAVAILABLE  NOT_APPLICABLE   (none)                                                                       (none)                                (none)
+SESSION_RESUME       SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+SESSION_FORK         SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+MODEL_SELECTION      SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+PROVIDER_SELECTION   SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+TOOL_EVENT_VISIBILITY SUPPORTED   LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+SESSION_ARTIFACTS    SUPPORTED    LIVE_UNQUALIFIED (none)                                                                       (none)                                (none)
+```
+
+The matrix is machine-validated by `validateLiveQualification()`
+(structural) and `verifyLiveQualificationEvidence()`
+(artifact re-verification), and pinned by tests
+`C02-01f`, `C02-01g`, `C04-ACCEPTANCE06`.
+
+
 
 Modified:
 

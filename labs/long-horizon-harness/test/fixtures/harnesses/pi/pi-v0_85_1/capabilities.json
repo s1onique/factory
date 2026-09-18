@@ -31,15 +31,15 @@
     "SESSION_ARTIFACTS": "SUPPORTED"
   },
   "live_qualification_by_key": {
-    "HEADLESS": "LIVE_QUALIFIED",
-    "STREAMING_EVENTS": "LIVE_QUALIFIED",
+    "HEADLESS": "LIVE_UNQUALIFIED",
+    "STREAMING_EVENTS": "LIVE_UNQUALIFIED",
     "FINAL_JSON": "LIVE_UNQUALIFIED",
     "JSONL": "LIVE_QUALIFIED",
     "RPC": "LIVE_UNQUALIFIED",
     "SESSION_RESUME": "LIVE_UNQUALIFIED",
     "SESSION_FORK": "LIVE_UNQUALIFIED",
     "EXPLICIT_CWD": "LIVE_QUALIFIED",
-    "ISOLATED_DATA_DIR": "LIVE_QUALIFIED",
+    "ISOLATED_DATA_DIR": "LIVE_UNQUALIFIED",
     "MODEL_SELECTION": "LIVE_UNQUALIFIED",
     "PROVIDER_SELECTION": "LIVE_UNQUALIFIED",
     "TIMEOUT": "NOT_APPLICABLE",
@@ -53,35 +53,15 @@
   "capability_axes": {
     "HEADLESS": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence": {
-        "capability": "HEADLESS",
-        "probe_kind": "SESSION_ENVELOPE",
-        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
-        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
-        "evidence_relation": {
-          "expected": "session",
-          "observed": "session"
-        },
-        "disposition": "PASS"
-      },
-      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
+      "probe_evidence_path": null
     },
     "STREAMING_EVENTS": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence": {
-        "capability": "STREAMING_EVENTS",
-        "probe_kind": "SESSION_ENVELOPE",
-        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
-        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
-        "evidence_relation": {
-          "expected": "session",
-          "observed": "session"
-        },
-        "disposition": "PASS"
-      },
-      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
+      "probe_evidence_path": null
     },
     "FINAL_JSON": {
       "harness_capability": "UNSUPPORTED",
@@ -95,7 +75,7 @@
       "probe_evidence": {
         "capability": "JSONL",
         "probe_kind": "SESSION_ENVELOPE",
-        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
         "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
         "evidence_relation": {
           "expected": "session",
@@ -103,7 +83,7 @@
         },
         "disposition": "PASS"
       },
-      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "RPC": {
       "harness_capability": "SUPPORTED",
@@ -129,7 +109,7 @@
       "probe_evidence": {
         "capability": "EXPLICIT_CWD",
         "probe_kind": "SESSION_ENVELOPE",
-        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+        "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
         "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
         "evidence_relation": {
           "expected": "/private/tmp/pi-live",
@@ -137,23 +117,13 @@
         },
         "disposition": "PASS"
       },
-      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
     },
     "ISOLATED_DATA_DIR": {
       "harness_capability": "SUPPORTED",
-      "live_qualification": "LIVE_QUALIFIED",
-      "probe_evidence": {
-        "capability": "ISOLATED_DATA_DIR",
-        "probe_kind": "SESSION_ENVELOPE",
-        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
-        "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
-        "evidence_relation": {
-          "expected": "/private/tmp/pi-live",
-          "observed": "/private/tmp/pi-live"
-        },
-        "disposition": "PASS"
-      },
-      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl"
+      "live_qualification": "LIVE_UNQUALIFIED",
+      "probe_evidence": null,
+      "probe_evidence_path": null
     },
     "MODEL_SELECTION": {
       "harness_capability": "SUPPORTED",
@@ -179,7 +149,7 @@
       "probe_evidence": {
         "capability": "CANCELLATION",
         "probe_kind": "CANCELLATION_HALT",
-        "artifact_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+        "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
         "artifact_sha256": "14d6d2a62ae8c523d71e818fc38df01d750bca9f7aa4a9d17650823196d1473f",
         "evidence_relation": {
           "expected": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
@@ -187,7 +157,7 @@
         },
         "disposition": "HALT"
       },
-      "probe_evidence_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
+      "probe_evidence_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json"
     },
     "AUTO_APPROVAL": {
       "harness_capability": "UNSUPPORTED",

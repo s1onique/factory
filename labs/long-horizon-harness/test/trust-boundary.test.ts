@@ -144,6 +144,13 @@ test("JSON.parse is allowed only in codec and ledger (the trust boundary)", asyn
     // and cancellation-halt shapes that the validator
     // inspects downstream.
     "src/adapter-common/evidence-reader.ts",
+    // LH-03 CORRECTION04: the typed evidence verifier
+    // (C04-01..C04-06). Re-parses the on-disk artifact
+    // under the recorded `probe_kind` to recompute the
+    // observed value and re-evaluate the capability-
+    // specific oracle. This is the trust boundary for
+    // record-once + re-verify-on-demand semantics.
+    "src/adapter-common/evidence-verifier.ts",
   ]);
   const hits: string[] = [];
   for (const f of files) {

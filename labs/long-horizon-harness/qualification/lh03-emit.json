@@ -1,13 +1,14 @@
 {
   "lh03_emit_kind": "DETERMINISTIC_CONSOLIDATED_EMIT",
   "lh03_act": "ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01",
-  "lh03_correction": "CORRECTION03",
+  "lh03_correction": "CORRECTION04",
   "lh03_correction_history": [
     "CORRECTION01",
     "CORRECTION02",
-    "CORRECTION03"
+    "CORRECTION03",
+    "CORRECTION04"
   ],
-  "generated_at_iso": "2026-09-18T00:00:00.000Z",
+  "generated_at_iso": "2026-09-18T01:00:00.000Z",
   "input_evidence": {
     "identity": {
       "harness_name": "pi",
@@ -44,15 +45,15 @@
     { "type": "candidate_started", "attemptId": "pi-0_85_1-envelope" }
   ],
   "live_qualification_overlay": {
-    "HEADLESS": "LIVE_QUALIFIED",
-    "STREAMING_EVENTS": "LIVE_QUALIFIED",
+    "HEADLESS": "LIVE_UNQUALIFIED",
+    "STREAMING_EVENTS": "LIVE_UNQUALIFIED",
     "FINAL_JSON": "LIVE_UNQUALIFIED",
     "JSONL": "LIVE_QUALIFIED",
     "RPC": "LIVE_UNQUALIFIED",
     "SESSION_RESUME": "LIVE_UNQUALIFIED",
     "SESSION_FORK": "LIVE_UNQUALIFIED",
     "EXPLICIT_CWD": "LIVE_QUALIFIED",
-    "ISOLATED_DATA_DIR": "LIVE_QUALIFIED",
+    "ISOLATED_DATA_DIR": "LIVE_UNQUALIFIED",
     "MODEL_SELECTION": "LIVE_UNQUALIFIED",
     "PROVIDER_SELECTION": "LIVE_UNQUALIFIED",
     "TIMEOUT": "NOT_APPLICABLE",
@@ -65,37 +66,40 @@
   },
   "semantic_probe_evidence_summary": {
     "HEADLESS": {
-      "probe_kind": "SESSION_ENVELOPE",
-      "expected": "session",
-      "observed": "session",
-      "disposition": "PASS"
+      "probe_kind": "NOT_RUN",
+      "harness_capability": "SUPPORTED",
+      "rationale": "CORRECTION04 C04-05: a single session envelope is not sufficient evidence of headless mode. Until invocation_mode=headless is captured by the adapter, HEADLESS stays LIVE_UNQUALIFIED."
     },
     "STREAMING_EVENTS": {
-      "probe_kind": "SESSION_ENVELOPE",
-      "expected": "session",
-      "observed": "session",
-      "disposition": "PASS"
+      "probe_kind": "NOT_RUN",
+      "harness_capability": "SUPPORTED",
+      "rationale": "CORRECTION04 C04-05: a single session envelope is not sufficient evidence of streaming. Until invocation_mode=headless is captured, STREAMING_EVENTS stays LIVE_UNQUALIFIED."
     },
     "JSONL": {
       "probe_kind": "SESSION_ENVELOPE",
+      "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
       "expected": "session",
       "observed": "session",
       "disposition": "PASS"
     },
     "EXPLICIT_CWD": {
       "probe_kind": "SESSION_ENVELOPE",
+      "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",
+      "artifact_sha256": "4e4d9fc1220ed81e5eb000bee36b89fa5849e5542bb82b28b1ca4231d5e1c0e9",
       "expected": "/private/tmp/pi-live",
       "observed": "/private/tmp/pi-live",
       "disposition": "PASS"
     },
     "ISOLATED_DATA_DIR": {
-      "probe_kind": "SESSION_ENVELOPE",
-      "expected": "/private/tmp/pi-live",
-      "observed": "/private/tmp/pi-live",
-      "disposition": "PASS"
+      "probe_kind": "NOT_RUN",
+      "harness_capability": "SUPPORTED",
+      "rationale": "CORRECTION04 C04-04: cwd match alone is not sufficient evidence of session/state isolation. Until isolated_session_dir (a dedicated --session-dir directory) is captured by the adapter and the captured session cwd lives under it, ISOLATED_DATA_DIR stays LIVE_UNQUALIFIED."
     },
     "CANCELLATION": {
       "probe_kind": "CANCELLATION_HALT",
+      "artifact_path": "test/fixtures/harnesses/pi/pi-v0_85_1/process-result.json",
+      "artifact_sha256": "14d6d2a62ae8c523d71e818fc38df01d750bca9f7aa4a9d17650823196d1473f",
       "expected": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
       "observed": "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE",
       "disposition": "HALT"
@@ -113,6 +117,19 @@
       "probe_kind": "NOT_RUN",
       "rationale": "No message_update.usage event was observed; capture halted at the session envelope."
     }
+  },
+  "evidence_verification": {
+    "verifier": "verifyLiveQualificationEvidence(caps, repoRoot)",
+    "checks": [
+      "EVIDENCE_PATH_ESCAPE refused for ../ and absolute escapes",
+      "EVIDENCE_HASH_MISMATCH raised on byte mutation",
+      "EVIDENCE_OBSERVATION_MISMATCH raised on observed drift",
+      "EVIDENCE_ORACLE_FAILED raised on impossible oracle",
+      "EVIDENCE_PARSE_FAILED raised on malformed JSON",
+      "EVIDENCE_ARTIFACT_MISSING raised on missing file"
+    ],
+    "pinned_fixture_result": "PASS",
+    "qualification_matrix_result": "PASS"
   },
   "evidence_paths": {
     "session_capture": "test/fixtures/harnesses/pi/pi-v0_85_1/raw-artifacts/pi.session.jsonl",

@@ -1425,13 +1425,27 @@ export function makePiAdapter(args: {
  * The capability-specific oracles are:
  *
  *   HEADLESS         — observed session `type === "session"`
+ *                      AND `invocation_mode === "headless"`.
+ *                      (CORRECTION04: a single session
+ *                      header is not sufficient evidence
+ *                      of headless mode.)
  *   STREAMING_EVENTS — observed session `type === "session"`
- *   JSONL            — observed session `type === "session"`
+ *                      AND `invocation_mode === "headless"`.
+ *                      (CORRECTION04: a single session
+ *                      header is not sufficient evidence
+ *                      of streaming.)
+ *   JSONL            — observed session `type === "session"`.
+ *                      (Canonical Factory name for the
+ *                      upstream JSON Event Stream Mode.)
  *   EXPLICIT_CWD     — observed session `cwd === requested_cwd`
- *   ISOLATED_DATA_DIR — observed session `cwd === requested_cwd`
- *                       AND observed session is fresh (this
- *                       campaign; required `requested_cwd`
- *                       is the isolated directory).
+ *   ISOLATED_DATA_DIR — observed session `cwd` lives under
+ *                       `isolated_session_dir` (the dedicated
+ *                       `--session-dir` directory).
+ *                       (CORRECTION04: cwd match alone is
+ *                       NOT sufficient evidence of isolation.
+ *                       Until `isolated_session_dir` is
+ *                       provided, the axis is demoted to
+ *                       LIVE_UNQUALIFIED.)
  *   CANCELLATION     — observed `halt_disposition ===
  *                       "HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE"`
  *
@@ -1440,6 +1454,17 @@ export function makePiAdapter(args: {
  *   is JSONL. FINAL_JSON's `harness_capability` is now
  *   UNSUPPORTED — the closed-world key list keeps the
  *   FINAL_JSON slot for backwards compatibility only.
+ *
+ * CORRECTION04 (C04-01..C04-06): semantic sufficiency is
+ *   checked at two levels. `validateLiveQualification`
+ *   enforces the structural predicate (typed semantic
+ *   evidence with disposition PASS and expected ===
+ *   observed). `verifyLiveQualificationEvidence(caps,
+ *   repoRoot)` re-reads the artifact, recomputes the
+ *   SHA256, recomputes the observed value, and refuses
+ *   path escape (`../` or symlink-outside-repo). A
+ *   capability cannot be LIVE_QUALIFIED unless both
+ *   checks pass.
  */
 export function defaultPiCapabilities(
   identity: HarnessQualificationIdentity,
@@ -1451,12 +1476,35 @@ export function defaultPiCapabilities(
     readonly cancellation_halt: string | null;
     /**
      * CWD the caller requested the harness to run in.
-     * The `EXPLICIT_CWD` and `ISOLATED_DATA_DIR`
-     * capability-specific oracles compare this string
-     * against the cwd observed in the captured session
-     * envelope.
+     * The `EXPLICIT_CWD` capability-specific oracle
+     * compares this string against the cwd observed in
+     * the captured session envelope.
      */
     readonly requested_cwd?: string;
+    /**
+     * CORRECTION04 C04-04: a dedicated session/state
+     * directory passed via `--session-dir <dir>` (or
+     * equivalent) proving session/state isolation. When
+     * provided, the builder qualifies
+     * `ISOLATED_DATA_DIR` by reading the artifact at
+     * `isolated_session_dir` and asserting that the
+     * captured session envelope's cwd lives under it.
+     * Until such evidence exists, `ISOLATED_DATA_DIR`
+     * stays `SUPPORTED + LIVE_UNQUALIFIED` — a cwd
+     * match alone is NOT sufficient evidence of
+     * isolation.
+     */
+    readonly isolated_session_dir?: string | null;
+    /**
+     * CORRECTION04 C04-05: invocation facts proving the
+     * harness was run in non-interactive / headless
+     * mode. Until the adapter captures and pins such
+     * facts, `HEADLESS` and `STREAMING_EVENTS` are
+     * demoted to LIVE_UNQUALIFIED; JSONL remains
+     * LIVE_QUALIFIED (the canonical name for the
+     * upstream JSON Event Stream Mode).
+     */
+    readonly invocation_mode?: "headless" | "interactive" | null;
   } = { session_capture: null, cancellation_halt: null },
 ): HarnessCapabilities {
   const empty = emptyCapabilities(identity, discovered_at_ms);
@@ -1533,6 +1581,8 @@ export function defaultPiCapabilities(
       ? readObservedCancellation(evidence.cancellation_halt)
       : null;
   const requestedCwd = evidence.requested_cwd ?? null;
+  const isolatedDir = evidence.isolated_session_dir ?? null;
+  const invocationMode = evidence.invocation_mode ?? null;
   type AxisEntry = {
     readonly lq: LiveQualificationState;
     readonly probe: CapabilityProbeEvidence | null;
@@ -1556,21 +1606,59 @@ export function defaultPiCapabilities(
       }),
     };
   }
+  // CORRECTION04 C04-04: ISOLATED_DATA_DIR requires
+  // isolation evidence (a dedicated --session-dir
+  // directory or --no-session). Cwd match alone is NOT
+  // sufficient. Until isolatedDir is provided AND the
+  // observed session cwd lives under it, demote to
+  // LIVE_UNQUALIFIED.
+  function isolatedDataDirEntry(): AxisEntry {
+    if (
+      isolatedDir === null ||
+      observedSession === null ||
+      observedSession.cwd === null
+    ) {
+      return emptyEntry;
+    }
+    // Use path-style "starts with isolatedDir + sep" to
+    // avoid /tmp matching /tmp-other. We compare the
+    // exact cwd to the dedicated dir; Factory's
+    // definition is that the captured session/state
+    // storage belongs under the dedicated directory.
+    const cwd = observedSession.cwd;
+    if (cwd === isolatedDir || cwd.startsWith(isolatedDir + "/")) {
+      return sessionProbe("ISOLATED_DATA_DIR", isolatedDir);
+    }
+    // Isolation evidence disagrees with cwd: refuse to
+    // fabricate ISOLATED_DATA_DIR qualification.
+    return emptyEntry;
+  }
+  // CORRECTION04 C04-05: HEADLESS / STREAMING_EVENTS
+  // require invocation facts proving non-interactive
+  // mode and protocol output. The session envelope is
+  // not sufficient evidence of headless mode (a single
+  // session header proves only that the harness
+  // emitted one). Until invocation_mode === "headless"
+  // is captured AND the session envelope shows
+  // type=session (the protocol output), both axes
+  // stay LIVE_UNQUALIFIED. JSONL remains LIVE_QUALIFIED
+  // because the canonical Factory name for the upstream
+  // JSON Event Stream Mode IS JSONL — the protocol
+  // output (session envelope) is the proof.
+  const headlessQualified =
+    invocationMode === "headless" && observedSession !== null;
+  const streamingQualified =
+    invocationMode === "headless" && observedSession !== null;
   const liveEntries: Record<typeof CAPABILITY_KEYS[number], AxisEntry> = {
-    HEADLESS: sessionProbe("HEADLESS", "session"),
-    STREAMING_EVENTS: sessionProbe("STREAMING_EVENTS", "session"),
+    HEADLESS: headlessQualified ? sessionProbe("HEADLESS", "session") : emptyEntry,
+    STREAMING_EVENTS: streamingQualified
+      ? sessionProbe("STREAMING_EVENTS", "session")
+      : emptyEntry,
     EXPLICIT_CWD:
       requestedCwd !== null
         ? sessionProbe("EXPLICIT_CWD", requestedCwd)
         : emptyEntry,
-    // C03-02: ISOLATED_DATA_DIR oracle binds session
-    // cwd == requested_cwd. The captured session
-    // envelope from this run MUST carry the requested
-    // isolated directory.
-    ISOLATED_DATA_DIR:
-      requestedCwd !== null
-        ? sessionProbe("ISOLATED_DATA_DIR", requestedCwd)
-        : emptyEntry,
+    ISOLATED_DATA_DIR: isolatedDataDirEntry(),
     JSONL: sessionProbe("JSONL", "session"),
     FINAL_JSON: emptyEntry,
     RPC: emptyEntry,

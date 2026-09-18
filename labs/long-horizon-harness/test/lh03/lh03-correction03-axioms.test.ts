@@ -53,6 +53,9 @@ import {
   artifactSha256,
   buildProbeEvidence,
 } from "../../src/adapter-common/evidence-reader.js";
+import {
+  verifyLiveQualificationEvidence,
+} from "../../src/adapter-common/evidence-verifier.js";
 import { redactJsonRecord, RedactionError } from "../../src/redaction/secret-redaction.js";
 
 const FIXTURE_SESSION =
@@ -65,12 +68,19 @@ const FIXTURE_PROCESS =
  * ------------------------------------------------------------------ */
 
 test("C03-01a: defaultPiCapabilities binds typed probe_evidence (not just a path) to LIVE_QUALIFIED axes", () => {
+  // CORRECTION04: HEADLESS/STREAMING_EVENTS/ISOLATED_DATA_DIR
+  // require additional evidence (invocation_mode,
+  // --session-dir). Without that evidence they are
+  // LIVE_UNQUALIFIED, not LIVE_QUALIFIED. JSONL is
+  // LIVE_QUALIFIED (canonical Factory name for the
+  // upstream JSON Event Stream Mode) and EXPLICIT_CWD
+  // is LIVE_QUALIFIED (cwd match).
   const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
   });
-  for (const k of ["HEADLESS", "STREAMING_EVENTS", "JSONL", "EXPLICIT_CWD", "ISOLATED_DATA_DIR"] as const) {
+  for (const k of ["JSONL", "EXPLICIT_CWD"] as const) {
     const ev = caps.capability_axes[k].probe_evidence;
     assert.ok(ev !== null, `${k} must have probe_evidence`);
     assert.equal(ev.capability, k, "probe_evidence.capability must equal axis key");
@@ -80,6 +90,13 @@ test("C03-01a: defaultPiCapabilities binds typed probe_evidence (not just a path
       ev.evidence_relation.observed,
       `${k} expected === observed`,
     );
+  }
+  // HEADLESS / STREAMING_EVENTS / ISOLATED_DATA_DIR are
+  // SUPPORTED + LIVE_UNQUALIFIED in this campaign.
+  for (const k of ["HEADLESS", "STREAMING_EVENTS", "ISOLATED_DATA_DIR"] as const) {
+    const axis = caps.capability_axes[k];
+    assert.equal(axis.live_qualification, "LIVE_UNQUALIFIED", `${k} must be LIVE_UNQUALIFIED`);
+    assert.equal(axis.probe_evidence, null, `${k} must have probe_evidence=null`);
   }
 });
 
@@ -255,34 +272,69 @@ test("C03-02a: EXPLICIT_CWD oracle PASSes iff requested_cwd === observed session
   );
 });
 
-test("C03-02b: ISOLATED_DATA_DIR oracle PASSes iff requested_cwd === observed session cwd", () => {
-  const pass = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+test("C03-02b: ISOLATED_DATA_DIR does NOT qualify on cwd match alone (CORRECTION04)", () => {
+  // CORRECTION04 C04-04: cwd match alone is no longer
+  // sufficient evidence of ISOLATED_DATA_DIR. The
+  // builder now requires an explicit
+  // `isolated_session_dir` argument (e.g. the value
+  // passed via `--session-dir <dir>`); without it, the
+  // axis is demoted to LIVE_UNQUALIFIED even when
+  // requested_cwd happens to match the observed cwd.
+  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
   });
-  assert.equal(pass.capability_axes.ISOLATED_DATA_DIR.live_qualification, "LIVE_QUALIFIED");
   assert.equal(
-    pass.capability_axes.ISOLATED_DATA_DIR.probe_evidence?.disposition,
-    "PASS",
+    caps.capability_axes.ISOLATED_DATA_DIR.live_qualification,
+    "LIVE_UNQUALIFIED",
+    "ISOLATED_DATA_DIR must be LIVE_UNQUALIFIED without isolated_session_dir",
   );
-  assert.throws(
-    () =>
-      defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
-        session_capture: FIXTURE_SESSION,
-        cancellation_halt: FIXTURE_PROCESS,
-        requested_cwd: "/var/isolated",
-      }),
-    /LIVE_QUALIFIED with failed oracle/,
+  assert.equal(
+    caps.capability_axes.ISOLATED_DATA_DIR.probe_evidence,
+    null,
+    "ISOLATED_DATA_DIR must have probe_evidence=null without isolated_session_dir",
+  );
+  // With isolated_session_dir set AND observed cwd
+  // living under it, the axis qualifies.
+  const isoCaps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    session_capture: FIXTURE_SESSION,
+    cancellation_halt: FIXTURE_PROCESS,
+    requested_cwd: "/private/tmp/pi-live",
+    isolated_session_dir: "/private/tmp/pi-live",
+  });
+  assert.equal(isoCaps.capability_axes.ISOLATED_DATA_DIR.live_qualification, "LIVE_QUALIFIED");
+  assert.equal(
+    isoCaps.capability_axes.ISOLATED_DATA_DIR.probe_evidence?.disposition,
+    "PASS",
   );
 });
 
-test("C03-02c: HEADLESS oracle PASSes iff observed session.type === 'session'", () => {
-  const caps = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+test("C03-02c: HEADLESS requires invocation_mode=headless (CORRECTION04)", () => {
+  // CORRECTION04 C04-05: a single session header is
+  // not sufficient evidence of headless mode. The
+  // builder now requires invocation_mode === "headless"
+  // to qualify HEADLESS.
+  const withoutInvocation = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
   });
-  const ev = caps.capability_axes.HEADLESS.probe_evidence;
+  assert.equal(
+    withoutInvocation.capability_axes.HEADLESS.live_qualification,
+    "LIVE_UNQUALIFIED",
+  );
+  assert.equal(
+    withoutInvocation.capability_axes.HEADLESS.probe_evidence,
+    null,
+  );
+  // With invocation_mode === "headless", HEADLESS
+  // qualifies from the session envelope.
+  const withInvocation = defaultPiCapabilities(QUALIFIED_PI_IDENTITY, 0, {
+    session_capture: FIXTURE_SESSION,
+    cancellation_halt: FIXTURE_PROCESS,
+    invocation_mode: "headless",
+  });
+  const ev = withInvocation.capability_axes.HEADLESS.probe_evidence;
   assert.ok(ev !== null);
   assert.equal(ev.evidence_relation.expected, "session");
   assert.equal(ev.evidence_relation.observed, "session");
@@ -378,22 +430,33 @@ test("C03-05b: wrong artifact cannot qualify (malformed JSON session)", () => {
   );
 });
 
-test("C03-05c: artifact hash drift cannot qualify (recorded sha256 != on-disk sha256)", () => {
+test("C03-05c: artifact hash drift fails closed (CORRECTION04 verifyLiveQualificationEvidence)", () => {
+  // CORRECTION04 C04-02: artifact hash drift must be
+  // rejected by the verifier, not merely "detected by
+  // recomputation". The verifier recomputes the SHA256
+  // of the on-disk bytes and refuses a recorded hash
+  // that disagrees.
   const id = QUALIFIED_PI_IDENTITY;
   const caps = emptyCapabilities(id, 1700000000000);
   const realSha = artifactSha256(FIXTURE_SESSION);
+  // Build a forged document whose JSONL axis carries a
+  // wrong recorded sha256. (We use JSONL because it's
+  // the canonical LIVE_QUALIFIED capability under
+  // CORRECTION04.)
+  const forgedSha =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
   const forged = {
     ...caps,
     capability_axes: {
       ...caps.capability_axes,
-      HEADLESS: {
+      JSONL: {
         harness_capability: "SUPPORTED" as const,
         live_qualification: "LIVE_QUALIFIED" as const,
         probe_evidence: buildProbeEvidence({
-          capability: "HEADLESS" as const,
+          capability: "JSONL" as const,
           probe_kind: "SESSION_ENVELOPE" as const,
           artifact_path: FIXTURE_SESSION,
-          artifact_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // wrong
+          artifact_sha256: forgedSha,
           expected: "session",
           observed: "session",
         }),
@@ -402,32 +465,37 @@ test("C03-05c: artifact hash drift cannot qualify (recorded sha256 != on-disk sh
     },
     live_qualification_by_key: {
       ...caps.live_qualification_by_key,
-      HEADLESS: "LIVE_QUALIFIED" as const,
+      JSONL: "LIVE_QUALIFIED" as const,
     },
   };
-  // The validator does not (yet) recompute the sha256
-  // itself; it checks the recorded sha256 field is
-  // non-empty and present. The C03-05c assertion is
-  // therefore that a forged wrong sha256 is detectable
-  // by recomputation: the recorded sha256 differs from
-  // the real on-disk sha256.
-  assert.notEqual(
-    forged.capability_axes.HEADLESS.probe_evidence?.artifact_sha256,
-    realSha,
-    "forged sha256 must differ from real sha256 to be detectable",
+  // The verifier is imported at module top.
+  const result = verifyLiveQualificationEvidence(
+    forged as unknown as Parameters<typeof verifyLiveQualificationEvidence>[0],
+    process.cwd(),
   );
-  // And the fixture path passes the validator when the
-  // recorded sha256 is the real one — sanity check.
+  assert.equal(result.ok, false, "verifier must reject forged sha256");
+  const hashError = (result.errors ?? []).find((e) => e.kind === "EVIDENCE_HASH_MISMATCH");
+  assert.ok(
+    hashError !== undefined,
+    "verifier must report EVIDENCE_HASH_MISMATCH",
+  );
+  assert.equal(hashError!.key, "JSONL");
+  // Sanity: a real document with the real sha256 must PASS.
   const validCaps = defaultPiCapabilities(id, 0, {
     session_capture: FIXTURE_SESSION,
     cancellation_halt: FIXTURE_PROCESS,
     requested_cwd: "/private/tmp/pi-live",
   });
   assert.equal(
-    validCaps.capability_axes.HEADLESS.probe_evidence?.artifact_sha256,
+    validCaps.capability_axes.JSONL.probe_evidence?.artifact_sha256,
     realSha,
     "real sha256 must equal recorded sha256",
   );
+  const okResult = verifyLiveQualificationEvidence(
+    validCaps,
+    process.cwd(),
+  );
+  assert.equal(okResult.ok, true, "verifier must accept real sha256");
 });
 
 test("C03-05d: right artifact / wrong cwd cannot qualify EXPLICIT_CWD (builder throws)", () => {

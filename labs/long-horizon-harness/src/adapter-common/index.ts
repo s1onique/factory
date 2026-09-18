@@ -32,3 +32,12 @@ export {
   notRunProbeEvidence,
   haltProbeEvidence,
 } from "./evidence-reader.js";
+
+export {
+  verifyLiveQualificationEvidence,
+  resolveEvidencePath,
+  EVIDENCE_VERIFICATION_ERROR_KINDS,
+  type EvidenceVerificationErrorKind,
+  type EvidenceVerificationError,
+  type EvidenceVerificationResult,
+} from "./evidence-verifier.js";
