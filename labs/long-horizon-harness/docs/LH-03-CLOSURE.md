@@ -23,8 +23,26 @@ ENTRY_HEAD                = 715e6390d78228f089270259e1bd1307140adb75
 DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
 LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
-CLOSURE_RECORD_COMMIT     = <recorded at commit time>
-CURRENT_HEAD              = <live git rev-parse HEAD at closure time>
+CLOSURE_RECORD_COMMIT     = 961a6c8d9e6f09487d6561c436de25bc258f1256
+CURRENT_HEAD              = 961a6c8d9e6f09487d6561c436de25bc258f1256 (= CLOSURE_RECORD_COMMIT; cosmetic rebinds stop here)
+
+The closure-of-record binds three immutable SHAs:
+
+1. `LH03_IMPL_COMMIT` (04e59784…) — the original LH-03
+   implementation.
+2. `LH03_CORRECTION01_COMMIT` (5958c7c…) — the
+   CORRECTION01 patch (real Pi 0.85.1 schema, full
+   identity binding, fail-visible decoder integration,
+   durable-path redaction, capability axes, Cline
+   halting, live-capture secret oracle).
+3. `CLOSURE_RECORD_COMMIT` (961a6c8…) — the closure
+   document carrying this text.
+
+The closure-of-record does NOT chase `CURRENT_HEAD`
+recursively. The implementation SHAs are the
+authoritative binding; cosmetic document updates, if
+any, are recorded as separate commits and do not move
+the authoritative SHAs.
 ```
 
 The closure-of-record binds three immutable SHAs:
