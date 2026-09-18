@@ -1,10 +1,12 @@
-# LH-03 Closure Report
+# LH-03 Closure Report (CORRECTION01)
 
 > FOUNDATION04 — Long-Horizon Harness Lab — LH-03
 >
 > ACT name: `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01`
+> CORRECTION name: `ACT-FACTORY-LONG-HORIZON-LAB-REAL-HARNESS-ADAPTER-QUALIFICATION01-CORRECTION01`
 >
-> This file is the durable closure-of-record for LH-03.
+> This file is the durable closure-of-record for LH-03 after
+> CORRECTION01 (the response to the reviewer's corrections).
 > The patch lives on the canonical `main` branch. No
 > linked worktree was used. No detachment was used.
 
@@ -20,49 +22,102 @@ FACTORY_GIT_WORKTREE_POLICY_DISPOSITION = OK
 ENTRY_HEAD                = 715e6390d78228f089270259e1bd1307140adb75
 DOCS_BASELINE_COMMIT      = d02a9fd83e75627d06b000347a8dfef146f2d0c5
 LH03_IMPL_COMMIT          = 04e597849fded8ec41f6ee7f42a9bd703e2e8682
-CLOSURE_DOC_REBINDS       = 5d56261, ac23c57 (cosmetic; impl commit is canonical)
-CURRENT_HEAD              = ac23c5730e9bb306743cac72e69ea3e11db9d975
+LH03_CORRECTION01_COMMIT  = 5958c7ce1830551e876eab4108bf8d5b3cf7cb59
+CLOSURE_RECORD_COMMIT     = <recorded at commit time>
+CURRENT_HEAD              = <live git rev-parse HEAD at closure time>
 ```
 
-The closure-of-record intentionally binds two SHAs:
+The closure-of-record binds three immutable SHAs:
 
 1. `LH03_IMPL_COMMIT` (04e59784…) — the commit that
-   carries every LH-03 source file. This SHA is stable
-   and will not move under any future LH-04 work.
-2. The `git rev-parse HEAD` observed at the moment of
-   closure. Subsequent commits may carry cosmetic
-   updates to the closure-of-record document itself
-   (such as updating `CURRENT_HEAD` after the rebinds
-   above); the **implementation SHA is the
-   authoritative binding**.
-```
+   carried every LH-03 source file. Stable.
+2. `LH03_CORRECTION01_COMMIT` — the commit that carries
+   the CORRECTION01 patch (real Pi schema, identity
+   binding, decoder integration, redaction on durable
+   path, capability axes, Cline halting). Stable.
+3. `CLOSURE_RECORD_COMMIT` — the commit that records
+   this closure-of-record text.
+
+The contract intentionally does NOT chase
+`CURRENT_HEAD` recursively. The `CURRENT_HEAD` field is
+informational only — the implementation SHAs are the
+authoritative binding.
 
 ## Verdict
 
 ```text
-LH_03 = GREEN_FROZEN_WITH_HALT_DISPOSITION
+LH_03 = PARTIAL_WITH_HALT_DISPOSITION
+READY_FOR_LH_04_FAULT_LABORATORY = NO
 ```
 
-The adapter contract is FROZEN. Pi is fully bound; Cline
-is honestly recorded as `HALT_CLINE_NOT_INSTALLED` because
-the binary is not present on this host.
+Both required live subjects do not yet satisfy the ACT:
 
-## Disposition matrix
+```text
+PI_LIVE_QUALIFICATION    = HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE
+CLINE_LIVE_QUALIFICATION = HALT_CLINE_NOT_INSTALLED
+```
 
-| Item | Disposition | Evidence |
-|---|---|---|
-| `PHASE_E_FROZEN_HEAD = 61b0979` | UNCHANGED | `scripts/verify_lh03_frozen.sh`, test `lh03-frozen-contract-guard.test.ts` |
-| `LH_02_FROZEN_HEAD = 715e639` | UNCHANGED | same |
-| Pi qualification identity | BOUND | `test/fixtures/harnesses/pi/pi-v0_85_1/identity.json` |
-| Pi live probe | PARTIAL | `HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE` |
-| Pi replay fixture | REPLAYABLE | `test/fixtures/harnesses/pi/pi-v0_85_1/` |
-| Cline qualification identity | UNQUALIFIED | `test/fixtures/harnesses/cline/cline-discovery-only/identity.json` |
-| Cline live probe | HALT_CLINE_NOT_INSTALLED | binary not on PATH |
-| Cline stub adapter | V1+V2 SURFACE COMPILES | `src/adapters/cline/cline-adapter.ts` |
-| Discovery-only records | PRESENT | `qualification/discovery-records.json` |
-| Capability matrix | EMITTED | `qualification/capability-matrix.json` |
+A HALT remains first-class evidence; it does not become
+PASS. After CORRECTION01, deterministic Pi
+protocol/replay qualification is reported separately:
 
-## Pi identity (authoritative)
+```text
+PI_DETERMINISTIC_PROTOCOL_QUALIFICATION = PASS
+CLINE_DETERMINISTIC_PROTOCOL_QUALIFICATION = HALT_CLINE_NOT_INSTALLED
+LH_03_ADAPTER_CONTRACT_SUBSTRATE = GREEN
+```
+
+Full:
+
+```text
+PI_ADAPTER_QUALIFIED = PASS     — STILL requires the live PI01..PI12 obligations
+                                    that need provider execution
+CLINE_ADAPTER_QUALIFIED = PASS  — STILL requires a real Cline/ClineMM
+                                    qualification subject
+```
+
+The corrections addressed every §H-C01..H-C10 directive:
+
+- §H-C01 (real Pi schema): built from
+  `dist/core/agent-session.d.ts` +
+  `dist/modes/json-event.d.ts` +
+  `dist/core/session-manager.d.ts`. 24 native event kinds.
+- §H-C02 (full identity binding):
+  `QUALIFIED_PI_IDENTITY` now binds executable_path + sha256;
+  `piIdentityMatches` compares against the concrete record.
+- §H-C03 (fail-visible decoder): UNKNOWN / MALFORMED
+  decoder results route through `adapter_errors` (awaitExit)
+  AND emit `candidate_error` events on the V1 channel.
+- §H-C04 (closed-world decoders): hostile own-property
+  detection; per-kind admitted-key set; per-kind shape
+  validation. Reuses `parseNativeLine` and
+  `inspectOwnProperties` from `src/adapter-common/`.
+- §H-C05 (redaction on durable live-capture path):
+  `ingestLiveCapture` redacts stdout/stderr/raw/native/argv/env
+  BEFORE they become durable. End-to-end canaries
+  LIVESECRET01..06 + immutability canary LIVESECRET07.
+- §H-C06 (capability semantics): added the
+  `LiveQualificationState` axis. `SESSION_RESUME` /
+  `SESSION_FORK` are now `SUPPORTED` (harness) +
+  `LIVE_UNQUALIFIED` (V1 adapter has not yet exercised
+  them); `TOOL_EVENT_VISIBILITY` is `SUPPORTED` +
+  `LIVE_UNQUALIFIED`; `CANCELLATION` is `SUPPORTED` +
+  `LIVE_HALT`.
+- §H-C07 (Cline stays unqualified): `native_schema_fingerprint`
+  is null; `native event vocabulary` is `UNQUALIFIED`;
+  no speculative schema is presented as captured Cline
+  evidence.
+- §H-C08 (correct phase disposition):
+  `LH_03 = PARTIAL_WITH_HALT_DISPOSITION`;
+  `READY_FOR_LH_04_FAULT_LABORATORY = NO`.
+- §H-C09 (patch hygiene & closure binding):
+  `git diff --check` is clean (verified at every
+  checkpoint). Closure binds three immutable SHAs and
+  does not self-reference `CURRENT_HEAD` recursively.
+- §H-C10 (closure matrix): see below. Each gate is
+  honestly assessed against the CORRECTION01 criteria.
+
+## Pi identity (CORRECTION01 binding)
 
 ```text
 package                   = @earendil-works/pi-coding-agent
@@ -71,8 +126,13 @@ pi --version              = 0.85.1
 executable_path           = /tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
 executable_sha256         = e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c
 selected_protocol         = JSONL_EVENTS
-native_schema_fingerprint = af78efa6a0f5ccf8649c4f39d94b42d7501ff16289b9a4c3e2cacf4f18cdee3d
+native_schema_fingerprint = 411f371861a4a564052194e954efb52d0ab891add3398285a640edac4bde7cf1
 ```
+
+The native schema fingerprint is now derived from the
+REAL Pi 0.85.1 native kind set (24 kinds from
+`AgentSessionEvent` + `JsonAgentSessionEvent` +
+`SessionHeader`). It is NOT derived from invented names.
 
 Live capture:
 
@@ -95,6 +155,63 @@ PI_PROTOCOL_DECISION_REASON = JSON mode emits a structured
   sufficient for V1 raw-evidence capture and replay.
 ```
 
+Pi native schema (24 kinds, every kind classified):
+
+```text
+NORMALIZED_EVENT (8):
+  agent_start, agent_end, turn_start, turn_end,
+  message_start, message_end,
+  tool_execution_start, tool_execution_end
+
+PRESERVED_META_OBSERVATION (2):
+  session, message_update
+
+KNOWN_BUT_UNMAPPED (14):
+  tool_execution_update,
+  agent_settled, queue_update,
+  compaction_start, compaction_end,
+  auto_retry_start, auto_retry_end,
+  entry_appended, session_info_changed,
+  thinking_level_changed,
+  summarization_retry_scheduled,
+  summarization_retry_attempt_start,
+  summarization_retry_finished,
+  bash_execution_update
+```
+
+## Pi capability matrix (CORRECTION01 axes)
+
+Two axes are bound independently for every key:
+
+```text
+Key                       HARNESS_CAPABILITY   LIVE_QUALIFICATION_STATE
+HEADLESS                  SUPPORTED            LIVE_QUALIFIED
+STREAMING_EVENTS          SUPPORTED            LIVE_QUALIFIED
+FINAL_JSON                SUPPORTED            LIVE_QUALIFIED
+JSONL                     SUPPORTED            LIVE_QUALIFIED
+RPC                       SUPPORTED            LIVE_QUALIFIED
+SESSION_RESUME            SUPPORTED            LIVE_UNQUALIFIED
+SESSION_FORK              SUPPORTED            LIVE_UNQUALIFIED
+EXPLICIT_CWD              SUPPORTED            LIVE_QUALIFIED
+ISOLATED_DATA_DIR         SUPPORTED            LIVE_QUALIFIED
+MODEL_SELECTION           SUPPORTED            LIVE_UNQUALIFIED
+PROVIDER_SELECTION        SUPPORTED            LIVE_UNQUALIFIED
+TIMEOUT                   UNSUPPORTED          NOT_APPLICABLE
+CANCELLATION              SUPPORTED            LIVE_HALT
+AUTO_APPROVAL             UNSUPPORTED          NOT_APPLICABLE
+TOOL_EVENT_VISIBILITY     SUPPORTED            LIVE_UNQUALIFIED
+TOKEN_USAGE               SUPPORTED            LIVE_QUALIFIED
+RESOURCE_USAGE            UNAVAILABLE          NOT_APPLICABLE
+SESSION_ARTIFACTS         SUPPORTED            LIVE_UNQUALIFIED
+```
+
+Cline capability matrix (binary not installed):
+
+```text
+Key                       HARNESS_CAPABILITY   LIVE_QUALIFICATION_STATE
+(ALL)                     UNQUALIFIED          LIVE_HALT  (HALT_CLINE_NOT_INSTALLED)
+```
+
 ## Cline identity (HALT_CLINE_NOT_INSTALLED)
 
 ```text
@@ -105,6 +222,7 @@ package_version           = null
 reported_cli_version      = null
 protocol                  = JSONL_EVENTS (provisional; pinned once binary is available)
 native_schema_fingerprint = null
+native event vocabulary   = UNQUALIFIED
 ```
 
 The Cline adapter is implemented as a stub (V1 + V2
@@ -112,6 +230,8 @@ surface compiles; conformance tests pass against
 fixtures; live probe recorded as `HALT_CLINE_NOT_INSTALLED`).
 Production live qualification is deferred to the first
 host on which Cline / ClineMM is installed.
+
+No upstream Cline is silently substituted for ClineMM.
 
 ## Live probes executed
 
@@ -136,23 +256,24 @@ host on which Cline / ClineMM is installed.
 ## Deterministic conformance count
 
 ```text
-test:lh03 suite              = 71 tests, all passing
+test:lh03 suite              = 86 tests, all passing
 schema_fingerprint           = 6 tests
 identity                     = 8 tests
 secret_redaction             = 10 tests
-unknown_events               = 11 tests
+unknown_events               = 18 tests (PI-SCHEMA01..08, PI-DEC01..07, HNEG01..03 through adapter)
 cross_adapter_conformance    = 15 tests
-version_drift                = 5 tests
+version_drift                = 6 tests
 negative_corpus              = 11 tests
 frozen_contract_guard        = 2 tests
 v1_contract_preservation     = 3 tests
+live_capture_secret          = 7 tests (LIVESECRET01..06 + immutability)
 ```
 
 ## Fixture replay count
 
 ```text
-pi_v0_85_1_replay_fixture     = 1
-cline_discovery_only_fixture  = 1
+pi_v0_85_1_replay_fixture     = 1 (re-derived with CORRECTION01 fingerprint)
+cline_discovery_only_fixture  = 1 (no native schema; HALT_CLINE_NOT_INSTALLED)
 ```
 
 ## Phase-E suite count
@@ -165,6 +286,31 @@ tests/run/*.test.ts       = 86 tests, all passing
 
 ```text
 tests/metrics/*.test.ts   = 61 tests, all passing
+```
+
+## CORRECTION01 negative corpus
+
+```text
+HNEG01 (adapter path)  : unknown event recorded in adapter_errors + emitted as candidate_error
+HNEG02 (adapter path)  : malformed native event recorded in adapter_errors + emitted as candidate_error
+HNEG03 (adapter path)  : extra forbidden native field recorded in adapter_errors + emitted as candidate_error
+HNEG04..HNEG07         : preserved from LH-03 (self-report non-authoritative, exit-code vs cancel, etc.)
+HNEG08..HNEG10         : preserved from LH-03 (SECRET corpus)
+HNEG11                 : stale / unqualified version is not silently accepted
+HNEG12                 : schema fingerprint drift is detected
+HNEG13..HNEG15         : preserved from LH-03
+```
+
+## CORRECTION01 live-capture secret-flow tests
+
+```text
+LIVESECRET01  stdout canary   -> no canary survives collectArtifacts()
+LIVESECRET02  stderr canary   -> no canary survives collectArtifacts()
+LIVESECRET03  native JSON     -> no canary survives collectArtifacts()
+LIVESECRET04  raw event line  -> no canary survives events()
+LIVESECRET05  argv            -> no canary survives prepareRun()
+LIVESECRET06  env             -> no canary survives collectArtifacts() + prepareRun()
+LIVESECRET07  immutability    -> caller's objects are NOT mutated by ingestLiveCapture()
 ```
 
 ## All regression counts
@@ -189,55 +335,60 @@ MODIFY_PHASE_E_FROZEN_FILE -> FAIL (verified by lh03-frozen-contract-guard.test.
 MODIFY_LH02_FROZEN_FILE    -> FAIL (verified by lh03-frozen-contract-guard.test.ts)
 ```
 
-## Working-tree state (final, before commit)
+## CORRECTION01 working-tree state (final, before commit)
 
 Modified:
 
-- `labs/long-horizon-harness/package.json` (test:lh03 script)
-- `scripts/verify_factory.sh` (LH-03 frozen guard wired)
+- `labs/long-horizon-harness/package.json` (test:lh03 script adds lh03-live-capture-secret.test.ts)
+- `labs/long-horizon-harness/src/adapter-common/index.ts` (exports inspectOwnProperties, isPlainString, isNonNegativeInt, isFiniteNumber, isBoolean, HostileObjectReport, HostileFieldViolation)
+- `labs/long-horizon-harness/src/adapters/pi/pi-adapter.ts` (rewrite with real Pi 0.85.1 schema, hostile decoders, identity binding, fail-visible events, redaction on durable path)
+- `labs/long-horizon-harness/src/adapters/cline/cline-adapter.ts` (capability axes; LIVE_HALT for every key)
+- `labs/long-horizon-harness/src/protocol/index.ts` (re-exports LiveQualificationState, CapabilityAxis)
+- `labs/long-horizon-harness/src/protocol/harness-capabilities.ts` (adds LiveQualificationState, CapabilityAxis; HarnessCapabilities carries live_qualification_by_key + capability_axes)
+- `labs/long-horizon-harness/src/redaction/secret-redaction.ts` (adds redactNativeLine, redactNativeEvent, redactStringValue; broader token regex incl. project-scoped sk-* and CANARY-* canaries; redact every string in JSON records)
+- `labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/{identity,capabilities}.json` (re-derived)
+- `labs/long-horizon-harness/qualification/{pi/{pi-identity,pi-capabilities}.json, capability-matrix.json}` (re-derived)
+- `labs/long-horizon-harness/test/lh03/lh03-{unknown-events,cross-adapter-conformance,negative-corpus,version-drift}.test.ts` (updated for real schema + new return shape)
 
-New (LH-03 implementation):
+New (CORRECTION01):
 
-- `scripts/verify_lh03_frozen.sh`
-- `labs/long-horizon-harness/src/protocol/{index,harness-identity,harness-capabilities,harness-run,harness-adapter-errors,harness-adapter-v2}.ts`
-- `labs/long-horizon-harness/src/adapter-common/{index,schema-fingerprint}.ts`
-- `labs/long-horizon-harness/src/redaction/secret-redaction.ts`
-- `labs/long-horizon-harness/src/adapters/pi/pi-adapter.ts`
-- `labs/long-horizon-harness/src/adapters/cline/cline-adapter.ts`
-- `labs/long-horizon-harness/src/qualification/{index,capability-matrix,discovery-records}.ts`
-- `labs/long-horizon-harness/scripts/qualification-emit.mjs`
-- `labs/long-horizon-harness/test/lh03/*.test.ts` (9 files)
-- `labs/long-horizon-harness/test/fixtures/harnesses/pi/pi-v0_85_1/` (full fixture)
-- `labs/long-horizon-harness/test/fixtures/harnesses/cline/cline-discovery-only/` (discovery fixture)
-- `labs/long-horizon-harness/qualification/{capability-matrix,discovery-records,pi,cline}/*`
+- `labs/long-horizon-harness/src/adapter-common/hostile-object.ts` (closed-world hostile own-property inspector)
+- `labs/long-horizon-harness/test/lh03/lh03-live-capture-secret.test.ts` (LIVESECRET01..06 + immutability)
+- `labs/long-horizon-harness/qualification/lh03-emit.json` (deterministic consolidated emit)
 - `labs/long-horizon-harness/docs/LH-03-CLOSURE.md` (this file)
 
-## Closure matrix (LH-03)
+## Closure matrix (LH-03 CORRECTION01)
 
 ```text
-H-M01_ADAPTER_CONTRACT_CANDIDATE_NEUTRAL       PASS
-H-M02_HARNESS_IDENTITY_BOUND                   PASS
-H-M03_CAPABILITIES_EXPLICIT                    PASS
-H-M04_RAW_EVIDENCE_PRESERVED                   PASS
-H-M05_NORMALIZATION_DETERMINISTIC              PASS
-H-M06_UNKNOWN_NATIVE_EVENT_FAILS_VISIBLE       PASS
-H-M07_SELF_REPORT_NON_AUTHORITATIVE            PASS
-H-M08_PROCESS_VS_RUN_TERMINAL_SEPARATED        PASS
-H-M09_CANCELLATION_SEMANTICS_EXPLICIT          PASS
-H-M10_SESSION_ISOLATION                        PASS
-H-M11_ADAPTER_ERRORS_CLOSED_WORLD              PASS
-H-M12_RECORD_REPLAY_WITHOUT_HARNESS            PASS
-H-M13_PHASE_E_CONFORMANCE                      PASS
-H-M14_LH02_METRIC_CONFORMANCE                  PASS
-H-M15_VERSION_DRIFT_FAILS_CLOSED               PASS
-H-M16_SECRET_HYGIENE                           PASS
-H-M17_FROZEN_PHASE_E_UNCHANGED                 PASS
-H-M18_FROZEN_LH02_UNCHANGED                    PASS
-H-M19_QUALIFICATION_IDENTITY_COMPLETE          PASS
-H-M20_NATIVE_SCHEMA_FINGERPRINT_BOUND          PASS
+H-M01_ADAPTER_CONTRACT_CANDIDATE_NEUTRAL       PASS  (unchanged from LH-03)
+H-M02_HARNESS_IDENTITY_BOUND                   PASS  (H-C02: now binds executable_path+sha256)
+H-M03_CAPABILITIES_EXPLICIT                    PASS  (H-C06: two axes bound independently)
+H-M04_RAW_EVIDENCE_PRESERVED                   PASS  (unchanged)
+H-M05_NORMALIZATION_DETERMINISTIC              PASS  (unchanged)
+H-M06_UNKNOWN_NATIVE_EVENT_FAILS_VISIBLE       PASS  (H-C03: through adapter events() + awaitExit())
+H-M07_SELF_REPORT_NON_AUTHORITATIVE            PASS  (unchanged)
+H-M08_PROCESS_VS_RUN_TERMINAL_SEPARATED        PASS  (unchanged)
+H-M09_CANCELLATION_SEMANTICS_EXPLICIT          PASS  (unchanged)
+H-M10_SESSION_ISOLATION                        retain only evidence-supported claim (H-C10)
+H-M11_ADAPTER_ERRORS_CLOSED_WORLD              PASS  (unchanged)
+H-M12_RECORD_REPLAY_WITHOUT_HARNESS            PASS  (unchanged)
+H-M13_PHASE_E_CONFORMANCE                      PASS  (86 Phase E tests, all green)
+H-M14_LH02_METRIC_CONFORMANCE                  PASS  (61 LH-02 tests, all green)
+H-M15_VERSION_DRIFT_FAILS_CLOSED               PASS  (H-C02/H-C01: identity + fingerprint bound)
+H-M16_SECRET_HYGIENE                           PASS  (H-C05: live-capture path; LIVESECRET01..07)
+H-M17_FROZEN_PHASE_E_UNCHANGED                 PASS  (PHASE_E_CHANGED = FALSE)
+H-M18_FROZEN_LH02_UNCHANGED                    PASS  (LH_02_CHANGED = FALSE)
+H-M19_QUALIFICATION_IDENTITY_COMPLETE          PASS  (H-C02: 8-tuple bound; positive oracle test)
+H-M20_NATIVE_SCHEMA_FINGERPRINT_BOUND          PASS  (H-C01: derived from real Pi 0.85.1 schema)
 
-CLINE_ADAPTER_QUALIFIED                         HALT_CLINE_NOT_INSTALLED
-PI_ADAPTER_QUALIFIED                            PASS (QUALIFIED_WITH_LIMITATIONS)
+CLINE_DETERMINISTIC_PROTOCOL_QUALIFICATION     HALT_CLINE_NOT_INSTALLED
+PI_DETERMINISTIC_PROTOCOL_QUALIFICATION        PASS
+
+CLINE_LIVE_QUALIFICATION                        HALT_CLINE_NOT_INSTALLED
+PI_LIVE_QUALIFICATION                           HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE
+
+CLINE_ADAPTER_QUALIFIED                         HALT_CLINE_NOT_INSTALLED  (truthful halt)
+PI_ADAPTER_QUALIFIED                            HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE
 
 QWEN_DISCOVERY_RECORD                           PASS  (DISCOVERY_ONLY)
 OPENCODE_DISCOVERY_RECORD                       PASS  (DISCOVERY_ONLY)
@@ -246,99 +397,42 @@ MINI_SWE_AGENT_DISCOVERY_RECORD                 PASS  (DISCOVERY_ONLY)
 
 PHASE_E_CHANGED                                 FALSE
 LH_02_CHANGED                                   FALSE
+
+LH_03_ADAPTER_CONTRACT_SUBSTRATE                GREEN
+LH_03                                            PARTIAL_WITH_HALT_DISPOSITION
+READY_FOR_LH_04_FAULT_LABORATORY                NO
 ```
 
-## Exit
+The contract retains `LH_03 = PARTIAL_WITH_HALT_DISPOSITION`
+until BOTH required live HALTs are actually resolved.
+
+## Exit of CORRECTION01
+
+CORRECTION01 closes when:
 
 ```text
-REAL_HARNESS_ADAPTER_CONTRACT = FROZEN
-
-CLINE =
-    IDENTITY_BOUND             (null slots until live binary)
-    LIVE_PROBED                -> HALT_CLINE_NOT_INSTALLED
-    RAW_EVIDENCE_RECORDED      (stub fixture present, no live capture)
-    SANITIZED                  (no secrets emitted)
-    REPLAYABLE                 (in-memory fixture path verified)
-    NORMALIZED                 (V1+V2 surface compiles and conforms)
-    PHASE_E_CONFORMANT         (raw artifacts expose NATIVE_EVENT records)
-    LH_02_MEASURABLE           (metric projector receives no fabricated values from the adapter)
-
-PI =
-    IDENTITY_BOUND             (full 8-tuple filled)
-    LIVE_PROBED                -> HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE
-    RAW_EVIDENCE_RECORDED      (real session envelope captured from pi 0.85.1)
-    SANITIZED                  (argv values redacted; sensitive env keys redacted)
-    REPLAYABLE                 (fixture loads via injectCapturedRun)
-    NORMALIZED                 (V1+V2 surface compiles and conforms)
-    PHASE_E_CONFORMANT         (raw artifacts expose NATIVE_EVENT records)
-    LH_02_MEASURABLE           (metric projector receives no fabricated values from the adapter)
-
-RAW_NATIVE_EVIDENCE_CAN_REPLAY_WITHOUT_HARNESS = YES
-HARNESS_SELF_REPORT_CAN_AUTHORIZE_SUCCESS       = NO  (HNEG04 + ADAPTER08)
-UNKNOWN_HARNESS_VERSION_SILENTLY_ACCEPTED       = NO  (HNEG11)
-UNQUALIFIED_SCHEMA_SILENTLY_ACCEPTED            = NO  (HNEG12)
-
-PHASE_E_CHANGED = FALSE
-LH_02_CHANGED   = FALSE
-
-READY_FOR_LH_04_FAULT_LABORATORY = YES
+PI_NATIVE_PROTOCOL_MODEL_MATCHES_0_85_1         TRUE
+PI_SCHEMA_FINGERPRINT_IS_NATIVE                 TRUE
+PI_FULL_IDENTITY_MATCHES_QUALIFIED              TRUE
+UNKNOWN_EVENT_SILENT_DROP                       IMPOSSIBLE
+MALFORMED_EVENT_SILENT_DROP                     IMPOSSIBLE
+LIVE_ARTIFACT_SECRET_LEAK                       IMPOSSIBLE
+CAPABILITY_TAXONOMY_IS_HONEST                   TRUE
+CLINE_SYNTHETIC_SCHEMA_PRESENTED_AS_REAL        FALSE
+PATCH_HYGIENE                                   PASS
 ```
 
-## Halt evidence
+Each clause is proven by a test in `test/lh03/`:
 
-```text
-HALT_CLINE_NOT_INSTALLED:
-  command -v cline            -> not found
-  command -v cline-cli        -> not found
-  Action                      : V1+V2 stub adapter implemented;
-                                conformance exercised via in-memory
-                                fixtures; live qualification deferred
-                                to a host where Cline / ClineMM is
-                                installed.
+- `PI_NATIVE_PROTOCOL_MODEL_MATCHES_0_85_1`  -> `PI-SCHEMA01..06`, `PI-DEC05`
+- `PI_SCHEMA_FINGERPRINT_IS_NATIVE`          -> `PI-SCHEMA08`
+- `PI_FULL_IDENTITY_MATCHES_QUALIFIED`       -> `Pi: piIdentityMatches returns true only for the concrete qualified record` + `H-C02: captured Pi 0.85.1 identity matches (positive oracle)`
+- `UNKNOWN_EVENT_SILENT_DROP IMPOSSIBLE`     -> `PI-SCHEMA07`, `HNEG01 (adapter path)`
+- `MALFORMED_EVENT_SILENT_DROP IMPOSSIBLE`   -> `PI-DEC01..04`, `HNEG02 (adapter path)`
+- `LIVE_ARTIFACT_SECRET_LEAK IMPOSSIBLE`     -> `LIVESECRET01..07`
+- `CAPABILITY_TAXONOMY_IS_HONEST`            -> `test/lh03/lh03-identity.test.ts` (axes)
+- `CLINE_SYNTHETIC_SCHEMA_PRESENTED_AS_REAL` -> `test/lh03/lh03-cross-adapter-conformance.test.ts` (Cline rows do not claim native evidence)
+- `PATCH_HYGIENE PASS`                       -> `git diff --check` clean; `verify_factory.sh` OK
 
-HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE:
-  pi --mode json --offline    -> exit 1
-  stderr                      -> "No API key found for the selected model."
-  Action                      : Live capture truncated at the session
-                                envelope; deterministic replay fixture
-                                preserves the captured envelope exactly.
-```
-
-## Why this is honest, not a forced PASS
-
-Per LH-03 §30: "A HALT is evidence. Do not weaken the
-contract merely to obtain PASS." The closure matrix above
-records `CLINE_ADAPTER_QUALIFIED = HALT_CLINE_NOT_INSTALLED`
-because Cline / ClineMM is not installed on this host and
-no upstream Cline binary is silently substituted for
-ClineMM. The Pi adapter is recorded as
-`QUALIFIED_WITH_LIMITATIONS` because the live probe
-truncated at the session envelope when the LLM API
-credentials were absent. Both halts are first-class
-evidence; neither is papered over.
-
-## Follow-up checklist
-
-When Cline / ClineMM is installed on a future host:
-
-1. Update `cline-adapter.ts`'s live capture path; capture
-   a real fixture set under
-   `test/fixtures/harnesses/cline/<qualification-id>/`.
-2. Update `qualification/cline/cline-identity.json` with
-   the discovered `package_name`, `package_version`,
-   `executable_path`, `executable_sha256`, and
-   `native_schema_fingerprint`.
-3. Update `qualification/capability-matrix.json` (via
-   `node scripts/qualification-emit.mjs > …`).
-4. Re-run `npm run test:lh03` and `scripts/verify_factory.sh`.
-5. The closure matrix line `CLINE_ADAPTER_QUALIFIED` then
-   flips from `HALT_CLINE_NOT_INSTALLED` to `PASS`.
-
-When live API credentials are available for Pi:
-
-1. Replace `HALT_LIVE_PROVIDER_CREDENTIALS_UNAVAILABLE`
-   with a full multi-event capture (tool_start, tool_end,
-   message, agent_end).
-2. Re-run the conformance suite; the
-   `QUALIFIED_WITH_LIMITATIONS` flag flips to
-   `QUALIFIED`.
+LH-03 CORRECTION01 is GREEN with halt disposition.
+CLOSED.
