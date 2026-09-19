@@ -1,0 +1,25 @@
+[
+  {
+    "type": "candidate_started",
+    "attemptId": "att:lc10-001"
+  },
+  {
+    "type": "tool_started",
+    "attemptId": "att:lc10-001",
+    "tool": "rm_rf",
+    "callId": "c1"
+  },
+  {
+    "type": "tool_finished",
+    "attemptId": "att:lc10-001",
+    "tool": "rm_rf",
+    "callId": "c1",
+    "ok": false,
+    "error": "policy denied"
+  },
+  {
+    "type": "candidate_reported_completion",
+    "attemptId": "att:lc10-001",
+    "summary": "denied"
+  }
+]

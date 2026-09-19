@@ -1,0 +1,11 @@
+[
+  {
+    "type": "candidate_started",
+    "attemptId": "att:lc02-001"
+  },
+  {
+    "type": "candidate_reported_completion",
+    "attemptId": "att:lc02-001",
+    "summary": "done without work"
+  }
+]

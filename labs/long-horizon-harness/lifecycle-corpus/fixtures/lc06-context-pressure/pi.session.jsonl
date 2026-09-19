@@ -1,0 +1,17 @@
+{"type":"session","version":3,"id":"lc05-fixed-session-id-fixed-session-id-fixed-session-id-fixed","timestamp":"2026-09-19T00:00:00.000Z","cwd":"/private/tmp/pi-live"}
+{"type":"agent_start"}
+{"type":"queue_update","steering":["p1"],"followUp":["f1"]}
+{"type":"queue_update","steering":["p2"],"followUp":["f2"]}
+{"type":"queue_update","steering":["p3"],"followUp":["f3"]}
+{"type":"message_start","message":{"role":"assistant","content":"Working"}}
+{"type":"message_update","assistantMessageEvent":{"delta":"..."}}
+{"type":"message_update","assistantMessageEvent":{"delta":"..."}}
+{"type":"message_end","message":{"role":"assistant","content":"Working"}}
+{"type":"compaction_start","reason":"context_pressure"}
+{"type":"compaction_end","reason":"done"}
+{"type":"message_start","message":{"role":"assistant","content":"Resumed"}}
+{"type":"message_end","message":{"role":"assistant","content":"Resumed"}}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"echo","args":{}}
+{"type":"tool_execution_end","toolCallId":"c1","toolName":"echo","result":{"output":"ok"},"isError":false}
+{"type":"turn_end"}
+{"type":"agent_end","messages":[1],"willRetry":false}

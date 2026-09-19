@@ -1,0 +1,31 @@
+[
+  {
+    "type": "candidate_started",
+    "attemptId": "att:lc09-001"
+  },
+  {
+    "type": "tool_started",
+    "attemptId": "att:lc09-001",
+    "tool": "fetch",
+    "callId": "c1"
+  },
+  {
+    "type": "tool_finished",
+    "attemptId": "att:lc09-001",
+    "tool": "fetch",
+    "callId": "c1",
+    "ok": false,
+    "error": "ECONNREFUSED"
+  },
+  {
+    "type": "candidate_error",
+    "attemptId": "att:lc09-001",
+    "code": "DEPENDENCY_UNAVAILABLE",
+    "message": "dep unreachable"
+  },
+  {
+    "type": "candidate_reported_completion",
+    "attemptId": "att:lc09-001",
+    "summary": "done (false)"
+  }
+]

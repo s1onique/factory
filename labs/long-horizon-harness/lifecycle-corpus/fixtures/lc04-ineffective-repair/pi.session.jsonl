@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"lc05-fixed-session-id-fixed-session-id-fixed-session-id-fixed","timestamp":"2026-09-19T00:00:00.000Z","cwd":"/private/tmp/pi-live"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"noop","args":{}}
+{"type":"tool_execution_end","toolCallId":"c1","toolName":"noop","result":{"ok":true},"isError":false}
+{"type":"turn_end"}
+{"type":"agent_end","messages":[1],"willRetry":false}

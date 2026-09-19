@@ -1,0 +1,6 @@
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"tool_execution_start","toolCallId":"c2","toolName":"long_job","args":{"resume":true}}
+{"type":"tool_execution_end","toolCallId":"c2","toolName":"long_job","result":{"output":"ok"},"isError":false}
+{"type":"turn_end"}
+{"type":"agent_end","messages":[1],"willRetry":false}

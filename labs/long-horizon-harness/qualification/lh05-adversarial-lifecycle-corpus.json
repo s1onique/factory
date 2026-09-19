@@ -1,0 +1,704 @@
+{
+  "schema": "lh05-adversarial-lifecycle-corpus/v1",
+  "emitted_at": "2026-09-19T01:06:40.847Z",
+  "contract_version": "lh05.lifecycle.corpus.v1",
+  "subject": {
+    "commit": "eae1f2952557c424d55116d7e3da9cc460286bb2",
+    "substrates": {
+      "lh03_frozen": "qualification/lh03-frozen.json",
+      "lh04_frozen": "qualification/lh04-frozen.json"
+    }
+  },
+  "substrate": {
+    "two_run_semantic_repeatability": true,
+    "byte_identical_result_artifact": false,
+    "byte_identical_result_artifact_reason": "emitted_at is an ISO timestamp and run_evidence_hash includes run start ts; see L05-C06",
+    "live_execution_performed": false,
+    "live_execution_performed_reason": "LH-05 is replay-only; the runner reads frozen Pi fixtures from disk"
+  },
+  "verdict": "PASS_ADVERSARIAL_LIFECYCLE_CORPUS",
+  "summary": {
+    "scenario_count": 12,
+    "total_runs": 21,
+    "passed": 21,
+    "by_disposition": {
+      "PASS": 21
+    }
+  },
+  "scenarios": [
+    {
+      "scenario_id": "LC01",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "SUCCESS",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "SUCCESS",
+        "eligible_for_success_normalized_metrics": true,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC01",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "SUCCESS",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "SUCCESS",
+        "eligible_for_success_normalized_metrics": true,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC02",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INCOMPLETE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC02",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INCOMPLETE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC03",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INVALID_EVIDENCE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": true
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC03",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INVALID_EVIDENCE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": true
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC04",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INVALID_EVIDENCE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 1,
+        "metric_evidence_failure_observed": true
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC04",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INVALID_EVIDENCE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 1,
+        "metric_evidence_failure_observed": true
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC05",
+      "scenario_class": "ADAPTER_BOUNDARY_REJECTION",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "REJECTED",
+        "expected_error_kind": "MALFORMED_NATIVE_EVENT"
+      },
+      "adapter_error_kind": "MALFORMED_NATIVE_EVENT",
+      "phase_e_lifecycle_state": null,
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": null,
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": null,
+        "historical_authority_invalidation_count": null,
+        "metric_evidence_failure_observed": null
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC06",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "SUCCESS",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "SUCCESS",
+        "eligible_for_success_normalized_metrics": true,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC07",
+      "scenario_class": "RECOVERY_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "SUCCESS",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "SUCCESS",
+        "eligible_for_success_normalized_metrics": true,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC07",
+      "scenario_class": "RECOVERY_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "SUCCESS",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "SUCCESS",
+        "eligible_for_success_normalized_metrics": true,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC08",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "CANCELLED",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "CANCELLED",
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC08",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "CANCELLED",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "CANCELLED",
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC09",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "HARNESS_FAILURE",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "HARNESS_FAILURE",
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC09",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "HARNESS_FAILURE",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "HARNESS_FAILURE",
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC10",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INCOMPLETE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC10",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INCOMPLETE",
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC11",
+      "scenario_class": "FAULT_LAB_HANDOFF",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "REJECTED",
+        "expected_error_kind": "EVIDENCE_CORRUPTION_DETECTED"
+      },
+      "adapter_error_kind": "EVIDENCE_CORRUPTION_DETECTED",
+      "phase_e_lifecycle_state": null,
+      "phase_e_terminal_outcome": null,
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": null,
+        "terminal_outcome": null,
+        "eligible_for_success_normalized_metrics": null,
+        "historical_authority_invalidation_count": null,
+        "metric_evidence_failure_observed": null
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC12",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "pi",
+        "provider": "earendil-works",
+        "version": "0.85.1",
+        "protocol": "JSONL_EVENTS",
+        "role": "QUALIFIED_HARNESS"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "VALID_FAILURE",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "VALID_FAILURE",
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    },
+    {
+      "scenario_id": "LC12",
+      "scenario_class": "VALID_ADVERSARIAL_LIFECYCLE",
+      "harness": {
+        "kind": "fake",
+        "provider": "factory-scripted-fake",
+        "version": "v1",
+        "protocol": "SCRIPTED",
+        "role": "REFERENCE_CONTROL"
+      },
+      "execution_mode": "REPLAY",
+      "adapter_disposition": {
+        "kind": "ACCEPTED"
+      },
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "TERMINAL",
+      "phase_e_terminal_outcome": "VALID_FAILURE",
+      "lh02_predicates": {
+        "passed": true,
+        "failed": [],
+        "metric_contract_version": "convergence.metric.contract.v1",
+        "terminal_outcome": "VALID_FAILURE",
+        "eligible_for_success_normalized_metrics": false,
+        "historical_authority_invalidation_count": 0,
+        "metric_evidence_failure_observed": false
+      },
+      "forbidden_outcomes": {
+        "all_absent": true,
+        "observed": []
+      },
+      "disposition": "PASS"
+    }
+  ]
+}

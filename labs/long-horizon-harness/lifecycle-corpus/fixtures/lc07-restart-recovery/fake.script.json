@@ -1,0 +1,37 @@
+[
+  {
+    "type": "candidate_started",
+    "attemptId": "att:lc07-001"
+  },
+  {
+    "type": "tool_started",
+    "attemptId": "att:lc07-001",
+    "tool": "long_job",
+    "callId": "c1"
+  },
+  {
+    "type": "tool_finished",
+    "attemptId": "att:lc07-001",
+    "tool": "long_job",
+    "callId": "c1",
+    "ok": true
+  },
+  {
+    "type": "tool_started",
+    "attemptId": "att:lc07-001",
+    "tool": "long_job",
+    "callId": "c2"
+  },
+  {
+    "type": "tool_finished",
+    "attemptId": "att:lc07-001",
+    "tool": "long_job",
+    "callId": "c2",
+    "ok": true
+  },
+  {
+    "type": "candidate_reported_completion",
+    "attemptId": "att:lc07-001",
+    "summary": "ok"
+  }
+]

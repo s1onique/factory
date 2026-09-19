@@ -1,0 +1,24 @@
+[
+  {
+    "type": "candidate_started",
+    "attemptId": "att:lc12-001"
+  },
+  {
+    "type": "tool_started",
+    "attemptId": "att:lc12-001",
+    "tool": "echo",
+    "callId": "c1"
+  },
+  {
+    "type": "tool_finished",
+    "attemptId": "att:lc12-001",
+    "tool": "echo",
+    "callId": "c1",
+    "ok": true
+  },
+  {
+    "type": "candidate_reported_completion",
+    "attemptId": "att:lc12-001",
+    "summary": "done"
+  }
+]

@@ -13,6 +13,8 @@
 #                                             (Phase E @ 61b0979 / LH-02 @ 715e639)
 #   4. scripts/verify_lh04_frozen.sh       — LH-04 frozen-contract guard
 #                                             (fault lab @ d50f6d8)
+#   5. scripts/verify_lh05_frozen.sh       — LH-05 frozen-contract guard
+#                                             (adversarial lifecycle corpus)
 
 set -euo pipefail
 
@@ -25,7 +27,7 @@ errors=0
 echo "=== Factory authoritative verification gate ==="
 echo ""
 
-echo "--- 1/4 FACTORY_GIT_WORKTREE_POLICY ---"
+echo "--- 1/5 FACTORY_GIT_WORKTREE_POLICY ---"
 if bash scripts/verify_worktree_policy.sh; then
     echo "  [OK]  worktree topology is canonical"
 else
@@ -34,7 +36,7 @@ else
 fi
 echo ""
 
-echo "--- 2/4 documentation link sanity ---"
+echo "--- 2/5 documentation link sanity ---"
 if bash scripts/check_links.sh; then
     echo "  [OK]  documentation links resolve"
 else
@@ -43,7 +45,7 @@ else
 fi
 echo ""
 
-echo "--- 3/4 LH-03 frozen-contract guard ---"
+echo "--- 3/5 LH-03 frozen-contract guard ---"
 if bash scripts/verify_lh03_frozen.sh; then
     echo "  [OK]  LH-03 frozen-contract guard (Phase E + LH-02 unchanged)"
 else
@@ -52,11 +54,20 @@ else
 fi
 echo ""
 
-echo "--- 4/4 LH-04 frozen-contract guard ---"
+echo "--- 4/5 LH-04 frozen-contract guard ---"
 if bash scripts/verify_lh04_frozen.sh; then
     echo "  [OK]  LH-04 frozen-contract guard (fault laboratory unchanged)"
 else
     echo "  [FAIL]  LH-04 frozen-contract guard detected a change"
+    errors=$((errors + 1))
+fi
+echo ""
+
+echo "--- 5/5 LH-05 frozen-contract guard ---"
+if bash scripts/verify_lh05_frozen.sh; then
+    echo "  [OK]  LH-05 frozen-contract guard (adversarial lifecycle corpus intact)"
+else
+    echo "  [FAIL]  LH-05 frozen-contract guard detected a change"
     errors=$((errors + 1))
 fi
 echo ""

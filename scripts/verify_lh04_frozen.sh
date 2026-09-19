@@ -19,7 +19,8 @@
 
 set -u
 
-LH_04_FROZEN_HEAD="a8caa82655ca6036bc40a43be5000bdda5bb84bf"
+LH_04_FROZEN_HEAD="d50f6d88ab42c4b26462d00038876d1756f0f172"
+LH_04_FROZEN_PRE_FREEZE_HEAD="a8caa82655ca6036bc40a43be5000bdda5bb84bf"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
