@@ -75,13 +75,21 @@ test("LH-05 LC07 (restart/recovery) exposes segment-A and segment-B Pi fixtures"
   }
 });
 
-test("LH-05 LC07 (restart/recovery) declares explicit segment_binding metadata (L05-C05)", () => {
+test("LH-05 LC07 (restart/recovery) declares explicit segments[] metadata (L05-C10)", () => {
   const lc07 = findScenario("LC07");
   assert.ok(lc07, "LC07 must exist");
-  assert.ok(lc07!.segment_binding, "LC07 must declare segment_binding");
-  assert.equal(lc07!.segment_binding!.segment_id, "A", "LC07 declares itself as the head segment");
-  assert.ok(lc07!.segment_binding!.capture_id.length > 0, "LC07 capture_id must be non-empty");
-  assert.ok(lc07!.segment_binding!.shared_session_id !== undefined, "LC07 must declare a shared_session_id");
+  assert.ok(lc07!.segments, "LC07 must declare segments");
+  assert.equal(lc07!.segments!.length, 2, "LC07 must declare exactly 2 segments");
+  const a = lc07!.segments![0]!;
+  const b = lc07!.segments![1]!;
+  assert.equal(a.segment_id, "A", "LC07 segment 0 is A");
+  assert.equal(b.segment_id, "B", "LC07 segment 1 is B");
+  assert.equal(a.ordinal, 0);
+  assert.equal(b.ordinal, 1);
+  assert.equal(a.previous_segment_id, null);
+  assert.equal(b.previous_segment_id, "A");
+  assert.equal(a.capture_id, b.capture_id, "LC07 capture_id shared across segments");
+  assert.equal(a.shared_session_id, b.shared_session_id, "LC07 shared_session_id shared across segments");
 });
 
 test("LH-05 LC10 (destructive attempt denied) exposes sentinel.before.txt and sentinel.after.txt", () => {

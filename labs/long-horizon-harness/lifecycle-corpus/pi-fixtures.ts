@@ -20,12 +20,19 @@
  * oracle owns only events the harness cannot authoritatively
  * emit (gates, repair, cancel, terminal decisions).
  *
- * Pi native kinds that are `PRESERVED_META_OBSERVATION`
+ * Pi native kinds that are `META_OBSERVATION`
  * or `KNOWN_BUT_UNMAPPED` (e.g. `compaction_start`,
  * `queue_update`) intentionally do NOT produce a Phase E
  * RunEvent — this is exactly the property LC06 requires:
  * context-pressure observations MUST NOT create
  * ACTION / gate / run-terminal evidence.
+ *
+ * L05-C10 / L05-C11 (CORRECTION02): the loader returns a
+ * closed-world `PiFixtureLoadResult` and validates LC07
+ * segment binding (session header id == declared
+ * shared_session_id; continuation segments MUST NOT emit
+ * `agent_start` / `candidate_started`). Failures are
+ * REJECTED, never silently dropped.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -36,29 +43,25 @@ import type {
   AttemptId,
 } from "../src/run/run-types.js";
 import { makeAttemptId } from "../src/run/run-types.js";
+import type {
+  LifecycleSegmentBinding,
+  PiFixtureLoadResult,
+} from "./types.js";
 
 /**
  * Read a Pi scenario fixture, decode every line, and
- * return the candidate-neutral `HarnessEvent` stream.
+ * return a closed-world `PiFixtureLoadResult`.
  *
- * If any line is malformed (`MALFORMED` classification)
- * the loader throws — this is the explicit failure
- * surface for LC05 / LC11.
- *
- * L05-C05: when `segment` is provided, the loader applies
- * segment-binding rules:
- *   - segment_id == "A" (the first segment): no change.
- *   - segment_id == "B" (continuation): drop `candidate_started`
- *     so the mapper does not re-emit RUN_STARTED.
- *   - if the shared_session_id is required and absent,
- *     the loader throws (segment binding failure).
+ * L05-C11: this loader is the SOLE authority for what
+ * Pi actually observed. Failure reasons are machine-visible
+ * (no free-text strings).
  */
 export function loadPiFixture(args: {
   readonly repoRoot: string;
   readonly repoRelativePath: string;
   readonly attemptId: AttemptId;
-  readonly segment?: { readonly id: "A" | "B"; readonly previous_segment?: boolean; readonly shared_session_id?: string };
-}): ReadonlyArray<HarnessEvent> {
+  readonly segment?: LifecycleSegmentBinding;
+}): PiFixtureLoadResult {
   // Accept either repo-root-relative or lab-relative paths.
   const direct = resolve(args.repoRoot, args.repoRelativePath);
   const labRel = resolve(
@@ -70,73 +73,90 @@ export function loadPiFixture(args: {
   const raw = readFileSync(abs, "utf8");
   const lines = raw.split(/\r?\n/).filter((l) => l.length > 0);
   const events: HarnessEvent[] = [];
-  let droppedContinuationStart = false;
+  let sessionHeaderSeen = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
+    // L05-C10: native `session` header binding.
+    if (!sessionHeaderSeen) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        // fall through — let the decoder produce a
+        // MALFORMED classification below.
+      }
+      if (parsed !== undefined && typeof parsed === "object" && parsed !== null) {
+        const obj = parsed as Record<string, unknown>;
+        if (obj.type === "session") {
+          sessionHeaderSeen = true;
+          const id = typeof obj.id === "string" ? obj.id : null;
+          if (args.segment !== undefined) {
+            // Both cold-start and continuation paths validate
+            // the declared shared_session_id against the
+            // native header (when one is present).
+            if (id !== args.segment.shared_session_id) {
+              return {
+                ok: false,
+                reason: "SESSION_ID_MISMATCH",
+              };
+            }
+          }
+          // session header is observation-only; do not
+          // emit a HarnessEvent for it.
+          continue;
+        }
+      }
+    }
     const decoded = decodePiEvent(args.attemptId, line);
     if (decoded.classification === "MALFORMED") {
-      throw new Error(
-        `loadPiFixture: malformed line ${i + 1} in ${args.repoRelativePath}: ${decoded.hostile_reason}`,
-      );
+      return {
+        ok: false,
+        reason: "MALFORMED_NATIVE_EVENT",
+      };
     }
     if (decoded.classification === "UNKNOWN") {
-      throw new Error(
-        `loadPiFixture: unknown native kind '${decoded.kind}' at line ${i + 1} in ${args.repoRelativePath}`,
-      );
+      return {
+        ok: false,
+        reason: "UNKNOWN_NATIVE_EVENT_KIND",
+      };
     }
-    if (decoded.classification === "NORMALIZED" && decoded.event !== null) {
-      // L05-C05: continuation segments MUST NOT emit their
-      // own `candidate_started` — that would re-open a new
-      // logical run. The previous-segment binding is what
-      // makes the concatenation safe.
-      if (
-        args.segment?.id === "B" &&
-        decoded.event.type === "candidate_started" &&
-        !droppedContinuationStart
-      ) {
-        droppedContinuationStart = true;
-        continue;
-      }
+    // L05-C11: a continuation segment MUST NOT emit
+    // `agent_start`. The Pi decoder maps `agent_start`
+    // into a HarnessEvent of type `candidate_started`.
+    // Continuation lifecycle observations are
+    // authoritative evidence; we MUST NOT delete them.
+    if (
+      args.segment !== undefined &&
+      args.segment.previous_segment_id !== null &&
+      decoded.classification === "NORMALIZED" &&
+      decoded.event.type === "candidate_started"
+    ) {
+      return {
+        ok: false,
+        reason: "UNEXPECTED_CONTINUATION_START",
+      };
+    }
+    if (decoded.classification === "META_OBSERVATION" || decoded.classification === "KNOWN_BUT_UNMAPPED") {
+      continue;
+    }
+    if (decoded.event !== undefined && decoded.event !== null) {
       events.push(decoded.event);
     }
-    // META_OBSERVATION and KNOWN_BUT_UNMAPPED intentionally
-    // drop on the floor here; LC06 requires this.
   }
-  return events;
+  // L05-C10: the cold-start segment MUST carry a native
+  // session header. If it does not, the loader rejects
+  // with MISSING_SESSION_HEADER. Continuation segments
+  // may legitimately omit the header.
+  if (args.segment !== undefined) {
+    if (args.segment.previous_segment_id === null && !sessionHeaderSeen) {
+      return { ok: false, reason: "MISSING_SESSION_HEADER" };
+    }
+  }
+  return { ok: true, events };
 }
 
 /**
  * L05-C01 — Causal harness mapping for Pi.
- *
- * The Pi fixture is the SOLE authority for harness-observable
- * lifecycle facts. Specifically:
- *
- *   tool_started                              -> ACTION_STARTED
- *   tool_finished(ok=true)                    -> ACTION_FINISHED(OK)
- *   tool_finished(ok=false)                   -> ACTION_FINISHED(ERROR)
- *   candidate_started                         -> RUN_STARTED + HARNESS_STARTED
- *   candidate_message / completion / error    -> (observation only)
- *
- * The mapper returns TWO arrays so the runner can interleave
- * the harness-mapped events with the per-scenario external
- * events oracle (which provides GATE_*, REPAIR_*, REVIEW_*,
- * RUN_CANCEL_REQUESTED, terminal events).
- *
- * Concretely: in canonical lifecycle order, gates MUST be
- * observed between ACTION_STARTED and ACTION_FINISHED. We
- * therefore emit:
- *
- *   pre_gate   = [RUN_STARTED, HARNESS_STARTED, ...ACTION_STARTEDs]
- *   post_gate  = [...ACTION_FINISHEDs]
- *
- * The runner concatenates `pre_gate` + external_non_terminal
- * + `post_gate` + HARNESS_STOPPED + external_terminal. The
- * gate (if any) is therefore observed AFTER all action starts
- * and BEFORE the first action finishes — the canonical position
- * for a single pass-gate that authorizes the whole sequence.
- *
- * If `omitRunStarted` is true, RUN_STARTED + HARNESS_STARTED
- * are skipped (LC02/LC10/LC11 -> INCOMPLETE).
  */
 export function piHarnessEventsToRunEvents(
   events: ReadonlyArray<HarnessEvent>,
@@ -167,15 +187,10 @@ export function piHarnessEventsToRunEvents(
           ...(ev.ok ? {} : { failure: { kind: "tool_failure", tool: ev.tool, message: ev.error ?? "tool returned non-ok" } }),
         });
         break;
-      // candidate_message / candidate_reported_completion /
-      // candidate_error are observations only — they must
-      // never create Phase E lifecycle evidence.
       default:
         break;
     }
   }
-  // Fallback: if no candidate_started and !omitRunStarted,
-  // emit the run envelope at the head of pre_gate.
   if (!emittedRunStarted && !omitRunStarted) {
     pre_gate.unshift({ type: "RUN_STARTED" }, { type: "HARNESS_STARTED" });
   }

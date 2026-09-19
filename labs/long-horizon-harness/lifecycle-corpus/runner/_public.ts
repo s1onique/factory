@@ -68,10 +68,10 @@ export function semanticReplayShape(
     adapter_error_kind: result.adapter_error_kind,
     phase_e_lifecycle_state: result.phase_e_lifecycle_state,
     phase_e_terminal_outcome: result.phase_e_terminal_outcome,
+    phase_e_predicates: result.phase_e_predicates,
     lh02_predicates: result.lh02_predicates,
     forbidden_outcomes: result.forbidden_outcomes,
     success_normalized_metrics_emitted: result.success_normalized_metrics_emitted,
     disposition: result.disposition,
   };
 }
-

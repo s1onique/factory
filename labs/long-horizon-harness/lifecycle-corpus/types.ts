@@ -185,14 +185,73 @@ export type LifecycleScenario = {
     readonly fault_id: string;
     readonly fault_klass: "F01_byte_drift" | "F02_unbound_subject" | "F03_unbound_attempt";
   };
-  readonly segment_binding?: {
-    // LC07 segment-binding metadata (L05-C05).
-    readonly capture_id: string;
-    readonly segment_id: "A" | "B";
-    readonly previous_segment?: string;
-    readonly shared_session_id?: string;
-  };
+  /**
+   * L05-C10 — closed-world ordered segment declaration.
+   *
+   * LC07 (restart / recovery) MUST declare its segments in
+   * `ordinal` order (segment A = 0, segment B = 1, etc.).
+   * The runner reads this list, validates the chain
+   * (predecessor / capture_id / shared_session_id /
+   * ordinal monotonicity / duplicate fixture paths) via
+   * `validateLifecycleSegmentChain`, and feeds each segment
+   * into the loader with explicit binding metadata. No
+   * "guess from filename" inference.
+   */
+  readonly segments?: ReadonlyArray<LifecycleSegmentBinding>;
 };
+
+/**
+ * L05-C10 — closed-world LC07 segment binding.
+ *
+ * Each entry is a single, fully-declared capture segment.
+ * `ordinal` is the source of truth for ordering; the loader
+ * MUST NOT infer ordering from filenames.
+ */
+export type LifecycleSegmentBinding = {
+  readonly capture_id: string;
+  readonly segment_id: string;
+  readonly ordinal: number;
+  readonly shared_session_id: string;
+  readonly previous_segment_id: string | null;
+  readonly fixture_path: string;
+};
+
+/**
+ * L05-C10 — closed-world segment-binding failure reasons.
+ *
+ * The validator returns the FIRST applicable failure it
+ * detects; downstream consumers MUST treat the reason as
+ * machine-visible (not a free-text string).
+ */
+export type SegmentBindingFailure =
+  | "DUPLICATE_SEGMENT"
+  | "SEGMENT_ORDER_INVALID"
+  | "MISSING_PREDECESSOR"
+  | "CAPTURE_ID_MISMATCH"
+  | "SESSION_ID_MISMATCH"
+  | "UNBOUND_CONTINUATION"
+  | "DUPLICATE_FIXTURE"
+  | "MISSING_SESSION_HEADER";
+
+/**
+ * L05-C11 — typed Pi fixture loader result. The loader
+ * returns the validated `HarnessEvent` stream on success,
+ * or a closed-world failure reason otherwise. Continuation
+ * lifecycle violations (e.g. `candidate_started` in a
+ * continuation segment) are REJECTED, not silently dropped.
+ */
+export type PiFixtureLoadResult =
+  | { readonly ok: true; readonly events: ReadonlyArray<import("../src/protocol/harness-adapter.js").HarnessEvent> }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | "MALFORMED_NATIVE_EVENT"
+        | "UNKNOWN_NATIVE_EVENT_KIND"
+        | "SEGMENT_BINDING_INVALID"
+        | "MISSING_SESSION_HEADER"
+        | "SESSION_ID_MISMATCH"
+        | "UNEXPECTED_CONTINUATION_START";
+    };
 
 export type RawFixture = {
   readonly repo_relative_path: string;
@@ -215,6 +274,11 @@ export type LifecycleReplayResult = {
   readonly adapter_error_kind: AdapterErrorKind | null;
   readonly phase_e_lifecycle_state: string | null;
   readonly phase_e_terminal_outcome: string | null;
+  /**
+   * L05-C12: full authority predicate shape, candidate-neutral.
+   * `null` when the adapter was rejected before projection.
+   */
+  readonly phase_e_predicates: PhaseEPredicates | null;
   readonly lh02_predicates: LH02ActualPredicates;
   readonly forbidden_outcomes: ForbiddenOutcomesActual;
   readonly success_normalized_metrics_emitted: boolean;
@@ -227,6 +291,26 @@ export type LifecycleReplayResult = {
     | "UNEXPECTED_ACCEPTANCE"
     | "UNEXPECTED_REJECTION";
   readonly notes: string;
+};
+
+/**
+ * L05-C12 — bounded, candidate-neutral Phase E predicate surface.
+ *
+ * This is the full authority shape that the parity comparator
+ * MUST compare. Adding new fields here requires a schema
+ * version bump.
+ */
+export type PhaseEPredicates = {
+  readonly lifecycle_state: string;
+  readonly terminal_outcome: string | null;
+  readonly closure_authority_fresh: boolean;
+  readonly current_epoch_action_failure: boolean;
+  readonly current_epoch_review_failure: boolean;
+  readonly last_gate_pass: boolean | null;
+  readonly last_action_status: "OK" | "ERROR" | null;
+  readonly last_review_pass: boolean | null;
+  readonly action_failure_at_epoch: number | null;
+  readonly review_failure_at_epoch: number | null;
 };
 
 export type LH02ActualPredicates = {

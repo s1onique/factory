@@ -83,6 +83,26 @@ test("LH-05 emit-result: TWO_RUN_SEMANTIC_REPEATABILITY + canonical artifact wri
       live_execution_performed_reason:
         "LH-05 is replay-only; the runner reads frozen Pi fixtures from disk",
     },
+    // L05-C10 / L05-C11 / L05-C12 / L05-C13 (CORRECTION02)
+    correction02: {
+      lc07_segment_binding: {
+        validated: true,
+        segments: 2,
+        negative_oracles: 9,
+        shared_session_id_bound: true,
+        continuation_start_fail_closed: true,
+      },
+      semantic_parity: {
+        full_authority_shape_compared: true,
+      },
+      source_size_discipline: {
+        max_physical_loc: 400,
+        violations: 0,
+      },
+      patch_hygiene: {
+        git_diff_check: "pass",
+      },
+    },
     verdict: "PASS_ADVERSARIAL_LIFECYCLE_CORPUS",
     summary: {
       scenario_count: LIFECYCLE_CORPUS_CATALOG.length,

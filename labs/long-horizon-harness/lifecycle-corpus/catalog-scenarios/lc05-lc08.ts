@@ -246,16 +246,48 @@ export function lc07(): LifecycleScenario {
       "recovery may succeed only after normal Phase E authority is re-established",
     ],
     omit_run_started: false,
-    // L05-C05: explicit segment-binding record. The
-    // first segment is the cold-start segment; segment
-    // B is a continuation that must NOT re-emit
-    // `candidate_started`. shared_session_id ties the
-    // two segments to one logical lifecycle.
-    segment_binding: {
-      capture_id: "lc07-capture-001",
-      segment_id: "A",
-      shared_session_id: "lc05-fixed-session-id-00000000000000000000000000000001",
-    },
+    // L05-C10: closed-world ordered segment declaration.
+    //
+    // Segment A is the cold-start segment; it owns the
+    // native `session` header that pins the shared session
+    // identity for the whole chain. Segment B is a
+    // continuation: it does NOT carry its own native
+    // session header (and MUST NOT supply a conflicting
+    // one if it does); it MUST declare segment A as its
+    // predecessor.
+    //
+    // Both segments share a single capture_id and
+    // shared_session_id. The runner validates the chain
+    // (predecessor, ordinal, capture_id, shared_session_id)
+    // BEFORE invoking the loader.
+    //
+    // The `shared_session_id` below MUST equal the
+    // `id` field of the native `session` header in
+    // segment-A.jsonl. This is enforced mechanically by
+    // the loader (L05-C10) and the
+    // `lc07_segment_binding_session_id` test.
+    segments: [
+      {
+        capture_id: "lc07-capture-001",
+        segment_id: "A",
+        ordinal: 0,
+        shared_session_id:
+          "lc05-fixed-session-id-fixed-session-id-fixed-session-id-fixed",
+        previous_segment_id: null,
+        fixture_path:
+          "lifecycle-corpus/fixtures/lc07-restart-recovery/pi.session.segment-A.jsonl",
+      },
+      {
+        capture_id: "lc07-capture-001",
+        segment_id: "B",
+        ordinal: 1,
+        shared_session_id:
+          "lc05-fixed-session-id-fixed-session-id-fixed-session-id-fixed",
+        previous_segment_id: "A",
+        fixture_path:
+          "lifecycle-corpus/fixtures/lc07-restart-recovery/pi.session.segment-B.jsonl",
+      },
+    ],
   };
 }
 

@@ -1,9 +1,9 @@
 {
   "schema": "lh05-adversarial-lifecycle-corpus/v1",
-  "emitted_at": "2026-09-19T08:11:31.913Z",
+  "emitted_at": "2026-09-19T08:57:04.678Z",
   "contract_version": "lh05.lifecycle.corpus.v1",
   "subject": {
-    "commit": "1e6d83e6487fd40b95f3936455046eb892e122fa",
+    "commit": "63c38091a686bea6988308ccf60d87f55c1d6684",
     "substrates": {
       "lh03_frozen": "qualification/lh03-frozen.json",
       "lh04_frozen": "qualification/lh04-frozen.json"
@@ -15,6 +15,25 @@
     "byte_identical_result_artifact_reason": "emitted_at is an ISO timestamp and run_evidence_hash includes run start ts; see L05-C06",
     "live_execution_performed": false,
     "live_execution_performed_reason": "LH-05 is replay-only; the runner reads frozen Pi fixtures from disk"
+  },
+  "correction02": {
+    "lc07_segment_binding": {
+      "validated": true,
+      "segments": 2,
+      "negative_oracles": 9,
+      "shared_session_id_bound": true,
+      "continuation_start_fail_closed": true
+    },
+    "semantic_parity": {
+      "full_authority_shape_compared": true
+    },
+    "source_size_discipline": {
+      "max_physical_loc": 400,
+      "violations": 0
+    },
+    "patch_hygiene": {
+      "git_diff_check": "pass"
+    }
   },
   "verdict": "PASS_ADVERSARIAL_LIFECYCLE_CORPUS",
   "summary": {

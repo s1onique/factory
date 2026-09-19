@@ -103,6 +103,9 @@ async function runReplay(args: {
   if (!projection.ok && process.env["LH05_DEBUG"] === "1") {
     console.error("LH-05 PROJECTION FAILED:", args.scenario.id, args.harness, JSON.stringify(projection.failure));
   }
+  // L05-C12: project the FULL authority shape onto
+  // `PhaseEPredicates` (candidate-neutral). The parity
+  // comparator MUST compare every field of this surface.
   const phaseEActual = projection.ok
     ? {
         lifecycle_state: projection.value.lifecycle_state,
