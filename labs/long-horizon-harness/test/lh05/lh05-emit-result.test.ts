@@ -103,6 +103,43 @@ test("LH-05 emit-result: TWO_RUN_SEMANTIC_REPEATABILITY + canonical artifact wri
         git_diff_check: "pass",
       },
     },
+    // L05-C15 / L05-C16 / L05-C17 / L05-C18 (CORRECTION03)
+    correction03: {
+      lc07_real_restart_model: {
+        verdict: "FIXED",
+        rationale:
+          "LC07 now models a Pi PROCESS RESTART inside a single logical session. Each segment is a real Pi process invocation: both carry their own native session header at line 1 with the SAME session id, and the continuation segment may emit its own agent_start. The harness mapper deduplicates RUN_STARTED via its emittedRunStarted flag, so a second candidate_started is recorded as a process-restart observation rather than projected as a duplicate Factory run start.",
+        process_invocation_invariant: "PROCESS_RESTART != NEW_FACTORY_RUN",
+        negative_oracles: {
+          B_session_id_differs: "SESSION_ID_MISMATCH (loader)",
+          B_no_session_header: "NATIVE_HEADER_NOT_AT_FIRST_RECORD (loader)",
+          B_header_at_non_first_record: "NATIVE_HEADER_NOT_AT_FIRST_RECORD (loader)",
+          B_unbound: "MISSING_PREDECESSOR (validator)",
+          B_precedes_A: "SEGMENT_ORDER_INVALID (validator)",
+          second_RUN_STARTED: "IMPOSSIBLE (mapper deduplication)",
+        },
+        positive_oracle_count: 17,
+        evidence_test:
+          "LC07-BIND17 mapper deduplicates RUN_STARTED across A and B",
+      },
+      native_header_first_record_rule: {
+        enforced_for: ["cold-start segments", "continuation segments"],
+        loader_rejection_reason: "NATIVE_HEADER_NOT_AT_FIRST_RECORD",
+        cold_start_empty_file_reason: "MISSING_SESSION_HEADER",
+        rationale:
+          "Pi JSON-mode contract (docs/json.md): the first line is the session header. This is the canonical process-boundary oracle.",
+      },
+      eof_normalization: {
+        all_modified_files_terminate_with_LF: true,
+        // All LH-05 files I created/modified end with LF.
+        // The pre-existing `npm run check:eof` failure on
+        // `test/lh04/lh04-emit-result.test.ts` is NOT
+        // introduced by CORRECTION03; the file is in a
+        // frozen LH-04 path and is therefore outside the
+        // scope of this commit.
+        npm_run_check_eof: "PRE-EXISTING LH-04 EOF ISSUE OUT OF SCOPE",
+      },
+    },
     verdict: "PASS_ADVERSARIAL_LIFECYCLE_CORPUS",
     summary: {
       scenario_count: LIFECYCLE_CORPUS_CATALOG.length,

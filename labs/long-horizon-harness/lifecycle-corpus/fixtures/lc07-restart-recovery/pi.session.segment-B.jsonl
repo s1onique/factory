@@ -1,3 +1,5 @@
+{"type":"session","version":3,"id":"lc05-fixed-session-id-fixed-session-id-fixed-session-id-fixed","timestamp":"2026-09-19T00:00:01.000Z","cwd":"/private/tmp/pi-live"}
+{"type":"agent_start"}
 {"type":"turn_start"}
 {"type":"tool_execution_start","toolCallId":"c2","toolName":"long_job","args":{"resume":true}}
 {"type":"tool_execution_end","toolCallId":"c2","toolName":"long_job","result":{"output":"ok"},"isError":false}

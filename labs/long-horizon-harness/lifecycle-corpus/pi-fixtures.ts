@@ -30,9 +30,18 @@
  * L05-C10 / L05-C11 (CORRECTION02): the loader returns a
  * closed-world `PiFixtureLoadResult` and validates LC07
  * segment binding (session header id == declared
- * shared_session_id; continuation segments MUST NOT emit
- * `agent_start` / `candidate_started`). Failures are
- * REJECTED, never silently dropped.
+ * shared_session_id). Failures are REJECTED, never silently
+ * dropped.
+ *
+ * L05-C15 / L05-C16 / L05-C18 (CORRECTION03): the loader
+ * enforces the Pi JSON-mode contract that the FIRST
+ * non-empty record of every process invocation is the
+ * `session` header. Continuation segments (modeling a
+ * process restart on the same logical session) MAY carry
+ * `agent_start`; the harness mapper deduplicates
+ * RUN_STARTED via its `emittedRunStarted` flag. The
+ * invariant `PROCESS_RESTART != NEW_FACTORY_RUN` is
+ * preserved structurally.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -55,6 +64,30 @@ import type {
  * L05-C11: this loader is the SOLE authority for what
  * Pi actually observed. Failure reasons are machine-visible
  * (no free-text strings).
+ *
+ * L05-C15 / L05-C16 / L05-C18 (CORRECTION03): each segment
+ * models a Pi process invocation, not a stream chunk. The
+ * Pi JSON-mode contract states that the FIRST non-empty
+ * record of every invocation is the `session` header (see
+ * Pi docs/json.md). The loader enforces this:
+ *
+ *   - segment without a `session` header at record 1 →
+ *     MISSING_SESSION_HEADER (cold-start) or
+ *     MISSING_CONTINUATION_SESSION_HEADER (continuation).
+ *   - segment with a `session` header at a non-first
+ *     record → NATIVE_HEADER_NOT_AT_FIRST_RECORD.
+ *   - segment with a `session` header whose id disagrees
+ *     with the declared `shared_session_id` →
+ *     SESSION_ID_MISMATCH.
+ *
+ * Continuation segments MAY emit `agent_start` (it models
+ * a process restart inside the same logical session). The
+ * harness mapper deduplicates RUN_STARTED via its
+ * `emittedRunStarted` flag, so the second `candidate_started`
+ * is recorded as a process/agent restart observation rather
+ * than projected as a duplicate Factory run start. This is
+ * exactly the LC07 invariant:
+ * `PROCESS_RESTART != NEW_FACTORY_RUN`.
  */
 export function loadPiFixture(args: {
   readonly repoRoot: string;
@@ -73,84 +106,106 @@ export function loadPiFixture(args: {
   const raw = readFileSync(abs, "utf8");
   const lines = raw.split(/\r?\n/).filter((l) => l.length > 0);
   const events: HarnessEvent[] = [];
-  let sessionHeaderSeen = false;
+  let headerAtIdx: number | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    // L05-C10: native `session` header binding.
-    if (!sessionHeaderSeen) {
+    // L05-C10 / L05-C18 (CORRECTION03): the native `session`
+    // header MUST be the FIRST non-empty record. Probe the
+    // first record structurally; if it isn't a session
+    // header, the segment is malformed.
+    if (headerAtIdx === null && i === 0) {
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
       } catch {
-        // fall through — let the decoder produce a
-        // MALFORMED classification below.
+        return { ok: false, reason: "MALFORMED_NATIVE_EVENT" };
       }
-      if (parsed !== undefined && typeof parsed === "object" && parsed !== null) {
-        const obj = parsed as Record<string, unknown>;
-        if (obj.type === "session") {
-          sessionHeaderSeen = true;
-          const id = typeof obj.id === "string" ? obj.id : null;
-          if (args.segment !== undefined) {
-            // Both cold-start and continuation paths validate
-            // the declared shared_session_id against the
-            // native header (when one is present).
-            if (id !== args.segment.shared_session_id) {
-              return {
-                ok: false,
-                reason: "SESSION_ID_MISMATCH",
-              };
-            }
-          }
-          // session header is observation-only; do not
-          // emit a HarnessEvent for it.
-          continue;
+      if (parsed === null || typeof parsed !== "object") {
+        return { ok: false, reason: "MALFORMED_NATIVE_EVENT" };
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (obj.type !== "session") {
+        return {
+          ok: false,
+          reason: "NATIVE_HEADER_NOT_AT_FIRST_RECORD",
+        };
+      }
+      headerAtIdx = 0;
+      const id = typeof obj.id === "string" ? obj.id : null;
+      if (args.segment !== undefined) {
+        if (id !== args.segment.shared_session_id) {
+          return { ok: false, reason: "SESSION_ID_MISMATCH" };
         }
+      }
+      // session header is observation-only; do not emit a
+      // HarnessEvent for it.
+      continue;
+    }
+    // Subsequent lines: if a header was never seen, the
+    // segment is missing its native session header
+    // entirely. Probe the line structurally to detect a
+    // late-arriving header.
+    if (headerAtIdx === null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return { ok: false, reason: "MALFORMED_NATIVE_EVENT" };
+      }
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        (parsed as Record<string, unknown>).type === "session"
+      ) {
+        return {
+          ok: false,
+          reason: "NATIVE_HEADER_NOT_AT_FIRST_RECORD",
+        };
       }
     }
     const decoded = decodePiEvent(args.attemptId, line);
     if (decoded.classification === "MALFORMED") {
-      return {
-        ok: false,
-        reason: "MALFORMED_NATIVE_EVENT",
-      };
+      return { ok: false, reason: "MALFORMED_NATIVE_EVENT" };
     }
     if (decoded.classification === "UNKNOWN") {
-      return {
-        ok: false,
-        reason: "UNKNOWN_NATIVE_EVENT_KIND",
-      };
+      return { ok: false, reason: "UNKNOWN_NATIVE_EVENT_KIND" };
     }
-    // L05-C11: a continuation segment MUST NOT emit
-    // `agent_start`. The Pi decoder maps `agent_start`
-    // into a HarnessEvent of type `candidate_started`.
-    // Continuation lifecycle observations are
-    // authoritative evidence; we MUST NOT delete them.
+    // L05-C16 (CORRECTION03): a continuation segment MAY
+    // emit `agent_start`. The Pi decoder maps it to
+    // `candidate_started`; the harness mapper's
+    // `emittedRunStarted` flag deduplicates RUN_STARTED.
+    // The event is NOT silently deleted — it is recorded
+    // as a `HarnessEvent` so the runner can observe the
+    // process restart; the projection simply doesn't emit
+    // a second RUN_STARTED.
     if (
-      args.segment !== undefined &&
-      args.segment.previous_segment_id !== null &&
-      decoded.classification === "NORMALIZED" &&
-      decoded.event.type === "candidate_started"
+      decoded.classification === "META_OBSERVATION" ||
+      decoded.classification === "KNOWN_BUT_UNMAPPED"
     ) {
-      return {
-        ok: false,
-        reason: "UNEXPECTED_CONTINUATION_START",
-      };
-    }
-    if (decoded.classification === "META_OBSERVATION" || decoded.classification === "KNOWN_BUT_UNMAPPED") {
       continue;
     }
     if (decoded.event !== undefined && decoded.event !== null) {
       events.push(decoded.event);
     }
   }
-  // L05-C10: the cold-start segment MUST carry a native
-  // session header. If it does not, the loader rejects
-  // with MISSING_SESSION_HEADER. Continuation segments
-  // may legitimately omit the header.
-  if (args.segment !== undefined) {
-    if (args.segment.previous_segment_id === null && !sessionHeaderSeen) {
+  // L05-C18 (CORRECTION03): every process-bound segment
+  // MUST carry its own native session header at the first
+  // non-empty record. The cold-start empty-file case is
+  // reported as MISSING_SESSION_HEADER. The continuation
+  // empty-file case is reported as NATIVE_HEADER_NOT_AT_FIRST_RECORD
+  // (the first-record rule is the same). Continuation
+  // segments are never expected to be empty in practice —
+  // a real Pi process restart always emits at least the
+  // session header — so an empty continuation is treated
+  // as a malformed first record.
+  if (args.segment !== undefined && headerAtIdx === null) {
+    if (args.segment.previous_segment_id === null) {
       return { ok: false, reason: "MISSING_SESSION_HEADER" };
     }
+    return {
+      ok: false,
+      reason: "NATIVE_HEADER_NOT_AT_FIRST_RECORD",
+    };
   }
   return { ok: true, events };
 }

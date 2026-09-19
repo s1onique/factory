@@ -231,14 +231,22 @@ export type SegmentBindingFailure =
   | "SESSION_ID_MISMATCH"
   | "UNBOUND_CONTINUATION"
   | "DUPLICATE_FIXTURE"
-  | "MISSING_SESSION_HEADER";
+  | "MISSING_SESSION_HEADER"
+  // L05-C18 (CORRECTION03): process-bound segment MUST
+  // place native `session` header at the first record.
+  | "NATIVE_HEADER_NOT_AT_FIRST_RECORD";
 
 /**
- * L05-C11 — typed Pi fixture loader result. The loader
- * returns the validated `HarnessEvent` stream on success,
- * or a closed-world failure reason otherwise. Continuation
- * lifecycle violations (e.g. `candidate_started` in a
- * continuation segment) are REJECTED, not silently dropped.
+ * L05-C11 — typed Pi fixture loader result. Closed-world
+ * failure reasons are machine-visible. Continuation lifecycle
+ * violations (header dropped or placed after events) are
+ * REJECTED, not silently dropped.
+ *
+ * L05-C16 (CORRECTION03): continuation `agent_start` is
+ * permitted; the harness mapper deduplicates RUN_STARTED via
+ * its `emittedRunStarted` flag, so the second candidate_started
+ * is a process-restart observation, not a duplicate Factory
+ * run start. This proves `PROCESS_RESTART != NEW_FACTORY_RUN`.
  */
 export type PiFixtureLoadResult =
   | { readonly ok: true; readonly events: ReadonlyArray<import("../src/protocol/harness-adapter.js").HarnessEvent> }
@@ -249,8 +257,8 @@ export type PiFixtureLoadResult =
         | "UNKNOWN_NATIVE_EVENT_KIND"
         | "SEGMENT_BINDING_INVALID"
         | "MISSING_SESSION_HEADER"
-        | "SESSION_ID_MISMATCH"
-        | "UNEXPECTED_CONTINUATION_START";
+        | "NATIVE_HEADER_NOT_AT_FIRST_RECORD"
+        | "SESSION_ID_MISMATCH";
     };
 
 export type RawFixture = {

@@ -1,9 +1,9 @@
 {
   "schema": "lh05-adversarial-lifecycle-corpus/v1",
-  "emitted_at": "2026-09-19T08:57:04.678Z",
+  "emitted_at": "2026-09-19T09:15:18.199Z",
   "contract_version": "lh05.lifecycle.corpus.v1",
   "subject": {
-    "commit": "63c38091a686bea6988308ccf60d87f55c1d6684",
+    "commit": "c898f05ccb1966c5074f6483bad106b3d093b169",
     "substrates": {
       "lh03_frozen": "qualification/lh03-frozen.json",
       "lh04_frozen": "qualification/lh04-frozen.json"
@@ -33,6 +33,36 @@
     },
     "patch_hygiene": {
       "git_diff_check": "pass"
+    }
+  },
+  "correction03": {
+    "lc07_real_restart_model": {
+      "verdict": "FIXED",
+      "rationale": "LC07 now models a Pi PROCESS RESTART inside a single logical session. Each segment is a real Pi process invocation: both carry their own native session header at line 1 with the SAME session id, and the continuation segment may emit its own agent_start. The harness mapper deduplicates RUN_STARTED via its emittedRunStarted flag, so a second candidate_started is recorded as a process-restart observation rather than projected as a duplicate Factory run start.",
+      "process_invocation_invariant": "PROCESS_RESTART != NEW_FACTORY_RUN",
+      "negative_oracles": {
+        "B_session_id_differs": "SESSION_ID_MISMATCH (loader)",
+        "B_no_session_header": "NATIVE_HEADER_NOT_AT_FIRST_RECORD (loader)",
+        "B_header_at_non_first_record": "NATIVE_HEADER_NOT_AT_FIRST_RECORD (loader)",
+        "B_unbound": "MISSING_PREDECESSOR (validator)",
+        "B_precedes_A": "SEGMENT_ORDER_INVALID (validator)",
+        "second_RUN_STARTED": "IMPOSSIBLE (mapper deduplication)"
+      },
+      "positive_oracle_count": 17,
+      "evidence_test": "LC07-BIND17 mapper deduplicates RUN_STARTED across A and B"
+    },
+    "native_header_first_record_rule": {
+      "enforced_for": [
+        "cold-start segments",
+        "continuation segments"
+      ],
+      "loader_rejection_reason": "NATIVE_HEADER_NOT_AT_FIRST_RECORD",
+      "cold_start_empty_file_reason": "MISSING_SESSION_HEADER",
+      "rationale": "Pi JSON-mode contract (docs/json.md): the first line is the session header. This is the canonical process-boundary oracle."
+    },
+    "eof_normalization": {
+      "all_modified_files_terminate_with_LF": true,
+      "npm_run_check_eof": "PRE-EXISTING LH-04 EOF ISSUE OUT OF SCOPE"
     }
   },
   "verdict": "PASS_ADVERSARIAL_LIFECYCLE_CORPUS",

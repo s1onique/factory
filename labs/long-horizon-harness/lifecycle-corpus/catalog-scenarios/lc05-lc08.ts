@@ -246,15 +246,26 @@ export function lc07(): LifecycleScenario {
       "recovery may succeed only after normal Phase E authority is re-established",
     ],
     omit_run_started: false,
-    // L05-C10: closed-world ordered segment declaration.
+    // L05-C10 / L05-C15 / L05-C16 / L05-C18 (CORRECTION03):
+    // closed-world ordered segment declaration.
     //
-    // Segment A is the cold-start segment; it owns the
-    // native `session` header that pins the shared session
-    // identity for the whole chain. Segment B is a
-    // continuation: it does NOT carry its own native
-    // session header (and MUST NOT supply a conflicting
-    // one if it does); it MUST declare segment A as its
-    // predecessor.
+    // LC07 models a Pi PROCESS RESTART inside a single
+    // logical session. Each segment is its own Pi process
+    // invocation, so:
+    //
+    //   - Segment A is the cold-start segment; it owns the
+    //     native `session` header that pins the shared
+    //     session identity for the whole chain.
+    //   - Segment B is a continuation invocation; it carries
+    //     its OWN native `session` header at line 1 with the
+    //     SAME `id` as segment A (the resumed session), and
+    //     it MAY emit its own `agent_start`.
+    //
+    // The mapper deduplicates RUN_STARTED via its
+    // `emittedRunStarted` flag, so a second `candidate_started`
+    // observation does NOT project as a duplicate Factory run
+    // start. The exact invariant LC07 proves is:
+    //   PROCESS_RESTART != NEW_FACTORY_RUN
     //
     // Both segments share a single capture_id and
     // shared_session_id. The runner validates the chain
@@ -262,10 +273,10 @@ export function lc07(): LifecycleScenario {
     // BEFORE invoking the loader.
     //
     // The `shared_session_id` below MUST equal the
-    // `id` field of the native `session` header in
-    // segment-A.jsonl. This is enforced mechanically by
-    // the loader (L05-C10) and the
-    // `lc07_segment_binding_session_id` test.
+    // `id` field of the native `session` header in BOTH
+    // segment-A.jsonl and segment-B.jsonl. This is
+    // enforced mechanically by the loader (L05-C10) and
+    // the `lc07_segment_binding_session_id` test.
     segments: [
       {
         capture_id: "lc07-capture-001",
