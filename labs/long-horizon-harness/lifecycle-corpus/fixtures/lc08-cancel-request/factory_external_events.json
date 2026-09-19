@@ -1,0 +1,1 @@
+[{"type":"GATE_STARTED","gate_id":"gate:g1","attempt_id":"att:lc08-001"},{"type":"GATE_FINISHED","gate_id":"gate:g1","attempt_id":"att:lc08-001","pass":true,"reason":"half_done"},{"type":"RUN_CANCEL_REQUESTED","reason":"user_requested"},{"type":"RUN_ABORTED","semantic":"CANCELLED","reason":"user cancelled"}]

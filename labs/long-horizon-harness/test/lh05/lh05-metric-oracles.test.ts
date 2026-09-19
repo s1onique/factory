@@ -45,6 +45,14 @@ test("LH-05 LH-02 metric predicates are consistent with the FROZEN projector (pi
       // asserted in lh05-catalog + lh05-pi-replay tests.
       continue;
     }
+    if (r.adapter_disposition.kind === "LH04_HANDOFF") {
+      // L05-C04: FAULT_LAB_HANDOFF scenarios do not produce
+      // a MetricReport at all. The runner pins
+      // metric_evidence_failure_observed=true and null
+      // terminal_outcome in the LH-02 slot; the catalog must
+      // agree.
+      continue;
+    }
     const lh02Check = checkLH02(scenario.golden_predicates.expected_lh02, {
       metric_contract_version: r.lh02_predicates?.metric_contract_version ?? null,
       terminal_outcome: r.lh02_predicates?.terminal_outcome ?? null,

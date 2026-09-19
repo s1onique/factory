@@ -1,1 +1,0 @@
-[{"type":"ACTION_STARTED","target":{"kind":"attempt","attempt_id":"att:lc09-001"}},{"type":"ACTION_FINISHED","target":{"kind":"attempt","attempt_id":"att:lc09-001"},"status":"ERROR"},{"type":"RUN_ABORTED","semantic":"HARNESS_FAILURE","reason":"dependency unavailable"}]

@@ -21,6 +21,7 @@ import type {
   LifecycleReplayResult,
   AdapterErrorKind,
   HarnessQualificationIdentity,
+  Lh04HandoffResult,
 } from "./types.js";
 
 export function checkAdapterDisposition(
@@ -33,6 +34,12 @@ export function checkAdapterDisposition(
     if (actual.kind === "ACCEPTED") return { ok: true };
     return { ok: false, reason: `expected adapter ACCEPTED but adapter REJECTED(${actual.error_kind})` };
   }
+  if (expected.kind === "LH04_HANDOFF") {
+    return {
+      ok: false,
+      reason: `expected adapter disposition is LH04_HANDOFF (${expected.expected_outcome}); use compareScenarioWithHandoff instead`,
+    };
+  }
   // expected.kind === "REJECTED"
   if (actual.kind === "ACCEPTED") {
     return { ok: false, reason: `expected adapter REJECTED(${expected.expected_error_kind}) but adapter ACCEPTED` };
@@ -40,6 +47,49 @@ export function checkAdapterDisposition(
   // Both REJECTED.
   if (expected.expected_error_kind === actual.error_kind) return { ok: true };
   return { ok: false, reason: `expected adapter REJECTED(${expected.expected_error_kind}) but adapter REJECTED(${actual.error_kind})` };
+}
+
+/**
+ * L05-C04 — Compare a typed LH-04 handoff result against
+ * the catalog's expected handoff outcome. Only
+ * LH04_HANDOFF_REJECTED_AS_EXPECTED can PASS; the other four
+ * outcomes produce distinct, named failures.
+ */
+export function checkHandoffResult(
+  expected: Extract<ExpectedAdapterDisposition, { kind: "LH04_HANDOFF" }>,
+  actual: Lh04HandoffResult,
+): { readonly ok: true; readonly rejection_kind: string | null } | { readonly ok: false; readonly reason: string } {
+  if (actual.kind === "LH04_HANDOFF_REJECTED_AS_EXPECTED") {
+    if (expected.expected_outcome !== "LH04_HANDOFF_REJECTED_AS_EXPECTED") {
+      return {
+        ok: false,
+        reason: `LH-04 handoff rejected (${actual.rejection_kind}) but catalog expected ${expected.expected_outcome}`,
+      };
+    }
+    if (
+      expected.expected_rejection_kind !== undefined &&
+      expected.expected_rejection_kind !== actual.rejection_kind
+    ) {
+      return {
+        ok: false,
+        reason: `LH-04 handoff rejected with ${actual.rejection_kind}; catalog pinned ${expected.expected_rejection_kind}`,
+      };
+    }
+    return { ok: true, rejection_kind: actual.rejection_kind };
+  }
+  // The handoff did NOT produce the expected rejection.
+  const detail =
+    actual.kind === "LH04_HANDOFF_ESCAPED"
+      ? "LH-04 frozen verifier ACCEPTED the mutated evidence (ESCAPED); LH-05 invariant cannot be proven"
+      : actual.kind === "LH04_BASELINE_INVALID"
+        ? "LH-04 frozen verifier REJECTED the unmutated canonical baseline; handoff substrate is broken"
+        : actual.kind === "LH04_FAULT_NOT_FOUND"
+          ? `LH-04 fault catalog does not contain '${actual.fault_id}'`
+          : `LH-04 handoff internal error: ${actual.message}`;
+  return {
+    ok: false,
+    reason: `LH-04 handoff produced ${actual.kind}; expected ${expected.expected_outcome}. ${detail}`,
+  };
 }
 
 export function checkPhaseE(
@@ -106,25 +156,18 @@ export function checkLH02(
     failed.push(`metric_contract_version mismatch: expected ${expected.metric_contract_version}, got ${actual.metric_contract_version ?? "null"}`);
   if (actual.terminal_outcome !== expected.terminal_outcome)
     failed.push(`terminal_outcome mismatch: expected ${expected.terminal_outcome ?? "null"}, got ${actual.terminal_outcome ?? "null"}`);
-  // Treat expected=null and actual=0 (or false) as equivalent
-  // for null-default LH-02 predicates; the projector always
-  // produces a number / boolean, while the catalog records
-  // the intent as null when the predicate is "not asserted".
-  const nullableEqual = (
-    exp: number | boolean | null | undefined,
-    act: number | boolean | null | undefined,
-  ): boolean => {
-    if (exp === null || exp === undefined) {
-      return act === null || act === undefined || act === 0 || act === false;
-    }
-    return exp === act;
-  };
-  if (!nullableEqual(expected.eligible_for_success_normalized_metrics, actual.eligible_for_success_normalized_metrics))
-    failed.push(`eligible_for_success_normalized_metrics mismatch: expected ${expected.eligible_for_success_normalized_metrics ?? "null"}, got ${actual.eligible_for_success_normalized_metrics ?? "null"}`);
-  if (!nullableEqual(expected.historical_authority_invalidation_count, actual.historical_authority_invalidation_count))
-    failed.push(`historical_authority_invalidation_count mismatch: expected ${expected.historical_authority_invalidation_count ?? "null"}, got ${actual.historical_authority_invalidation_count ?? "null"}`);
-  if (!nullableEqual(expected.metric_evidence_failure_observed, actual.metric_evidence_failure_observed))
-    failed.push(`metric_evidence_failure_observed mismatch: expected ${expected.metric_evidence_failure_observed ?? "null"}, got ${actual.metric_evidence_failure_observed ?? "null"}`);
+  // L05-C06: STRICT null comparison. `null` in the catalog
+  // means "this predicate is not asserted" and the actual
+  // MUST also be null/undefined. We do NOT silently equate
+  // expected-null with actual-0/actual-false. MISSING_EVIDENCE
+  // != ZERO and the projector always produces concrete values
+  // when it produces a report.
+  if (expected.eligible_for_success_normalized_metrics !== actual.eligible_for_success_normalized_metrics)
+    failed.push(`eligible_for_success_normalized_metrics mismatch: expected ${String(expected.eligible_for_success_normalized_metrics)}, got ${String(actual.eligible_for_success_normalized_metrics)}`);
+  if (expected.historical_authority_invalidation_count !== actual.historical_authority_invalidation_count)
+    failed.push(`historical_authority_invalidation_count mismatch: expected ${String(expected.historical_authority_invalidation_count)}, got ${String(actual.historical_authority_invalidation_count)}`);
+  if (expected.metric_evidence_failure_observed !== actual.metric_evidence_failure_observed)
+    failed.push(`metric_evidence_failure_observed mismatch: expected ${String(expected.metric_evidence_failure_observed)}, got ${String(actual.metric_evidence_failure_observed)}`);
   return { ok: failed.length === 0, failed };
 }
 
@@ -283,5 +326,120 @@ export function compareScenario(
     forbidden_outcomes: fobs,
     disposition: "PASS",
     notes: "",
+  };
+}
+
+/**
+ * L05-C04 — Compare a typed LH-04 handoff result.
+ *
+ * The FAULT_LAB_HANDOFF scenarios (LC11) do NOT drive
+ * Phase E projection; their disposition is determined
+ * entirely by what the LH-04 frozen verifier says about
+ * the mutated evidence. We check:
+ *
+ *   1. typed handoff outcome matches the catalog's
+ *      expected_outcome (L05-C04).
+ *   2. typed rejection kind matches the catalog's
+ *      expected_rejection_kind, when pinned.
+ *
+ * Only LH04_HANDOFF_REJECTED_AS_EXPECTED produces PASS.
+ * The four other outcomes produce typed failures so
+ * regressions are unambiguous.
+ */
+export function compareScenarioWithHandoff(
+  scenario: LifecycleScenario,
+  harness: HarnessQualificationIdentity,
+  handoff: Lh04HandoffResult,
+): LifecycleReplayResult {
+  const expectedDisposition = scenario.golden_predicates.expected_adapter_disposition;
+  if (expectedDisposition.kind !== "LH04_HANDOFF") {
+    throw new Error(
+      `compareScenarioWithHandoff called for non-LH04_HANDOFF scenario ${scenario.id}`,
+    );
+  }
+  const baseResult = {
+    scenario_id: scenario.id,
+    scenario_version: scenario.version,
+    scenario_class: scenario.scenario_class,
+    harness,
+    execution_mode: "REPLAY" as const,
+    adapter_disposition: expectedDisposition,
+    adapter_error_kind: null,
+    phase_e_lifecycle_state: "INCOMPLETE" as string | null,
+    phase_e_terminal_outcome: null,
+  };
+  const check = checkHandoffResult(expectedDisposition, handoff);
+  if (check.ok) {
+    // The handoff succeeded. For LC11 the Phase E / LH-02
+    // predicates are still declared INCOMPLETE / null /
+    // metric_evidence_failure_observed=true (per the catalog),
+    // so the comparison must check those too.
+    const phaseEActual = {
+      lifecycle_state: "INCOMPLETE",
+      terminal_outcome: null,
+      closure_authority_fresh: false,
+      current_epoch_action_failure: false,
+      current_epoch_review_failure: false,
+      last_gate_pass: null,
+      last_action_status: null,
+      last_review_pass: null,
+      action_failure_at_epoch: null,
+      review_failure_at_epoch: null,
+    };
+    const phaseECheck = checkPhaseE(
+      scenario.golden_predicates.expected_phase_e,
+      phaseEActual,
+    );
+    if (!phaseECheck.ok) {
+      return {
+        ...baseResult,
+        success_normalized_metrics_emitted: false,
+        lh02_predicates: buildLH02ActualPredicates([phaseECheck.reason], null),
+        forbidden_outcomes: { all_absent: true, observed: [] },
+        disposition: "WRONG_PHASE_E_STATE",
+        notes: phaseECheck.reason,
+      };
+    }
+    const lh02Check = checkLH02(scenario.golden_predicates.expected_lh02, null);
+    if (!lh02Check.ok) {
+      return {
+        ...baseResult,
+        success_normalized_metrics_emitted: false,
+        lh02_predicates: buildLH02ActualPredicates(lh02Check.failed, null),
+        forbidden_outcomes: { all_absent: true, observed: [] },
+        disposition: "WRONG_METRIC_STATE",
+        notes: lh02Check.failed.join("; "),
+      };
+    }
+    const fobs = checkForbiddenOutcomes(
+      scenario.golden_predicates.forbidden_outcomes,
+      { terminal_outcome: null, lifecycle_state: "INCOMPLETE", success_normalized_metrics_emitted: false },
+    );
+    if (!fobs.all_absent) {
+      return {
+        ...baseResult,
+        success_normalized_metrics_emitted: false,
+        lh02_predicates: buildLH02ActualPredicates([], null),
+        forbidden_outcomes: fobs,
+        disposition: "FORBIDDEN_OUTCOME",
+        notes: `forbidden outcomes observed: ${fobs.observed.join("; ")}`,
+      };
+    }
+    return {
+      ...baseResult,
+      success_normalized_metrics_emitted: false,
+      lh02_predicates: buildLH02ActualPredicates([], null),
+      forbidden_outcomes: fobs,
+      disposition: "PASS",
+      notes: `LH-04 rejected mutated evidence with ${check.rejection_kind ?? "unknown"}`,
+    };
+  }
+  return {
+    ...baseResult,
+    success_normalized_metrics_emitted: false,
+    lh02_predicates: buildLH02ActualPredicates([check.reason], null),
+    forbidden_outcomes: { all_absent: true, observed: [] },
+    disposition: "WRONG_ADAPTER_STATE",
+    notes: check.reason,
   };
 }

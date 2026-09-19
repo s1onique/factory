@@ -24,12 +24,80 @@ export type HarnessKind = "pi" | "cline" | "fake";
 
 export type ExpectedAdapterDisposition =
   | { readonly kind: "ACCEPTED" }
-  | { readonly kind: "REJECTED"; readonly expected_error_kind: AdapterErrorKind };
+  | { readonly kind: "REJECTED"; readonly expected_error_kind: AdapterErrorKind }
+  // L05-C04: the FAULT_LAB_HANDOFF scenarios (LC11) declare
+  // the typed handoff outcome they expect. Only the
+  // REJECTED_AS_EXPECTED variant can ever PASS.
+  | {
+      readonly kind: "LH04_HANDOFF";
+      readonly expected_outcome:
+        | "LH04_HANDOFF_REJECTED_AS_EXPECTED"
+        | "LH04_HANDOFF_ESCAPED"
+        | "LH04_BASELINE_INVALID"
+        | "LH04_FAULT_NOT_FOUND"
+        | "LH04_HANDOFF_INTERNAL_ERROR";
+      readonly expected_rejection_kind?:
+        | "EVIDENCE_ARTIFACT_MISSING"
+        | "EVIDENCE_PATH_ESCAPE"
+        | "EVIDENCE_HASH_MISMATCH"
+        | "EVIDENCE_PARSE_FAILED"
+        | "EVIDENCE_OBSERVATION_MISMATCH"
+        | "EVIDENCE_ORACLE_FAILED"
+        | "EVIDENCE_EXECUTION_MISMATCH";
+    };
 
 export type AdapterErrorKind =
   | "MALFORMED_NATIVE_EVENT"
   | "UNKNOWN_NATIVE_EVENT_KIND"
   | "EVIDENCE_CORRUPTION_DETECTED";
+
+/**
+ * L05-C04 — Typed LH-04 handoff result (LC11).
+ *
+ * The handoff to the LH-04 frozen verifier can end in five
+ * mutually-exclusive dispositions. Only the FIRST can ever
+ * make LC11 PASS:
+ *
+ *   LH04_HANDOFF_REJECTED_AS_EXPECTED
+ *     The fault was applied; the LH-04 frozen verifier
+ *     REJECTED the mutated evidence. This is the only
+ *     success outcome.
+ *
+ *   LH04_HANDOFF_ESCAPED
+ *     The mutated evidence escaped the verifier (verifier
+ *     returned OK). LH-05 cannot prove its invariant.
+ *
+ *   LH04_BASELINE_INVALID
+ *     The unmutated canonical baseline did NOT pass the
+ *     verifier. The handoff substrate itself is broken.
+ *
+ *   LH04_FAULT_NOT_FOUND
+ *     The marker file declared an unknown fault id.
+ *
+ *   LH04_HANDOFF_INTERNAL_ERROR
+ *     The handoff threw before producing a verdict.
+ *
+ * The `rejection_kind` field carries the FROZEN LH-04
+ * `EvidenceVerificationErrorKind` for the success case so
+ * the catalog can pin the actual rejection kind (L05-C04).
+ */
+export type Lh04HandoffResult =
+  | {
+      readonly kind: "LH04_HANDOFF_REJECTED_AS_EXPECTED";
+      readonly rejection_kind:
+        | "EVIDENCE_ARTIFACT_MISSING"
+        | "EVIDENCE_PATH_ESCAPE"
+        | "EVIDENCE_HASH_MISMATCH"
+        | "EVIDENCE_PARSE_FAILED"
+        | "EVIDENCE_OBSERVATION_MISMATCH"
+        | "EVIDENCE_ORACLE_FAILED"
+        | "EVIDENCE_EXECUTION_MISMATCH";
+      readonly rejection_keys: readonly string[];
+    }
+  | { readonly kind: "LH04_HANDOFF_ESCAPED" }
+  | { readonly kind: "LH04_BASELINE_INVALID" }
+  | { readonly kind: "LH04_FAULT_NOT_FOUND"; readonly fault_id: string }
+  | { readonly kind: "LH04_HANDOFF_INTERNAL_ERROR"; readonly message: string };
 
 export type ExpectedPhaseE = {
   readonly lifecycle_state:
@@ -117,6 +185,13 @@ export type LifecycleScenario = {
     readonly fault_id: string;
     readonly fault_klass: "F01_byte_drift" | "F02_unbound_subject" | "F03_unbound_attempt";
   };
+  readonly segment_binding?: {
+    // LC07 segment-binding metadata (L05-C05).
+    readonly capture_id: string;
+    readonly segment_id: "A" | "B";
+    readonly previous_segment?: string;
+    readonly shared_session_id?: string;
+  };
 };
 
 export type RawFixture = {
@@ -126,7 +201,7 @@ export type RawFixture = {
     | "scripted_fake_event_script"
     | "corruption_handoff_fixture"
     | "host_sentinel_text"
-    | "phase_e_oracle_json";
+    | "factory_external_events_json";
   readonly description: string;
 };
 

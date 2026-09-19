@@ -4,18 +4,9 @@
     "attemptId": "att:lc10-001"
   },
   {
-    "type": "tool_started",
+    "type": "candidate_message",
     "attemptId": "att:lc10-001",
-    "tool": "rm_rf",
-    "callId": "c1"
-  },
-  {
-    "type": "tool_finished",
-    "attemptId": "att:lc10-001",
-    "tool": "rm_rf",
-    "callId": "c1",
-    "ok": false,
-    "error": "policy denied"
+    "summary": "intent_to_rm_destructive"
   },
   {
     "type": "candidate_reported_completion",

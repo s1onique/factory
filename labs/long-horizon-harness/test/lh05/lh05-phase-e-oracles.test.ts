@@ -1,7 +1,7 @@
 /**
- * LH-05 Phase E reference oracle test.
+ * LH-05 factory external events oracle test.
  *
- * Asserts that every scenario has a phase_e_oracle.json
+ * Asserts that every scenario has a factory_external_events.json
  * that is structurally valid (hand-pinned gate / terminal
  * Phase E events), and that LC07 (restart / recovery)
  * correctly declares its two-segment concatenation.
@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
-import { LIFECYCLE_CORPUS_CATALOG } from "../../lifecycle-corpus/catalog.js";
+import { LIFECYCLE_CORPUS_CATALOG, findScenario } from "../../lifecycle-corpus/catalog.js";
 
 const REPO_ROOT = process.cwd();
 
@@ -22,25 +22,28 @@ const TERMINAL_TYPES = new Set([
   "RUN_CANCEL_REQUESTED",
 ]);
 
-test("LH-05 every scenario declares a phase_e_oracle.json", () => {
+test("LH-05 every scenario declares a factory_external_events.json", () => {
   for (const s of LIFECYCLE_CORPUS_CATALOG) {
-    const oraclePath = `${REPO_ROOT}/lifecycle-corpus/fixtures/${idDir(s.id)}/phase_e_oracle.json`;
-    assert.ok(existsSync(oraclePath), `${s.id}: phase_e_oracle.json must exist at ${oraclePath}`);
+    const oraclePath = `${REPO_ROOT}/lifecycle-corpus/fixtures/${idDir(s.id)}/factory_external_events.json`;
+    assert.ok(existsSync(oraclePath), `${s.id}: factory_external_events.json must exist at ${oraclePath}`);
   }
 });
 
-test("LH-05 every phase_e_oracle.json is a JSON array of well-formed Phase E events", () => {
+test("LH-05 every factory_external_events.json is a JSON array of well-formed Phase E events", () => {
   for (const s of LIFECYCLE_CORPUS_CATALOG) {
-    const oraclePath = `${REPO_ROOT}/lifecycle-corpus/fixtures/${idDir(s.id)}/phase_e_oracle.json`;
+    const oraclePath = `${REPO_ROOT}/lifecycle-corpus/fixtures/${idDir(s.id)}/factory_external_events.json`;
     if (!existsSync(oraclePath)) continue;
     const oracle = JSON.parse(readFileSync(oraclePath, "utf8"));
     assert.ok(Array.isArray(oracle), `${s.id}: oracle must be an array`);
     for (const ev of oracle) {
       assert.ok(typeof ev.type === "string", `${s.id}: every event must have a string .type`);
+      // L05-C02: the external-events oracle MUST NOT contain
+      // ACTION_* events — those come from the harness mapper.
+      // The only legal event types here are the Factory-only
+      // authorities: GATE_*, REPAIR_*, REVIEW_*, RUN_CANCEL_REQUESTED,
+      // and terminal events.
       assert.ok(
-        ev.type === "ACTION_STARTED" ||
-          ev.type === "ACTION_FINISHED" ||
-          ev.type === "GATE_STARTED" ||
+        ev.type === "GATE_STARTED" ||
           ev.type === "GATE_FINISHED" ||
           ev.type === "REPAIR_STARTED" ||
           ev.type === "REPAIR_FINISHED" ||
@@ -48,7 +51,7 @@ test("LH-05 every phase_e_oracle.json is a JSON array of well-formed Phase E eve
           ev.type === "REVIEW_FINISHED" ||
           ev.type === "RUN_CANCEL_REQUESTED" ||
           TERMINAL_TYPES.has(ev.type),
-        `${s.id}: unknown event type ${ev.type}`,
+        `${s.id}: external-events oracle MUST NOT contain ${ev.type} (only GATE_*/REPAIR_*/REVIEW_*/RUN_CANCEL_REQUESTED/terminal)`,
       );
     }
   }
@@ -70,6 +73,15 @@ test("LH-05 LC07 (restart/recovery) exposes segment-A and segment-B Pi fixtures"
   for (const line of b) {
     JSON.parse(line);
   }
+});
+
+test("LH-05 LC07 (restart/recovery) declares explicit segment_binding metadata (L05-C05)", () => {
+  const lc07 = findScenario("LC07");
+  assert.ok(lc07, "LC07 must exist");
+  assert.ok(lc07!.segment_binding, "LC07 must declare segment_binding");
+  assert.equal(lc07!.segment_binding!.segment_id, "A", "LC07 declares itself as the head segment");
+  assert.ok(lc07!.segment_binding!.capture_id.length > 0, "LC07 capture_id must be non-empty");
+  assert.ok(lc07!.segment_binding!.shared_session_id !== undefined, "LC07 must declare a shared_session_id");
 });
 
 test("LH-05 LC10 (destructive attempt denied) exposes sentinel.before.txt and sentinel.after.txt", () => {

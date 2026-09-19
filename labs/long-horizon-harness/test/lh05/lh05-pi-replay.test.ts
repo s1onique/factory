@@ -8,7 +8,7 @@
  *
  * This test exercises the CLOSED-WORLD Pi-adapter
  * normalization path. Phase E / terminal events come
- * from the per-scenario phase_e_oracle.json (hand-pinned).
+ * from the per-scenario factory_external_events.json (hand-pinned).
  *
  * (ACT-FACTORY-LONG-HORIZON-LAB-LH05-ADVERSARIAL-LIFECYCLE-CORPUS01)
  */
@@ -50,7 +50,7 @@ test("LH-05 pi-replay: LC05 is the only scenario expected to be REJECTED by the 
   assert.equal(r.adapter_disposition.expected_error_kind, "MALFORMED_NATIVE_EVENT");
 });
 
-test("LH-05 pi-replay: LC11 is the FAULT_LAB_HANDOFF scenario and is REJECTED with EVIDENCE_CORRUPTION_DETECTED", async () => {
+test("LH-05 pi-replay: LC11 is the FAULT_LAB_HANDOFF scenario and PASSES via LH-04 handoff", async () => {
   const lc11 = findScenario("LC11");
   assert.ok(lc11, "LC11 must exist");
   const r = await runScenarioForHarness({
@@ -58,7 +58,11 @@ test("LH-05 pi-replay: LC11 is the FAULT_LAB_HANDOFF scenario and is REJECTED wi
     scenarioId: "LC11",
     harness: "pi",
   });
-  assert.equal(r.disposition, "PASS", `LC11 should PASS via FAULT_LAB_HANDOFF short-circuit`);
-  assert.equal(r.adapter_disposition.kind, "REJECTED");
-  assert.equal(r.adapter_disposition.expected_error_kind, "EVIDENCE_CORRUPTION_DETECTED");
+  // L05-C04: LC11 PASSes only when the typed handoff
+  // returns LH04_HANDOFF_REJECTED_AS_EXPECTED.
+  assert.equal(r.disposition, "PASS", `LC11 should PASS via FAULT_LAB_HANDOFF: ${r.notes}`);
+  assert.equal(r.adapter_disposition.kind, "LH04_HANDOFF");
+  if (r.adapter_disposition.kind === "LH04_HANDOFF") {
+    assert.equal(r.adapter_disposition.expected_outcome, "LH04_HANDOFF_REJECTED_AS_EXPECTED");
+  }
 });

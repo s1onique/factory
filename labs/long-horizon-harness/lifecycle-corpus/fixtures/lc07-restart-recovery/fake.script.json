@@ -7,19 +7,6 @@
     "type": "tool_started",
     "attemptId": "att:lc07-001",
     "tool": "long_job",
-    "callId": "c1"
-  },
-  {
-    "type": "tool_finished",
-    "attemptId": "att:lc07-001",
-    "tool": "long_job",
-    "callId": "c1",
-    "ok": true
-  },
-  {
-    "type": "tool_started",
-    "attemptId": "att:lc07-001",
-    "tool": "long_job",
     "callId": "c2"
   },
   {

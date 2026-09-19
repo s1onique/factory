@@ -73,6 +73,33 @@ for f in labs/long-horizon-harness/qualification/lh03-frozen.json labs/long-hori
   fi
 done
 
+# 4. L05-C07 — frozen-source guard. If LH_05_FROZEN_HEAD is set,
+# the canonical LH-05 source / test / qualification paths MUST
+# be byte-identical to that commit. Without this guard, the
+# "frozen" verifier could be satisfied by stale qualification
+# artifacts while the runner / catalog / tests drift.
+if [ -n "${LH_05_FROZEN_HEAD:-}" ]; then
+  if ! git -C "${repo_root}" diff --exit-code "${LH_05_FROZEN_HEAD}" -- \
+      labs/long-horizon-harness/lifecycle-corpus \
+      labs/long-horizon-harness/test/lh05 \
+      labs/long-horizon-harness/qualification/lh05-adversarial-lifecycle-corpus.json \
+      scripts/verify_lh05_frozen.sh \
+      scripts/verify_factory.sh > /dev/null 2>&1; then
+    echo "  [FAIL] LH-05 frozen-source guard: source/tests/qualification differ from LH_05_FROZEN_HEAD=${LH_05_FROZEN_HEAD}"
+    git -C "${repo_root}" diff --stat "${LH_05_FROZEN_HEAD}" -- \
+      labs/long-horizon-harness/lifecycle-corpus \
+      labs/long-horizon-harness/test/lh05 \
+      labs/long-horizon-harness/qualification/lh05-adversarial-lifecycle-corpus.json \
+      scripts/verify_lh05_frozen.sh \
+      scripts/verify_factory.sh | sed 's/^/    /'
+    errors=$((errors + 1))
+  else
+    echo "  [OK]  LH-05 frozen-source guard (LH_05_FROZEN_HEAD=${LH_05_FROZEN_HEAD} matches)"
+  fi
+else
+  echo "  [WARN] LH_05_FROZEN_HEAD not set; frozen-source guard skipped (set it to enable L05-C07)"
+fi
+
 echo ""
 if [ "${errors}" -gt 0 ]; then
   echo "  [FAIL]  LH-05 frozen-contract guard detected ${errors} issue(s)"

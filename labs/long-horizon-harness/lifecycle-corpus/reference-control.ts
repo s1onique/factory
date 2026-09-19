@@ -35,67 +35,100 @@ export function buildFakeAdapter(script: FakeScript): HarnessAdapter {
 }
 
 /**
- * Convert a candidate-neutral HarnessEvent stream into a
- * typed Phase E RunEvent stream.
+ * L05-C01 — Causal harness mapping for the reference control.
  *
- * The mapping is intentionally narrow and explicit; this is
- * the test-side authority that proves the corpus semantics
- * are Pi-vocabulary-independent.
+ * The reference control is the Pi-vocabulary-independent ground
+ * truth for harness-observable lifecycle facts. Mapping rules:
  *
- * Mapping rules:
- *   - candidate_started       -> RUN_STARTED + HARNESS_STARTED
- *   - candidate_message       -> (no Phase E event; observation only)
- *   - tool_started            -> (no Phase E event; observation only)
- *   - tool_finished(ok=true)  -> (no Phase E event; oracle owns ACTION_FINISHED)
- *   - tool_finished(ok=false) -> (no Phase E event; oracle owns ACTION_FINISHED)
- *   - candidate_reported_completion -> (observation only)
- *   - candidate_error         -> (observation only)
+ *   candidate_started                          -> RUN_STARTED + HARNESS_STARTED
+ *   tool_started                               -> ACTION_STARTED
+ *   tool_finished(ok=true)                     -> ACTION_FINISHED(OK)
+ *   tool_finished(ok=false)                    -> ACTION_FINISHED(ERROR)
+ *   candidate_message                          -> (observation only)
+ *   candidate_reported_completion              -> (observation only)
+ *   candidate_error                            -> (observation only)
  *
- * The mapper emits ONLY RUN_STARTED + HARNESS_STARTED; the
- * oracle owns ACTION_STARTED, ACTION_FINISHED, GATE_*,
- * REPAIR_*, REVIEW_*, and the terminal event. The runner
- * appends a canonical HARNESS_STOPPED at the end.
+ * Returns TWO arrays so the runner can interleave them with
+ * the per-scenario external-events oracle:
  *
- * If `omitRunStarted` is true, the mapper emits nothing;
- * the resulting projection has lifecycle_state = INCOMPLETE.
+ *   pre_gate   = [RUN_STARTED, HARNESS_STARTED, ACTION_STARTED]
+ *   post_gate  = [ACTION_FINISHED]
+ *
+ * The reference control does NOT emit GATE_*, REPAIR_*,
+ * REVIEW_*, RUN_CANCEL_REQUESTED, or terminal events —
+ * those belong to the per-scenario external-events oracle.
+ *
+ * If `omitRunStarted` is true, RUN_STARTED + HARNESS_STARTED
+ * are not emitted; the resulting projection has lifecycle_state
+ * = INCOMPLETE.
  */
 export function harnessEventsToRunEvents(
-  _events: ReadonlyArray<HarnessEvent>,
-  _attemptId: AttemptId,
+  events: ReadonlyArray<HarnessEvent>,
+  attemptId: AttemptId,
   omitRunStarted: boolean = false,
-): ReadonlyArray<RunEvent> {
-  const out: RunEvent[] = [];
-  if (!omitRunStarted) {
-    out.push({ type: "RUN_STARTED" });
-    out.push({ type: "HARNESS_STARTED" });
+): { readonly pre_gate: ReadonlyArray<RunEvent>; readonly post_gate: ReadonlyArray<RunEvent> } {
+  const target = { kind: "attempt" as const, attempt_id: attemptId };
+  const pre_gate: RunEvent[] = [];
+  const post_gate: RunEvent[] = [];
+  let emittedRunStarted = false;
+  for (const ev of events) {
+    switch (ev.type) {
+      case "candidate_started":
+        if (!omitRunStarted && !emittedRunStarted) {
+          pre_gate.push({ type: "RUN_STARTED" });
+          pre_gate.push({ type: "HARNESS_STARTED" });
+          emittedRunStarted = true;
+        }
+        break;
+      case "tool_started":
+        pre_gate.push({ type: "ACTION_STARTED", target });
+        break;
+      case "tool_finished":
+        post_gate.push({
+          type: "ACTION_FINISHED",
+          target,
+          status: ev.ok ? "OK" : "ERROR",
+          ...(ev.ok ? {} : { failure: { kind: "tool_failure", tool: ev.tool, message: ev.error ?? "tool returned non-ok" } }),
+        });
+        break;
+      // candidate_message / candidate_reported_completion /
+      // candidate_error are observations only — they must
+      // never create Phase E lifecycle evidence.
+      default:
+        break;
+    }
   }
-  // All other harness events are observations only; the
-  // Phase E oracle owns the action / gate / terminal lifecycle.
-  return out;
+  if (!emittedRunStarted && !omitRunStarted) {
+    pre_gate.unshift({ type: "RUN_STARTED" }, { type: "HARNESS_STARTED" });
+  }
+  return { pre_gate, post_gate };
 }
 
 /**
- * Wrap a HarnessEvent stream + scenario oracle into a
- * single ordered RunEvent stream.
+ * Wrap a HarnessEvent stream + scenario external-events oracle
+ * into a single ordered RunEvent stream.
  *
  * Lifecycle ordering produced:
- *   1. harness-mapped events (typically RUN_STARTED + HARNESS_STARTED)
- *   2. oracle events EXCEPT any terminal events
- *   3. HARNESS_STOPPED
- *   4. terminal events (RUN_FINISHED / RUN_ABORTED / RUN_TIMEOUT)
+ *   1. mapper.pre_gate (RUN_STARTED + HARNESS_STARTED + ACTION_STARTED)
+ *   2. external-events oracle events EXCEPT terminal events
+ *   3. mapper.post_gate (ACTION_FINISHED)
+ *   4. HARNESS_STOPPED
+ *   5. terminal events (RUN_FINISHED / RUN_ABORTED / RUN_TIMEOUT)
  *
- * The oracle is now the SINGLE authority for
- * ACTION_STARTED / ACTION_FINISHED / GATE_* / REPAIR_* /
- * REVIEW_* / RUN_CANCEL_REQUESTED events. The mapper emits
- * only the run envelope.
+ * The harness mapper is the SOLE authority for ACTION_* events;
+ * the external-events oracle owns GATE_*, REPAIR_*, REVIEW_*,
+ * RUN_CANCEL_REQUESTED, and terminal events. See L05-C01.
  */
 export function closeAttemptAndHarness(
-  harnessMapped: ReadonlyArray<RunEvent>,
+  mapperPreGate: ReadonlyArray<RunEvent>,
+  mapperPostGate: ReadonlyArray<RunEvent>,
   oracleEvents: ReadonlyArray<RunEvent>,
   _attemptId: AttemptId,
   _attemptStatus: "OK" | "ERROR" = "OK",
 ): ReadonlyArray<RunEvent> {
-  // Split oracle events into gate/non-terminal vs terminal.
+  // The harness mapper must NOT emit terminal events, GATE_*,
+  // REPAIR_*, REVIEW_*, RUN_CANCEL_REQUESTED. We trust the
+  // external-events oracle as the sole authority for these.
   const terminalTypes = new Set(["RUN_FINISHED", "RUN_ABORTED", "RUN_TIMEOUT"]);
   const nonTerminal: RunEvent[] = [];
   const terminal: RunEvent[] = [];
@@ -108,17 +141,19 @@ export function closeAttemptAndHarness(
   }
   // Strip any HARNESS_STOPPED the mapper may have emitted;
   // we want a single canonical HARNESS_STOPPED at the end.
-  const stopIdx = harnessMapped.findIndex((e) => e.type === "HARNESS_STOPPED");
-  let base: ReadonlyArray<RunEvent>;
-  if (stopIdx === -1) {
-    base = harnessMapped;
-  } else {
-    base = harnessMapped.slice(0, stopIdx).concat(harnessMapped.slice(stopIdx + 1));
-  }
-  const runStartedEmitted = base.some((e) => e.type === "RUN_STARTED");
+  const stripHarnessStopped = (arr: ReadonlyArray<RunEvent>): ReadonlyArray<RunEvent> => {
+    const stopIdx = arr.findIndex((e) => e.type === "HARNESS_STOPPED");
+    if (stopIdx === -1) return arr;
+    return arr.slice(0, stopIdx).concat(arr.slice(stopIdx + 1));
+  };
+  const pre = stripHarnessStopped(mapperPreGate);
+  const post = stripHarnessStopped(mapperPostGate);
+  const runStartedEmitted =
+    pre.some((e) => e.type === "RUN_STARTED") ||
+    post.some((e) => e.type === "RUN_STARTED");
   const tail: RunEvent[] = [];
   if (runStartedEmitted) tail.push({ type: "HARNESS_STOPPED" });
-  return base.concat(nonTerminal, tail, ...terminal);
+  return pre.concat(nonTerminal, post, tail, ...terminal);
 }
 
 /**

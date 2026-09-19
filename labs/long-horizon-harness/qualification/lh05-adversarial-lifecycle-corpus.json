@@ -1,9 +1,9 @@
 {
   "schema": "lh05-adversarial-lifecycle-corpus/v1",
-  "emitted_at": "2026-09-19T01:06:40.847Z",
+  "emitted_at": "2026-09-19T08:11:31.913Z",
   "contract_version": "lh05.lifecycle.corpus.v1",
   "subject": {
-    "commit": "eae1f2952557c424d55116d7e3da9cc460286bb2",
+    "commit": "1e6d83e6487fd40b95f3936455046eb892e122fa",
     "substrates": {
       "lh03_frozen": "qualification/lh03-frozen.json",
       "lh04_frozen": "qualification/lh04-frozen.json"
@@ -615,11 +615,12 @@
       },
       "execution_mode": "REPLAY",
       "adapter_disposition": {
-        "kind": "REJECTED",
-        "expected_error_kind": "EVIDENCE_CORRUPTION_DETECTED"
+        "kind": "LH04_HANDOFF",
+        "expected_outcome": "LH04_HANDOFF_REJECTED_AS_EXPECTED",
+        "expected_rejection_kind": "EVIDENCE_HASH_MISMATCH"
       },
-      "adapter_error_kind": "EVIDENCE_CORRUPTION_DETECTED",
-      "phase_e_lifecycle_state": null,
+      "adapter_error_kind": null,
+      "phase_e_lifecycle_state": "INCOMPLETE",
       "phase_e_terminal_outcome": null,
       "lh02_predicates": {
         "passed": true,
