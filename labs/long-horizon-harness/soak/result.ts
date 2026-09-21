@@ -101,6 +101,13 @@ export interface LH06FrozenTreeSection {
 
 /**
  * Semantic repeatability (ACT §14, §16, §17, §40).
+ *
+ * L06-CORRECTION11 C47: bounded lifecycle-drift
+ * attribution map. Each key is a lifecycle case id
+ * (LC01..LC12); each value is the integer count of drift
+ * observations attributed to that scenario. Bounded by
+ * the lifecycle scenario count, NOT by the total number
+ * of failures observed.
  */
 export interface LH06SemanticSection {
   readonly drift_count: number;
@@ -109,6 +116,13 @@ export interface LH06SemanticSection {
   readonly predecessor_dependency_count: number;
   readonly canary_before_equals_canary_after: boolean | null;
   readonly cases_with_multiple_semantic_results: number;
+  /**
+   * L06-CORRECTION11 C47: bounded lifecycle-drift
+   * attribution. Each key is a lifecycle case id
+   * (LC01..LC12); each value is an integer counter.
+   * Diagnostics only — does NOT affect verdict.
+   */
+  readonly lifecycle_drift_by_scenario: Readonly<Record<string, number>>;
 }
 
 /**

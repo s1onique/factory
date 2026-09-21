@@ -1,0 +1,30 @@
+{
+  "schema": "lh06.supervisor-terminal-result/v1",
+  "contract_version": "lh06.soak.contract.v1",
+  "profile": "QUALIFICATION",
+  "supervisor_run_id": "423d4674a3883634",
+  "worker_result_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-deterministic-soak.json.423d4674a3883634.json",
+  "started_at": "2026-09-21T10:43:37.760Z",
+  "finished_at": "2026-09-21T10:43:37.760Z",
+  "duration_ms": 0,
+  "failure": {
+    "kind": "WORKER_CRASH",
+    "epoch": 38075,
+    "last_completed_case": null,
+    "minimal_diff": {
+      "verifier_reason": "INCOMPLETE_SUBSTRATE",
+      "verifier_detail": "substrate_complete flag is not true",
+      "child_exit_code": 2,
+      "child_exit_signal": null
+    },
+    "message": "worker-result verifier rejected artifact: INCOMPLETE_SUBSTRATE (substrate_complete flag is not true)"
+  },
+  "verdict": "FAIL_WORKER",
+  "supervisor_termination": {
+    "child_exit_code": 2,
+    "child_exit_signal": null,
+    "supervisor_reason": "verifier_rejected:INCOMPLETE_SUBSTRATE",
+    "captured_at_ms": 1789987417760
+  },
+  "publication_durability": "CRASH_DURABLE"
+}

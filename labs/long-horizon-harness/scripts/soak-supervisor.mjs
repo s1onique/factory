@@ -66,6 +66,32 @@ const profile = process.env["LH06_PROFILE"] ?? "CI_SMOKE";
 const injection = process.env["LH06_INJECTION"] ?? "NONE";
 
 /**
+ * L06-CORRECTION11 L06-C46: supervisor owns its own start
+ * timestamp. QUALIFICATION01 ran for an hour but the
+ * supervisor-generated terminal result claimed
+ * `started_at == finished_at` and `duration_ms == 0`.
+ * That is false evidence.
+ *
+ * We capture the supervisor start wall-clock AND the
+ * monotonic counterpart at module init. The terminal
+ * synthesis uses the monotonic counter for `duration_ms`
+ * (so it is not subject to wall-clock skew) and a fresh
+ * wall-clock read for `finished_at`. The two are recorded
+ * as the supervisor's authoritative timing record.
+ */
+const supervisorStartedWallClockMs = Date.now();
+const supervisorStartedAtIso = new Date(
+  supervisorStartedWallClockMs,
+).toISOString();
+// L06-CORRECTION12 L06-C51 cleanup: `performance.now()`
+// returns a millisecond-fractional number directly; the
+// previous `performance.now().ofMs ? .ofMs() : performance.now()`
+// branch was nonsensical (`.ofMs` does not exist on the
+// returned number). Keep the monotonic read simple and
+// authoritative.
+const supervisorStartedMonotonic = performance.now();
+
+/**
  * Canonical result path. The supervisor clears this BEFORE
  * spawning the worker and is the only writer. The worker
  * receives the per-run path `LH06_RESULT_PATH.<runId>.json`
@@ -147,7 +173,30 @@ function writeSupervisorResult(args) {
         "refusing to publish supervisor failure artifact (fail closed)",
     );
   }
-  const now = Date.now();
+  // L06-CORRECTION11 L06-C46: capture BOTH the wall clock
+  // and the monotonic elapsed at the moment of terminal
+  // synthesis. `started_at` is the supervisor's own start
+  // (recorded at module init), NOT a value reconstructed
+  // from the worker artifact. `duration_ms` is the
+  // monotonic elapsed so it is not subject to wall-clock
+  // adjustments during the run.
+  const finishedAtMs = Date.now();
+  const finishedAtIso = new Date(finishedAtMs).toISOString();
+  const finishedMonotonic = performance.now();
+  const monotonicElapsed = Math.max(
+    0,
+    finishedMonotonic - supervisorStartedMonotonic,
+  );
+  // Wall-clock elapsed must agree (or be larger) with the
+  // monotonic elapsed. We use the monotonic value as the
+  // canonical duration and report the wall-clock pair as
+  // the supervisor's truthful start/finish.
+  const durationMs = Math.max(
+    monotonicElapsed,
+    finishedAtMs - supervisorStartedWallClockMs,
+  );
+  void finishedAtIso;
+  void supervisorStartedAtIso;
   return writeSupervisorResultIo({
     path: resultPath,
     profile,
@@ -158,9 +207,9 @@ function writeSupervisorResult(args) {
     child_exit_code: args.child_exit_code ?? null,
     child_exit_signal: args.child_exit_signal ?? null,
     supervisor_reason: args.supervisor_reason,
-    started_at_ms: now,
-    finished_at_ms: now,
-    duration_ms: 0,
+    started_at_ms: supervisorStartedWallClockMs,
+    finished_at_ms: finishedAtMs,
+    duration_ms: durationMs,
   });
 }
 

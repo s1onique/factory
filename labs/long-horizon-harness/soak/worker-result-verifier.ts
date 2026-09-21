@@ -73,7 +73,7 @@
  * `{ok:false, reason}` and the supervisor / test harness
  * refuses to promote / trust the result.
  */
-import type { LH06Result } from "./result.js";
+import type { LH06Result, LH06SubstrateBinding } from "./result.js";
 import type { LH06Verdict } from "./types.js";
 import { checkCommitWitness } from "./commit-witness.js";
 import { checkResultShape } from "./result-shape.js";
@@ -81,6 +81,7 @@ import {
   checkProfileMinima,
   checkPublicationDurability,
   checkVerdictMatchesFailure,
+  checkSubstrateCompleteness,
 } from "./verifier-helpers.js";
 
 export interface WorkerResultVerifyOk {
@@ -98,6 +99,9 @@ export interface WorkerResultVerifyFail {
     | "MISSING_REQUIRED_FIELD"
     | "INCONSISTENT_VERDICT"
     | "INCOMPLETE_SUBSTRATE"
+    | "INCONSISTENT_SUBSTRATE_FLAG"
+    | "SUBSTRATE_SHAPE_INVALID"
+    | "SUBSTRATE_FLAG_NOT_BOOLEAN"
     | "INVALID_FROZEN_TREE_STATUS"
     | "TELEMETRY_MISSING"
     | "TELEMETRY_HASH_DRIFT"
@@ -266,6 +270,26 @@ export function verifyWorkerResult(args: {
   });
   if (!pd.ok) {
     return fail(pd.reason, pd.detail);
+  }
+  // L06-CORRECTION11 L06-C44: substrate-completeness
+  // semantic check. The shape layer has already verified
+  // the substrate has the closed-world geometry and
+  // `substrate_complete` is a boolean. We now enforce:
+  //
+  //   - the flag MUST match `isSubstrateComplete(binding)`
+  //     (otherwise INCONSISTENT_SUBSTRATE_FLAG);
+  //   - PASS_DETERMINISTIC_SOAK requires the substrate to
+  //     be complete (INCOMPLETE_SUBSTRATE);
+  //   - non-PASS verdicts with consistent flags are
+  //     ACCEPTED — negative evidence is preserved as
+  //     the worker's specific failure record.
+  const sc = checkSubstrateCompleteness({
+    verdict: verdict as LH06Verdict,
+    substrate: r["substrate"] as LH06SubstrateBinding,
+    substrate_complete_flag: r["substrate_complete"] as boolean,
+  });
+  if (!sc.ok) {
+    return fail(sc.reason, sc.detail);
   }
   // L06-CORRECTION07 L06-C35 / L06-CORRECTION08 L06-C36 /
   // L06-CORRECTION09 L06-C39: explicit closure-phase

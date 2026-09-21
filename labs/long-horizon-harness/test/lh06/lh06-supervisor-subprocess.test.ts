@@ -233,6 +233,7 @@ function makeFakeCleanWorkerResult(): Record<string, unknown> {
       predecessor_dependency_count: 0,
       canary_before_equals_canary_after: true,
       cases_with_multiple_semantic_results: 0,
+      lifecycle_drift_by_scenario: {},
     },
     resources: {
       post_gc_heap_first_window: 50 * 1024 * 1024,

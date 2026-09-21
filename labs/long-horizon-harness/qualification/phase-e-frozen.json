@@ -1,0 +1,39 @@
+{
+  "schema": "phase-e-frozen-record/v2",
+  "record_kind": "RETROSPECTIVE_FREEZE_RECORD",
+  "derived_from": "Phase E frozen predecessor closure accepted during LH-03 closure acceptance; the named commit was the canonical freeze commit at that time",
+  "record_created_at": "2026-09-21T00:00:00Z",
+  "record_created_during": "CORRECTION11 (qualification/lh06-red-qualification01 review)",
+  "subject": {
+    "commit": "61b0979ebba52e391e1408561fb2c20a79d28af7",
+    "subject": "Phase E deterministic substrate freeze (LH-03 frozen predecessor)"
+  },
+  "predecessor_chain": [
+    "61b0979 Phase E freeze"
+  ],
+  "qualification": {
+    "deterministic_substrate": "GREEN_FROZEN",
+    "live_substrate": "PHASE_E_NOT_LIVE_QUALIFIED"
+  },
+  "invariants_pinned_at_freeze": [
+    "CLOSURE_AUTHORITY_FRESH = PASS",
+    "TERMINAL_OUTCOME_NAMED = PASS",
+    "GATE_BINDING_BOUND = PASS",
+    "ACTION_REVIEW_PAIR_COMPLETE = PASS",
+    "EPOCH_BOUNDARY_NAMED = PASS"
+  ],
+  "evidence_files": {
+    "phase_e_path": "src/run/",
+    "phase_e_test_path": "test/run/",
+    "frozen_contract_guard": "scripts/verify_lh03_frozen.sh"
+  },
+  "provenance_note": [
+    "L06-CORRECTION12 L06-C51: this file is a record of an already-accepted freeze, not a new authority that established the freeze.",
+    "The named commit is the freeze commit; the authority for the freeze was established at the time the commit was accepted.",
+    "This record exists so the LH-06 substrate resolver can locate the named commit deterministically without re-deriving authority from runtime git state."
+  ],
+  "doctrine": [
+    "Phase E is a state-machine authority that lives above the harness adapter layer.",
+    "Closure authority freshness is the contract for terminal-outcome naming."
+  ]
+}

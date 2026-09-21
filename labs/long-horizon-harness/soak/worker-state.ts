@@ -66,6 +66,13 @@ export interface SoakWorkerState {
   lh04_executions: number;
   fault_escape_count: number;
   lifecycle_drift_count: number;
+  /**
+   * L06-CORRECTION11 C47: bounded per-scenario drift
+   * attribution. Keys are subset of LC01..LC12; values
+   * are integer counters. The map's memory complexity is
+   * O(number of scenarios), not O(number of failures).
+   */
+  lifecycle_drift_by_scenario: Record<string, number>;
   fault_wrong_kind_count: number;
   fault_wrong_authority_count: number;
   last_completed_case: string | null;
@@ -122,6 +129,7 @@ export function createWorkerState(args: {
     lh04_executions: 0,
     fault_escape_count: 0,
     lifecycle_drift_count: 0,
+    lifecycle_drift_by_scenario: Object.freeze({}) as Record<string, number>,
     fault_wrong_kind_count: 0,
     fault_wrong_authority_count: 0,
     last_completed_case: null,

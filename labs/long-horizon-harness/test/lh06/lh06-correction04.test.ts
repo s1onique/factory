@@ -197,10 +197,24 @@ test("L06-C26: verifyWorkerResult rejects PASS verdict with non-null failure", (
 });
 
 test("L06-C26: verifyWorkerResult rejects incomplete substrate", () => {
+  // L06-CORRECTION11 L06-C44: INCOMPLETE_SUBSTRATE is
+  // ONLY raised on a PASS verdict. A non-PASS verdict
+  // with an incomplete substrate is ACCEPTED (negative
+  // evidence is preserved). To exercise the
+  // INCOMPLETE_SUBSTRATE branch the test fixture MUST
+  // claim PASS_DETERMINISTIC_SOAK.
   const result = makeFakeWorkerResult() as unknown as Record<string, unknown>;
   const substrate = result["substrate"] as Record<string, unknown>;
   substrate["phase_e_head"] = null;
   result["substrate_complete"] = false;
+  result["verdict"] = "PASS_DETERMINISTIC_SOAK";
+  result["failure"] = null;
+  // Substrate semantic check requires PASS to also be
+  // profile-minimum compliant: duration_ms >= profile
+  // minimum (60min for QUALIFICATION, smaller for
+  // CI_SMOKE) and epochs_completed >= minimum (10 for
+  // CI_SMOKE). The fake result already has
+  // duration_ms=3,600,000 and epochs_completed=20.
   const v = verifyWorkerResult({
       mode: "PROMOTION",
       result_path: "/tmp/lh06-test/result.json",
@@ -1105,6 +1119,7 @@ function makeFakeWorkerResult() {
       cases_observed: 20,
       drift_count: 0,
       cases_with_multiple_semantic_results: 0,
+      lifecycle_drift_by_scenario: {},
       predecessor_dependency_count: 0,
       fault_count: 0,
       fault_escape_count: 0,
@@ -1190,6 +1205,7 @@ function makeMinimalPassResult() {
       cases_observed: 10,
       drift_count: 0,
       cases_with_multiple_semantic_results: 0,
+      lifecycle_drift_by_scenario: {},
       predecessor_dependency_count: 0,
       fault_count: 0,
       fault_escape_count: 0,

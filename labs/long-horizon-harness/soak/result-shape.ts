@@ -5,24 +5,32 @@
  *
  * Split from `worker-result-verifier.ts` for source-size
  * discipline (HYGIENE01: every LH-06 production source
- * file MUST be <= 400 LOC). Contains the structural
- * shape checks that do not depend on verdict / witness
- * semantics: schema literal, contract_version, profile
- * closed-union, supervisor_run_id, required-field
- * presence, substrate completeness, frozen-tree status,
- * telemetry file presence + SHA-256, telemetry_bytes /
- * telemetry_line_count cross-check, duration / epoch
- * sanity.
+ * file MUST be <= 400 LOC).
  *
- * Each check returns `{ok:true}` (with the duration /
- * epochs values needed downstream) or
- * `{ok:false, reason, detail}` using the
- * `WorkerResultVerifyFail` reason union so the
- * verifier can re-use its `fail(...)` helper without
- * inventing parallel vocabulary.
+ * L06-CORRECTION11 L06-C44: structural shape validation
+ * checks ONLY the closed-world geometry (presence, type,
+ * size). Substrate completeness is a SEMANTIC predicate
+ * (does the binding carry all six identities?) that
+ * belongs to the verifier, not the shape layer. The
+ * previous design conflated structural presence with
+ * semantic completeness and destroyed valid negative
+ * evidence (e.g. `FAIL_SEMANTIC_DRIFT` with an incomplete
+ * substrate) by failing the verifier with
+ * `INCOMPLETE_SUBSTRATE` before the worker's actual failure
+ * record was ever inspected.
+ *
+ * The shape layer checks: schema, contract_version,
+ * profile, supervisor_run_id, required-field presence,
+ * substrate has closed-world SHAPE, substrate_complete is
+ * a boolean, frozen-tree status object exists, telemetry
+ * file exists + SHA matches, duration / epochs sane.
+ *
+ * Semantic checks live in the verifier:
+ *   - substrate_complete consistency;
+ *   - PASS requires complete substrate (INCOMPLETE_SUBSTRATE);
+ *   - non-PASS preserves the worker's specific failure.
  */
 import { DurableTelemetryStore } from "./telemetry-store.js";
-import { isSubstrateComplete } from "./substrate-binding.js";
 import {
   LH06_RESULT_SCHEMA,
   LH06_SOAK_CONTRACT_VERSION,
@@ -34,7 +42,8 @@ export type ShapeReason =
   | "BAD_PROFILE"
   | "SUPERVISOR_RUN_ID_MISMATCH"
   | "MISSING_REQUIRED_FIELD"
-  | "INCOMPLETE_SUBSTRATE"
+  | "SUBSTRATE_SHAPE_INVALID"
+  | "SUBSTRATE_FLAG_NOT_BOOLEAN"
   | "INVALID_FROZEN_TREE_STATUS"
   | "TELEMETRY_MISSING"
   | "TELEMETRY_HASH_DRIFT"
@@ -87,15 +96,33 @@ export function checkResultShape(args: {
       return fail("MISSING_REQUIRED_FIELD", `field not present: ${k}`);
     }
   }
-  if (r["substrate_complete"] !== true) {
-    return fail("INCOMPLETE_SUBSTRATE", "substrate_complete flag is not true");
+  if (r["substrate_complete"] !== true && r["substrate_complete"] !== false) {
+    return fail("SUBSTRATE_FLAG_NOT_BOOLEAN", `substrate_complete must be boolean, got ${typeof r["substrate_complete"]}`);
   }
+  // L06-CORRECTION11 L06-C44: structural substrate shape.
+  // Semantic completeness (do all six identities carry
+  // non-null values?) is the verifier's job.
   const substrate = r["substrate"];
   if (typeof substrate !== "object" || substrate === null) {
-    return fail("INCOMPLETE_SUBSTRATE", "substrate field missing or malformed");
+    return fail("SUBSTRATE_SHAPE_INVALID", "substrate field missing or malformed");
   }
-  if (!isSubstrateComplete(substrate as Parameters<typeof isSubstrateComplete>[0])) {
-    return fail("INCOMPLETE_SUBSTRATE", "substrate binding has null entries");
+  const subObj = substrate as Record<string, unknown>;
+  const expectedSubKeys: readonly string[] = [
+    "phase_e_head",
+    "lh02_head",
+    "lh03_frozen_commit",
+    "lh04_frozen_commit",
+    "lh05_corpus_commit",
+    "repo_commit",
+  ];
+  for (const k of expectedSubKeys) {
+    if (!(k in subObj)) {
+      return fail("SUBSTRATE_SHAPE_INVALID", `substrate field missing key: ${k}`);
+    }
+    const v = subObj[k];
+    if (v !== null && typeof v !== "string") {
+      return fail("SUBSTRATE_SHAPE_INVALID", `substrate.${k} must be string|null, got ${typeof v}`);
+    }
   }
   const ft = r["frozen_tree"];
   if (typeof ft !== "object" || ft === null) {
@@ -105,8 +132,11 @@ export function checkResultShape(args: {
   if (typeof status !== "object" || status === null) {
     return fail("INVALID_FROZEN_TREE_STATUS", "frozen_tree.status missing");
   }
-  if ((status as Record<string, unknown>)["ok"] !== true) {
-    return fail("INVALID_FROZEN_TREE_STATUS", `frozen_tree.status.ok must be true; got ${String((status as Record<string, unknown>)["ok"])}`);
+  // L06-CORRECTION11: structural shape only — semantic
+  // interpretation of frozen-tree changes is the
+  // verifier's job (and surfaces as FROZEN_MUTATION).
+  if (!("ok" in (status as Record<string, unknown>))) {
+    return fail("INVALID_FROZEN_TREE_STATUS", "frozen_tree.status missing 'ok' field");
   }
   const telemetryPath = r["telemetry_path"];
   const telemetrySha = r["telemetry_sha256"];

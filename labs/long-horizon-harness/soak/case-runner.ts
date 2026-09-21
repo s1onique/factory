@@ -13,11 +13,20 @@ import { findFault } from "../fault-lab/deterministic/fault-catalog.js";
 import { runFaultExperiment } from "../fault-lab/deterministic/runner.js";
 import { runScenarioForHarness, semanticReplayShape } from "../lifecycle-corpus/runner.js";
 import { semanticDigest, stripVolatile } from "./semantic-ledger.js";
+import { withCanonicalTempRoot } from "./canonical-temp-root.js";
 import type { SoakWorkerState } from "./worker-state.js";
 
 /**
  * Run a single LH-05 lifecycle scenario. Returns the
  * canonical semantic digest (volatile fields stripped).
+ *
+ * L06-CORRECTION11 L06-C45: every LH-05 invocation is
+ * wrapped in `withCanonicalTempRoot` so the LH-04 frozen
+ * bridge receives a workspace whose `realpath` equals
+ * its literal path (no `/private` vs `/var` mismatch).
+ * The wrapper is process-scope-scoped: it sets TMPDIR for
+ * the duration of one bridge call and restores it in a
+ * `finally`. The next scenario sees the original TMPDIR.
  */
 export async function runLh05Case(
   state: SoakWorkerState,
@@ -36,10 +45,28 @@ export async function runLh05Case(
       : elig.fake_reference_control.eligible
         ? "fake"
         : "cline";
-  const result = await runScenarioForHarness({
-    repoRoot: state.repoRoot,
-    scenarioId: caseId,
-    harness,
+  // Canonical-temp-root wrapper. The wrapper produces a
+  // workspace root whose canonical form equals its raw
+  // form (no `/private` prefix on macOS), so the LH-04
+  // verifier's `realpath` containment check operates on a
+  // canonical pair. The wrapper restores TMPDIR on every
+  // exit path so later experiments are unaffected.
+  const result = await withCanonicalTempRoot({
+    prefix: `lh06-${caseId}-`,
+    invoke: async (_canonicalRoot: string) => {
+      // The actual mkdtempSync inside `runLh04Handoff`
+      // reads `process.env["FACTORY_LH05_WORKSPACE_BASE"]`
+      // (preferred) or falls back to `tmpdir()` (which
+      // honors TMPDIR). We do NOT redirect TMPDIR at the
+      // process level here — instead, the wrapper pre
+      // canonicalizes the parent dir so any mkdtempSync
+      // child returns a path that is already canonical.
+      return runScenarioForHarness({
+        repoRoot: state.repoRoot,
+        scenarioId: caseId,
+        harness,
+      });
+    },
   });
   const shape = stripVolatile(semanticReplayShape(result));
   const digest = semanticDigest(shape);
@@ -55,6 +82,14 @@ export async function runLh05Case(
   state.last_completed_case = caseId;
   if (result.disposition !== "PASS") {
     state.lifecycle_drift_count += 1;
+    // L06-CORRECTION11 C47: per-scenario attribution.
+    // The map is bounded to LC01..LC12; mutation here
+    // re-builds a fresh object so we never need to mutate
+    // the frozen initial empty-record.
+    state.lifecycle_drift_by_scenario = {
+      ...state.lifecycle_drift_by_scenario,
+      [caseId]: (state.lifecycle_drift_by_scenario[caseId] ?? 0) + 1,
+    };
   }
   return { digest, disposition: result.disposition };
 }

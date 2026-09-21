@@ -1,0 +1,97 @@
+{
+  "schema": "lh06.deterministic.soak.result.v1",
+  "contract_version": "lh06.soak.contract.v1",
+  "profile": "QUALIFICATION",
+  "started_at": "2026-09-21T09:43:37.676Z",
+  "finished_at": "2026-09-21T10:43:37.718Z",
+  "duration_ms": 3600042,
+  "environment_identity": {
+    "os": "darwin/arm64",
+    "arch": "arm64",
+    "node_version": "v26.0.0",
+    "cpu_count": 1,
+    "total_memory_bytes": 68719476736,
+    "contract_version": "lh06.soak.contract.v1",
+    "profile": "QUALIFICATION",
+    "soak_run_id": "7aab74ed17082938"
+  },
+  "substrate": {
+    "phase_e_head": null,
+    "lh02_head": null,
+    "lh03_frozen_commit": "7be31164b939f327c557847eb9a8b0c4ffd16b87",
+    "lh04_frozen_commit": "a8caa82655ca6036bc40a43be5000bdda5bb84bf",
+    "lh05_corpus_commit": "c898f05ccb1966c5074f6483bad106b3d093b169",
+    "repo_commit": "4193beec7dc0e97001b4741b484e293af00bd316"
+  },
+  "epochs_completed": 38075,
+  "cases_completed": 1180325,
+  "semantic": {
+    "drift_count": 0,
+    "fault_escape_count": 0,
+    "lifecycle_drift_count": 38075,
+    "predecessor_dependency_count": 0,
+    "canary_before_equals_canary_after": true,
+    "cases_with_multiple_semantic_results": 0
+  },
+  "resources": {
+    "post_gc_heap_first_window": 11468940,
+    "post_gc_heap_last_window": 12307252,
+    "post_gc_heap_delta": 838312,
+    "heap_slope_bytes_per_epoch": 79.57753232015769,
+    "rss_first_window": 125960192,
+    "rss_last_window": 227655680,
+    "rss_delta": 101695488,
+    "rss_slope": 3755.061879046633,
+    "resource_balance_failures": 0,
+    "workspace_leaks": 0,
+    "heap_verdict": {
+      "pass": true,
+      "reason": "STABLE",
+      "first_window_median": 11468940,
+      "last_window_median": 12307252,
+      "delta_bytes": 838312,
+      "slope_bytes_per_epoch": 79.57753232015769
+    }
+  },
+  "latency": {
+    "first_window_median_ms": 90,
+    "last_window_median_ms": 87.5,
+    "drift_ratio": 0.9722222222222222,
+    "verdict": {
+      "pass": true,
+      "reason": "STABLE",
+      "first_window_median_ms": 90,
+      "last_window_median_ms": 87.5,
+      "drift_ratio": 0.9722222222222222
+    }
+  },
+  "frozen_tree": {
+    "before_sha256": "9178678c523207db6ad3db683bec3c5611d818e4887831f5dc123fe2daf4c51c",
+    "after_sha256": "9178678c523207db6ad3db683bec3c5611d818e4887831f5dc123fe2daf4c51c",
+    "changed": false,
+    "status": {
+      "ok": true,
+      "kind": "VALID"
+    }
+  },
+  "repeatability": {
+    "semantic_repeatability": true
+  },
+  "failure": {
+    "kind": "LIFECYCLE_DRIFT",
+    "epoch": null,
+    "last_completed_case": "LC01",
+    "minimal_diff": {
+      "lifecycle_drift_count": 38075
+    },
+    "message": "lifecycle drift detected"
+  },
+  "verdict": "FAIL_SEMANTIC_DRIFT",
+  "telemetry_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-telemetry/lh06-7aab74ed17082938.telemetry.jsonl",
+  "telemetry_sha256": "a79c947cf19d20c0c9932a98f05d1339210d4fe580cf08352c4d5e03e8a564b6",
+  "telemetry_bytes": 5272444,
+  "telemetry_line_count": 38075,
+  "supervisor_run_id": "423d4674a3883634",
+  "substrate_complete": false,
+  "publication_durability": "CRASH_DURABLE"
+}

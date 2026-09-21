@@ -11,7 +11,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, resolve as resolvePath } from "node:path";
 import * as fs from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { runSoakWorker } from "../../soak/worker-runner.js";
 import { createWorkerState } from "../../soak/worker-state.js";
@@ -182,6 +188,16 @@ test("L06-C17: worker result binds telemetry_path + telemetry_sha256", { concurr
  * `substrate_complete === true`. A run with an
  * incomplete substrate MUST be surfaced as
  * INCONCLUSIVE_ENVIRONMENT.
+ *
+ * L06-CORRECTION12 L06-C43 / L06-C51: the live lab
+ * substrate is now COMPLETE because the authoritative
+ * records (`qualification/phase-e-frozen.json` and
+ * `qualification/lh02-frozen.json`) memorial the
+ * previously-accepted freezes. The "live lab substrate
+ * is partial" pre-condition that drove this test's
+ * pre-CORRECTION11 assertion is no longer true; the
+ * negative branch of the C21 gate MUST be exercised by
+ * an explicit override that returns a partial binding.
  */
 test("L06-C21: incomplete substrate blocks PASS_DETERMINISTIC_SOAK", () => {
   const state = createWorkerState({
@@ -189,7 +205,8 @@ test("L06-C21: incomplete substrate blocks PASS_DETERMINISTIC_SOAK", () => {
     injection: { kind: "NONE" },
     repoRoot: REPO_ROOT,
   });
-  // No substrateOverride — the live repo is partial.
+  // No substrateOverride — the live repo's authoritative
+  // records now resolve a complete substrate.
   const fakeTelemetry = {
     ok: true as const,
     path: "/tmp/fake.jsonl",
@@ -203,13 +220,32 @@ test("L06-C21: incomplete substrate blocks PASS_DETERMINISTIC_SOAK", () => {
     failure: null,
     telemetry: fakeTelemetry,
   });
-  // Even with epochs >= 10, INCONCLUSIVE_ENVIRONMENT wins.
   state.epochs_completed = 10;
   void r; // (covered by the worker-level test below)
+  // L06-CORRECTION12: with the new authority records
+  // the live lab substrate IS complete. We assert the
+  // positive branch here and exercise the negative
+  // branch explicitly with an override.
   assert.equal(
     isSubstrateComplete(substrateBindingFromFiles(REPO_ROOT)),
+    true,
+    "live lab substrate is now complete (L06-C43 / L06-C51 authority records resolve all six identities)",
+  );
+  // Negative branch: a partial override MUST surface as
+  // incomplete, so the gate's INCONCLUSIVE_ENVIRONMENT
+  // path remains exercisable.
+  const partialOverride = {
+    phase_e_head: "a".repeat(40),
+    lh02_head: "b".repeat(40),
+    lh03_frozen_commit: "c".repeat(40),
+    lh04_frozen_commit: "d".repeat(40),
+    lh05_corpus_commit: "e".repeat(40),
+    repo_commit: null,
+  };
+  assert.equal(
+    isSubstrateComplete(partialOverride),
     false,
-    "live lab substrate is partial — confirms the gate is real",
+    "partial override binding MUST report incomplete (negative-branch gate is real)",
   );
 });
 
@@ -219,85 +255,115 @@ test("L06-C21: incomplete substrate blocks PASS_DETERMINISTIC_SOAK", () => {
  * `{ok:false, reason:"INCOMPLETE_SUBSTRATE"}`.
  */
 test("L06-C20: verifier rejects worker result with incomplete substrate", () => {
-  const incompleteResult = {
-    schema: "lh06.deterministic.soak.result.v1",
-    contract_version: "lh06.soak.contract.v1",
-    profile: "CI_SMOKE",
-    started_at: new Date().toISOString(),
-    finished_at: new Date().toISOString(),
-    duration_ms: 100,
-    environment_identity: {
-      os: "darwin/arm64",
-      arch: "arm64",
-      node_version: process.version,
-      cpu_count: 1,
-      total_memory_bytes: 1,
+  // L06-CORRECTION11 L06-C44: the substrate completeness
+  // semantic check lives behind a real telemetry file
+  // (the shape layer verifies bytes/SHA/line_count before
+  // the semantic substrate check runs). Build a real
+  // telemetry file so the verifier advances through the
+  // shape layer and reaches the substrate semantic gate.
+  const dir = mkdtempSync(join(tmpdir(), "lh06-c20-"));
+  try {
+    const tp = join(dir, "lh06-c20.telemetry.jsonl");
+    const lines = [
+      '{"type":"LH06_HEARTBEAT","epoch":0}',
+      '{"type":"LH06_HEARTBEAT","epoch":1}',
+    ];
+    writeFileSync(tp, lines.join("\n") + "\n");
+    const realBytes = readFileSync(tp);
+    const realSha = createHash("sha256").update(realBytes).digest("hex");
+    const incompleteResult = {
+      schema: "lh06.deterministic.soak.result.v1",
       contract_version: "lh06.soak.contract.v1",
-      profile: "CI_SMOKE" as const,
-      soak_run_id: "x",
-    },
-    substrate: {
-      phase_e_head: null,
-      lh02_head: null,
-      lh03_frozen_commit: null,
-      lh04_frozen_commit: null,
-      lh05_corpus_commit: null,
-      repo_commit: null,
-    },
-    epochs_completed: 10,
-    cases_completed: 10,
-    semantic: {
-      drift_count: 0,
-      fault_escape_count: 0,
-      lifecycle_drift_count: 0,
-      predecessor_dependency_count: 0,
-      canary_before_equals_canary_after: true,
-      cases_with_multiple_semantic_results: 0,
-    },
-    resources: {
-      post_gc_heap_first_window: 1,
-      post_gc_heap_last_window: 1,
-      post_gc_heap_delta: 0,
-      heap_slope_bytes_per_epoch: 0,
-      rss_first_window: 1,
-      rss_last_window: 1,
-      rss_delta: 0,
-      rss_slope: 0,
-      resource_balance_failures: 0,
-      workspace_leaks: 0,
-      heap_verdict: null,
-    },
-    latency: {
-      first_window_median_ms: 1,
-      last_window_median_ms: 1,
-      drift_ratio: 1,
-      verdict: null,
-    },
-    frozen_tree: {
-      before_sha256: null,
-      after_sha256: null,
-      changed: null,
-      status: { ok: true, kind: "VALID" },
-    },
-    repeatability: { semantic_repeatability: true },
-    failure: null,
-    verdict: "PASS_DETERMINISTIC_SOAK",
-    telemetry_path: null,
-    telemetry_sha256: null,
-    telemetry_bytes: null,
-    telemetry_line_count: null,
-    supervisor_run_id: "x",
-    substrate_complete: true, // LIES — substrate is partial!
-  };
-  const v = verifyWorkerResult({
-      mode: "PROMOTION",
-      result_path: "/tmp/canonical/result.json",
-    raw: incompleteResult,
-    expected_supervisor_run_id: "x",
-  });
-  assert.equal(v.ok, false);
-  if (!v.ok) {
-    assert.equal(v.reason, "INCOMPLETE_SUBSTRATE");
+      profile: "CI_SMOKE",
+      started_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      duration_ms: 100,
+      environment_identity: {
+        os: "darwin/arm64",
+        arch: "arm64",
+        node_version: process.version,
+        cpu_count: 1,
+        total_memory_bytes: 1,
+        contract_version: "lh06.soak.contract.v1",
+        profile: "CI_SMOKE" as const,
+        soak_run_id: "x",
+      },
+      substrate: {
+        phase_e_head: null,
+        lh02_head: null,
+        lh03_frozen_commit: null,
+        lh04_frozen_commit: null,
+        lh05_corpus_commit: null,
+        repo_commit: null,
+      },
+      epochs_completed: 10,
+      cases_completed: 10,
+      semantic: {
+        drift_count: 0,
+        fault_escape_count: 0,
+        lifecycle_drift_count: 0,
+        predecessor_dependency_count: 0,
+        canary_before_equals_canary_after: true,
+        cases_with_multiple_semantic_results: 0,
+        lifecycle_drift_by_scenario: {},
+      },
+      resources: {
+        post_gc_heap_first_window: 1,
+        post_gc_heap_last_window: 1,
+        post_gc_heap_delta: 0,
+        heap_slope_bytes_per_epoch: 0,
+        rss_first_window: 1,
+        rss_last_window: 1,
+        rss_delta: 0,
+        rss_slope: 0,
+        resource_balance_failures: 0,
+        workspace_leaks: 0,
+        heap_verdict: null,
+      },
+      latency: {
+        first_window_median_ms: 1,
+        last_window_median_ms: 1,
+        drift_ratio: 1,
+        verdict: null,
+      },
+      frozen_tree: {
+        before_sha256: null,
+        after_sha256: null,
+        changed: null,
+        status: { ok: true, kind: "VALID" },
+      },
+      repeatability: { semantic_repeatability: true },
+      failure: null,
+      verdict: "PASS_DETERMINISTIC_SOAK",
+      telemetry_path: tp,
+      telemetry_sha256: realSha,
+      telemetry_bytes: realBytes.length,
+      telemetry_line_count: lines.length,
+      supervisor_run_id: "x",
+      publication_durability: "CRASH_DURABLE" as const,
+      // Honest substrate_complete flag: false. The
+      // semantic check fires INCOMPLETE_SUBSTRATE on
+      // PASS_DETERMINISTIC_SOAK + incomplete binding.
+      // If we had set `substrate_complete: true` here
+      // the verifier would surface
+      // INCONSISTENT_SUBSTRATE_FLAG (rule 1) BEFORE
+      // INCOMPLETE_SUBSTRATE (rule 2). L06-C44
+      // contract: rules are evaluated in declaration
+      // order.
+      substrate_complete: false,
+    };
+    const v = verifyWorkerResult({
+        mode: "PROMOTION",
+        result_path: "/tmp/canonical/result.json",
+      raw: incompleteResult,
+      expected_supervisor_run_id: "x",
+    });
+    assert.equal(v.ok, false);
+    if (!v.ok) {
+      assert.equal(v.reason, "INCOMPLETE_SUBSTRATE");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

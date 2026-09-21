@@ -5,10 +5,24 @@
  *
  * Split from `worker-result-verifier.ts` for source-size
  * discipline (HYGIENE01). Contains the verdict-aware
- * profile contract check (L06-CORRECTION06 L06-C32) and
+ * profile contract check (L06-CORRECTION06 L06-C32),
  * the publication-durability gate (L06-CORRECTION06
- * L06-C33), both of which can be unit-tested in
- * isolation from the rest of the verifier.
+ * L06-C33), and the substrate-completeness semantic
+ * checks (L06-CORRECTION11 L06-C44).
+ *
+ * L06-CORRECTION11 L06-C44: substrate completeness is a
+ * SEMANTIC predicate. The shape layer checks the closed-
+ * world geometry of the substrate; this module enforces
+ * the rules:
+ *
+ *   PASS_DETERMINISTIC_SOAK && !isSubstrateComplete(b)
+ *     => INCOMPLETE_SUBSTRATE (refuse PASS)
+ *
+ *   non-PASS verdict with consistent substrate_complete
+ *     flag => accept (preserve negative evidence)
+ *
+ *   substrate_complete inconsistent with actual binding
+ *     completeness => INCONSISTENT_SUBSTRATE_FLAG
  */
 import { LH06_PROFILES } from "./contract.js";
 import { verdictForFailure } from "./result-io.js";
@@ -16,13 +30,16 @@ import type {
   LH06FailureKind,
   LH06Verdict,
 } from "./types.js";
-import type { LH06FailureRecord } from "./result.js";
+import type { LH06FailureRecord, LH06SubstrateBinding } from "./result.js";
+import { isSubstrateComplete } from "./substrate-authority.js";
 
 export type HelperReason =
   | "MISSING_REQUIRED_FIELD"
   | "INSUFFICIENT_DURATION"
   | "INSUFFICIENT_EPOCHS"
-  | "INCONSISTENT_VERDICT";
+  | "INCONSISTENT_VERDICT"
+  | "INCOMPLETE_SUBSTRATE"
+  | "INCONSISTENT_SUBSTRATE_FLAG";
 
 export interface HelperFail {
   readonly ok: false;
@@ -173,4 +190,42 @@ function fail(reason: HelperReason, detail: string): HelperFail {
 }
 function ok(): HelperOk {
   return { ok: true };
+}
+
+/**
+ * L06-CORRECTION11 L06-C44: substrate-completeness
+ * semantic check.
+ *
+ * Three rules:
+ *
+ *   1. The declared `substrate_complete` flag MUST match
+ *      `isSubstrateComplete(binding)`. Mismatch is a
+ *      malformed artifact (INCONSISTENT_SUBSTRATE_FLAG).
+ *
+ *   2. PASS_DETERMINISTIC_SOAK requires the substrate to be
+ *      complete (INCOMPLETE_SUBSTRATE). A PASS with an
+ *      incomplete substrate is refused.
+ *
+ *   3. Non-PASS verdicts are accepted with consistent
+ *      substrate flags (negative evidence is preserved).
+ */
+export function checkSubstrateCompleteness(args: {
+  readonly verdict: LH06Verdict;
+  readonly substrate: LH06SubstrateBinding;
+  readonly substrate_complete_flag: boolean;
+}): HelperOk | HelperFail {
+  const actualComplete = isSubstrateComplete(args.substrate);
+  if (args.substrate_complete_flag !== actualComplete) {
+    return fail(
+      "INCONSISTENT_SUBSTRATE_FLAG",
+      `substrate_complete flag (${String(args.substrate_complete_flag)}) does not match actual binding completeness (${String(actualComplete)})`,
+    );
+  }
+  if (args.verdict === "PASS_DETERMINISTIC_SOAK" && !actualComplete) {
+    return fail(
+      "INCOMPLETE_SUBSTRATE",
+      `PASS_DETERMINISTIC_SOAK requires a complete substrate; substrate has at least one null identity`,
+    );
+  }
+  return ok();
 }

@@ -1,0 +1,38 @@
+{
+  "schema": "lh02-frozen-record/v2",
+  "record_kind": "RETROSPECTIVE_FREEZE_RECORD",
+  "derived_from": "LH-02 deterministic metric substrate freeze accepted during LH-02 closure acceptance; the named commit was the canonical freeze commit at that time",
+  "record_created_at": "2026-09-21T00:00:00Z",
+  "record_created_during": "CORRECTION11 (qualification/lh06-red-qualification01 review)",
+  "subject": {
+    "commit": "715e6390d78228f089270259e1bd1307140adb75",
+    "subject": "LH-02 deterministic metric substrate freeze"
+  },
+  "predecessor_chain": [
+    "715e6390 LH-02 freeze"
+  ],
+  "qualification": {
+    "deterministic_substrate": "GREEN_FROZEN",
+    "metric_contract_version": "convergence.metric.contract.v1"
+  },
+  "invariants_pinned_at_freeze": [
+    "METRIC_CONTRACT_VERSION_BOUND = PASS",
+    "SUCCESS_NORMALIZED_PROMOTION_BOUND = PASS",
+    "HISTORICAL_AUTHORITY_INVALIDATION_COUNT_BOUND = PASS",
+    "METRIC_EVIDENCE_FAILURE_OBSERVED_BOUND = PASS"
+  ],
+  "evidence_files": {
+    "lh02_path": "src/metrics/",
+    "lh02_test_path": "test/metrics/",
+    "frozen_contract_guard": "scripts/verify_lh03_frozen.sh"
+  },
+  "provenance_note": [
+    "L06-CORRECTION12 L06-C51: this file is a record of an already-accepted freeze, not a new authority that established the freeze.",
+    "The named commit is the freeze commit; the authority for the freeze was established at the time the commit was accepted.",
+    "This record exists so the LH-06 substrate resolver can locate the named commit deterministically without re-deriving authority from runtime git state."
+  ],
+  "doctrine": [
+    "LH-02 is the metric authority that lives below Phase E.",
+    "Successful run promotion to a normalized success metric requires historical-authority freshness."
+  ]
+}

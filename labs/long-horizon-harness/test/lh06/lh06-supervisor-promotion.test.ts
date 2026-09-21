@@ -107,6 +107,7 @@ function makeForgedArtifact(
       cases_observed: 20,
       drift_count: 0,
       cases_with_multiple_semantic_results: 0,
+      lifecycle_drift_by_scenario: {},
       predecessor_dependency_count: 0,
       fault_count: 0,
       fault_escape_count: 0,

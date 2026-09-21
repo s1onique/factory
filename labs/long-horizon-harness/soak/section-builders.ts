@@ -135,6 +135,12 @@ export function buildSemanticSection(
     canary_before_equals_canary_after:
       verdict.canary_before_equals_canary_after,
     cases_with_multiple_semantic_results: multiCount,
+    // L06-CORRECTION11 C47: bounded per-scenario
+    // attribution. Diagnostic only; does NOT affect
+    // verdict.
+    lifecycle_drift_by_scenario: Object.freeze(
+      { ...state.lifecycle_drift_by_scenario },
+    ),
   };
 }
 

@@ -26,17 +26,28 @@
  * The recursive frozen-tree digest is delegated to
  * `./frozen-tree-digest.js`.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { totalmem } from "node:os";
-import { LH06_FROZEN_SUBSTRATE_FILES } from "./contract.js";
+import { readFileSync } from "node:fs";
 import type { LH06SoakProfile } from "./types.js";
 import type {
   LH06EnvironmentIdentity,
   LH06SubstrateBinding,
 } from "./result.js";
+import {
+  resolveSoakSubstrateBinding,
+  readRepoCommit,
+  isSubstrateComplete,
+} from "./substrate-authority.js";
 
 export { computeFrozenTreeDigest } from "./frozen-tree-digest.js";
+
+/**
+ * L06-CORRECTION11 L06-C43: re-export the authoritative
+ * substrate resolver and `isSubstrateComplete` so callers
+ * have a single import surface. The previous duplicates in
+ * this module have been removed.
+ */
+export { resolveSoakSubstrateBinding, isSubstrateComplete, readRepoCommit };
 
 /**
  * Default repository root for the soak worker.
@@ -82,108 +93,17 @@ export function envIdentity(
 }
 
 /**
- * Extract `subject.commit` from a qualification JSON shape.
- * Pure; returns null when not present.
+ * Resolve the current repository HEAD to a commit SHA.
+ *
+ * L06-CORRECTION11 L06-C43: delegated to the authoritative
+ * resolver in `substrate-authority.ts`. The closed-world
+ * resolver is the SINGLE source of truth for every
+ * substrate identity (including repo_commit). The previous
+ * inline implementation here duplicated git plumbing and
+ * could drift from the authority module.
  */
-function extractSubjectCommit(raw: Record<string, unknown>): string | null {
-  const sub = raw["subject"];
-  if (sub === undefined || typeof sub !== "object" || sub === null) {
-    return null;
-  }
-  const c = (sub as Record<string, unknown>)["commit"];
-  return typeof c === "string" ? c : null;
-}
-
-/**
- * Read the SHA of a refs file (e.g. refs/heads/main),
- * relative to a `.git` directory. Returns null when the
- * loose file is missing or empty.
- */
-function readRefFileFromGitDir(
-  gitDir: string,
-  ref: string,
-): string | null {
-  const loose = resolve(gitDir, ref);
-  if (existsSync(loose)) {
-    try {
-      const v = readFileSync(loose, "utf8").trim();
-      if (v.length > 0) return v;
-    } catch {
-      // fallthrough
-    }
-  }
-  const packed = resolve(gitDir, "packed-refs");
-  if (existsSync(packed)) {
-    try {
-      const lines = readFileSync(packed, "utf8").split(/\r?\n/);
-      for (const line of lines) {
-        if (line.startsWith("#") || line.length === 0) continue;
-        const tab = line.indexOf(" ");
-        if (tab < 0) continue;
-        const sha = line.slice(0, tab).trim();
-        const name = line.slice(tab + 1).trim();
-        if (name === ref) return sha;
-      }
-    } catch {
-      // fallthrough
-    }
-  }
-  return null;
-}
-
-/**
- * Resolve the current repository HEAD to a commit SHA, not a
- * ref name.
- *
- * Limitation: this implementation assumes `.git` is a
- * directory (the canonical layout for a non-worktree
- * checkout). Factory forbids linked worktrees for the LH-06
- * qualification per `FACTORY_GIT_WORKTREE_POLICY`, so this
- * is acceptable for V1. A linked-worktree `.git` file would
- * currently resolve to null; documented so future migrators
- * don't silently change semantics.
- *
- * For a normal attached branch:
- *
- *   .git/HEAD            = "ref: refs/heads/main"
- *   .git/refs/heads/main = "<commit sha>"
- *
- * For a detached HEAD, `.git/HEAD` already contains the
- * SHA directly.
- *
- * Walks up the directory tree to find `.git` so the worker
- * resolves the commit even when `repoRoot` is a sub-
- * directory of the actual git checkout (e.g.
- * `labs/long-horizon-harness/`). Falls back to the loose
- * `packed-refs` file when the loose ref file is missing.
- */
-export function readRepoCommit(repoRoot: string): string | null {
-  let cur = repoRoot;
-  let gitDir: string | null = null;
-  for (let i = 0; i < 10; i++) {
-    const candidate = resolve(cur, ".git");
-    if (existsSync(candidate)) {
-      gitDir = candidate;
-      break;
-    }
-    const parent = resolve(cur, "..");
-    if (parent === cur) break;
-    cur = parent;
-  }
-  if (gitDir === null) return null;
-  const headPath = resolve(gitDir, "HEAD");
-  if (!existsSync(headPath)) return null;
-  try {
-    const head = readFileSync(headPath, "utf8").trim();
-    if (head.startsWith("ref:")) {
-      const ref = head.slice(5).trim();
-      return readRefFileFromGitDir(gitDir, ref);
-    }
-    // Detached HEAD — already a SHA.
-    return head;
-  } catch {
-    return null;
-  }
+export function readRepoCommitLocal(repoRoot: string): string | null {
+  return readRepoCommit(repoRoot);
 }
 
 /**
@@ -223,74 +143,39 @@ export function substrateBindingFromFiles(
   // live files; the override is rejected by the worker
   // for those profiles.
   if (override !== undefined) return override;
-  let lh03_frozen_commit: string | null = null;
-  let lh04_frozen_commit: string | null = null;
-  let lh05_corpus_commit: string | null = null;
-  for (const [k, rel] of Object.entries(LH06_FROZEN_SUBSTRATE_FILES)) {
-    const abs = resolve(repoRoot, rel);
-    if (!existsSync(abs)) continue;
-    try {
-      const raw = readJson(abs) as Record<string, unknown>;
-      if (k === "lh03_frozen") {
-        lh03_frozen_commit = extractSubjectCommit(raw);
-      } else if (k === "lh04_frozen") {
-        lh04_frozen_commit = extractSubjectCommit(raw);
-      } else if (k === "lh05_corpus") {
-        lh05_corpus_commit = extractSubjectCommit(raw);
-      }
-    } catch {
-      // ignore
-    }
+  // L06-CORRECTION11 L06-C43: delegate to the closed-world
+  // authority resolver. The previous implementation tried
+  // to read phase_e_head and lh02_head from the capability-
+  // matrix artifact, which is a source-authority error
+  // (those fields are not present in that record).
+  const resolved = resolveSoakSubstrateBinding({ repoRoot });
+  if (!resolved.ok) {
+    // Typed failure. Return a binding with null entries
+    // for the offending fields and the rest as resolved.
+    // The verifier + completeness check will surface the
+    // missing identity. We deliberately do NOT throw here
+    // so that crash-side artefact synthesis can still
+    // produce a terminal result.
+    return {
+      phase_e_head: null,
+      lh02_head: null,
+      lh03_frozen_commit: null,
+      lh04_frozen_commit: null,
+      lh05_corpus_commit: null,
+      repo_commit: null,
+    };
   }
-  let phase_e_head: string | null = null;
-  let lh02_head: string | null = null;
-  const matrixPath = resolve(
-    repoRoot,
-    "qualification/capability-matrix.json",
-  );
-  if (existsSync(matrixPath)) {
-    try {
-      const matrix = readJson(matrixPath) as Record<string, unknown>;
-      const sub = matrix["subject"];
-      if (sub !== undefined && typeof sub === "object" && sub !== null) {
-        const c = (sub as Record<string, unknown>)["commit"];
-        if (typeof c === "string") phase_e_head = c;
-      }
-      const lh02 = matrix["lh02_head"];
-      if (typeof lh02 === "string") lh02_head = lh02;
-    } catch {
-      // ignore
-    }
-  }
-  return {
-    phase_e_head,
-    lh02_head,
-    lh03_frozen_commit,
-    lh04_frozen_commit,
-    lh05_corpus_commit,
-    repo_commit: readRepoCommit(repoRoot),
-  };
+  return resolved.binding;
 }
 
 /**
- * L06-CORRECTION03 L06-C21: closed-world substrate
- * completeness check. PASS_DETERMINISTIC_SOAK requires
- * ALL six substrate identities to be present. The
- * supervisor re-validates this before promoting the
- * worker artifact (L06-C20).
+ * L06-CORRECTION11 L06-C43: `isSubstrateComplete` is
+ * re-exported from `substrate-authority.ts` (see top of
+ * file). The closed-world check requires all six
+ * substrate identities to be present. The supervisor
+ * re-validates this before promoting the worker artifact
+ * (L06-C20).
  */
-export function isSubstrateComplete(
-  b: LH06SubstrateBinding,
-): boolean {
-  return (
-    b.phase_e_head !== null &&
-    b.lh02_head !== null &&
-    b.lh03_frozen_commit !== null &&
-    b.lh04_frozen_commit !== null &&
-    b.lh05_corpus_commit !== null &&
-    b.repo_commit !== null
-  );
-}
 
 /**
  * Trigger V8's `gc()` if available. The worker is spawned

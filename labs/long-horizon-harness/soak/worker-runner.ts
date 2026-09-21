@@ -32,6 +32,7 @@ import {
   DurableTelemetryStore,
   type DurableTelemetryClose,
 } from "./telemetry-store.js";
+import { acquireRun, releaseRun } from "./run-resource-owner.js";
 import { resolve as pathResolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,55 +50,21 @@ export interface LH06RunLoopArgs {
  * Required:
  *   EVERY_STARTED_SOAK_HAS_TERMINAL_RESULT = TRUE
  *
- * L06-CORRECTION02 C02-04: the production resource balance
- * includes `active_soak_runs`. We acquire / release the
- * counter honestly here (not just in the env entrypoint) so
- * the wiring is correct regardless of how the worker is
- * invoked — direct call, test harness, supervisor, or
- * run-soak.sh.
- *
- * Idempotent: `beginRun` throws on duplicate runId, so we
- * skip the call if the counter is already non-zero for this
- * runId (e.g. when called via `runSoakFromEnv`, which has
- * already acquired the counter).
+ * L06-CORRECTION11 L06-C42: this function is the SOLE
+ * acquire / release owner of the production run counter.
+ * `runSoakFromEnv()` MUST NOT independently begin or end the
+ * run. The ledger rejects an actual duplicate release
+ * (DOUBLE_RELEASE_IS_A_BUG); the previous idempotent
+ * wrappers silently swallowed it and masked the ownership
+ * defect exposed by QUALIFICATION01.
  */
-function ensureRunAcquired(state: SoakWorkerState): void {
-  // Inspect the ledger's in-flight set to determine whether
-  // the run counter is already acquired. We do NOT call
-  // `snapshot()` because the active_soak_runs counter is
-  // also at 1 even after `endRun` was called by a prior
-  // failed run (the worker may have been respawned with a
-  // fresh state); what we actually need to check is the
-  // inFlightRuns set membership for THIS runId.
-  const inFlight = (state.ledger as unknown as {
-    inFlightRuns?: Set<string>;
-  }).inFlightRuns;
-  if (inFlight !== undefined && inFlight.has(state.runId)) return;
-  state.ledger.beginRun(state.runId);
-}
-
-/**
- * Idempotent endRun: only releases the counter if the
- * ledger currently holds it. Without this guard the
- * `finally` block would throw `endRun: unknown runId`
- * when `runSoakWorker` is called via `runSoakFromEnv`
- * (which already released the counter).
- */
-function releaseRunIfHeld(state: SoakWorkerState): void {
-  const inFlight = (state.ledger as unknown as {
-    inFlightRuns?: Set<string>;
-  }).inFlightRuns;
-  if (inFlight === undefined || !inFlight.has(state.runId)) return;
-  state.ledger.endRun(state.runId);
-}
-
 export async function runSoakWorker(
   args: LH06RunLoopArgs,
 ): Promise<LH06Result> {
-  // Acquire the production run counter so the balance is
-  // honest on every exit path. Idempotent with respect to
-  // the env entrypoint.
-  ensureRunAcquired(args.state);
+  // Sole owner. Acquire the production run counter; throw
+  // if it is already held (duplicate entry is a contract
+  // violation — the caller must construct fresh state).
+  acquireRun(args.state);
   // L06-CORRECTION03 L06-C17 + L06-CORRECTION04 L06-C23:
   // open the durable telemetry store at run start so
   // EVERY exit path produces a closed telemetry file.
@@ -255,9 +222,13 @@ export async function runSoakWorker(
     // temp directory; the closed file's path must
     // remain readable so the supervisor's
     // re-verification (L06-C20) can find it.
-    // Release the production run counter on EVERY exit
-    // path so the balance is zero at process exit.
-    releaseRunIfHeld(args.state);
+    //
+    // L06-CORRECTION11 L06-C42: this is the SOLE release
+    // path. The ledger throws on a duplicate release; we
+    // do NOT catch that throw because swallowing a real
+    // ownership defect is exactly the failure that
+    // QUALIFICATION01 exposed.
+    releaseRun(args.state);
     void capturedClose;
     void capturedErr;
   }
@@ -265,6 +236,14 @@ export async function runSoakWorker(
 
 /**
  * Convenience entrypoint.
+ *
+ * L06-CORRECTION11 L06-C42: this function MUST NOT
+ * independently `beginRun` / `endRun`. Acquiring / releasing
+ * the production run counter is `runSoakWorker`'s sole
+ * responsibility; the previous CORRECTION02 ownership
+ * overlap is the path that produced the
+ * `ResourceLedger.endRun: unknown runId 7aab74ed17082938`
+ * crash on the production qualification.
  */
 export async function runSoakFromEnv(args: {
   readonly result_path: string;
@@ -274,13 +253,6 @@ export async function runSoakFromEnv(args: {
   const injection = parseInjection(injectionRaw);
   const repoRoot = defaultRepoRoot();
   const state = createWorkerState({ profile, injection, repoRoot });
-  // L06-CORRECTION02 C02-04: the production resource
-  // balance INCLUDES `active_soak_runs` — the worker must
-  // honestly acquire / release it. This is the wiring that
-  // was missing in CORRECTION01: the summary claimed the
-  // counter was exercised by the run loop, but
-  // `beginRun()` / `endRun()` were never called.
-  state.ledger.beginRun(state.runId);
   // LH06_MAX_EPOCHS caps the loop when supplied (used by the
   // supervisor or the CI smoke script). Without it the worker
   // runs until the qualification contract is met.
@@ -300,13 +272,9 @@ export async function runSoakFromEnv(args: {
   if (maxEpochs !== undefined) {
     (runArgs as { max_epochs?: number }).max_epochs = maxEpochs;
   }
-  try {
-    return await runSoakWorker(runArgs);
-  } finally {
-    // Release the run counter on every exit path so the
-    // production balance is zero at process exit.
-    state.ledger.endRun(state.runId);
-  }
+  // Sole owner of the run-lifecycle is `runSoakWorker`.
+  // We delegate and return its result verbatim.
+  return await runSoakWorker(runArgs);
 }
 
 export const LH06_CORPUS_COUNTS = Object.freeze({

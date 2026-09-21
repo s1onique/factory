@@ -128,6 +128,22 @@ export {
   maybeGc,
 } from "./substrate-binding.js";
 
+export {
+  resolveSoakSubstrateBinding,
+  type SubstrateField,
+  type SubstrateAuthorityFailure,
+  type SubstrateAuthoritySuccess,
+  type SubstrateAuthorityResult,
+  type LH06SubstrateBindingProvenance,
+  type LH06SubstrateBindingWithProvenance,
+} from "./substrate-authority.js";
+
+export {
+  acquireRun,
+  releaseRun,
+  isRunHeldByLedger,
+} from "./run-resource-owner.js";
+
 export { runEpoch, restoreLeak06, prepareLeak06 } from "./epoch.js";
 export {
   qualificationMet,
