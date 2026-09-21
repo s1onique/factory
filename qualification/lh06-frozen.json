@@ -1,0 +1,100 @@
+{
+  "schema": "lh06.freeze-record/v1",
+  "state": "GREEN_FROZEN",
+  "subject_commit": "5d4c9d258446cba1b018ab689433bafe162feefb",
+  "qualification": {
+    "run_id": "9abce4954edbdb34",
+    "supervisor_run_id": "f7f4b208772caa8b",
+    "result_path": "labs/long-horizon-harness/qualification/lh06-qualification02/result.json",
+    "result_sha256": "b55ba6179ef1533b85499c083142604d869549e4fd9b0300b730854a62f6464b",
+    "witness_path": "labs/long-horizon-harness/qualification/lh06-qualification02/result.commit.json",
+    "witness_sha256": "0c5f365112e01b92807e016b3250e2b46378007d3318fb2e44bf9c395e6d52fe",
+    "telemetry_path": "labs/long-horizon-harness/qualification/lh06-qualification02/telemetry.jsonl",
+    "telemetry_sha256": "fb17967cd3c9375a938937db50447c4a8c2002ed3f5374cfaea8245fbc1538dd",
+    "telemetry_line_count": 31531,
+    "telemetry_bytes": 4357011
+  },
+  "contract": {
+    "version": "lh06.soak.contract.v1",
+    "profile": "QUALIFICATION",
+    "minimum_wall_clock_ms": 3600000,
+    "minimum_epochs": 500
+  },
+  "observed": {
+    "duration_ms": 3600018,
+    "epochs_completed": 31531,
+    "cases_completed": 977461,
+    "started_at": "2026-09-21T21:08:15.454Z",
+    "finished_at": "2026-09-21T22:08:15.472Z"
+  },
+  "substrate": {
+    "phase_e_head": "61b0979ebba52e391e1408561fb2c20a79d28af7",
+    "lh02_head": "715e6390d78228f089270259e1bd1307140adb75",
+    "lh03_frozen_commit": "7be31164b939f327c557847eb9a8b0c4ffd16b87",
+    "lh04_frozen_commit": "a8caa82655ca6036bc40a43be5000bdda5bb84bf",
+    "lh05_corpus_commit": "c898f05ccb1966c5074f6483bad106b3d093b169",
+    "repo_commit": "5d4c9d258446cba1b018ab689433bafe162feefb",
+    "substrate_complete": true
+  },
+  "semantic": {
+    "drift_count": 0,
+    "fault_escape_count": 0,
+    "lifecycle_drift_count": 0,
+    "predecessor_dependency_count": 0,
+    "cases_with_multiple_semantic_results": 0,
+    "lifecycle_drift_by_scenario": {},
+    "canary_before_equals_canary_after": true
+  },
+  "resources": {
+    "resource_balance_failures": 0,
+    "workspace_leaks": 0,
+    "post_gc_heap_first_window": 11285708,
+    "post_gc_heap_last_window": 12019932,
+    "post_gc_heap_delta": 734224,
+    "heap_slope_bytes_per_epoch": 84.62998046523425,
+    "heap_verdict_pass": true,
+    "heap_verdict_reason": "STABLE"
+  },
+  "latency": {
+    "first_window_median_ms": 117,
+    "last_window_median_ms": 89,
+    "drift_ratio": 0.7606837606837606,
+    "verdict": "STABLE",
+    "verdict_pass": true
+  },
+  "frozen_tree": {
+    "before_sha256": "9178678c523207db6ad3db683bec3c5611d818e4887831f5dc123fe2daf4c51c",
+    "after_sha256": "9178678c523207db6ad3db683bec3c5611d818e4887831f5dc123fe2daf4c51c",
+    "changed": false,
+    "status_ok": true,
+    "status_kind": "VALID"
+  },
+  "repeatability": {
+    "semantic_repeatability": true
+  },
+  "publication_durability": "CRASH_DURABLE",
+  "rss_observation": {
+    "rss_first_window": 118185984,
+    "rss_last_window": 197279744,
+    "rss_delta": 79093760,
+    "rss_slope": 3656.569706890133,
+    "rss_growth_observed": true,
+    "rss_is_lh06_v1_pass_fail_authority": false,
+    "rss_follow_up": "DEFERRED"
+  },
+  "evidence_packet": {
+    "root": "labs/long-horizon-harness/qualification/lh06-qualification02/",
+    "manifest": "labs/long-horizon-harness/qualification/lh06-qualification02/MANIFEST.json",
+    "sha256sums": "labs/long-horizon-harness/qualification/lh06-qualification02/SHA256SUMS",
+    "readme": "labs/long-horizon-harness/qualification/lh06-qualification02/README.md"
+  },
+  "prior_red_qualification_preserved": true,
+  "red_evidence_packet": {
+    "in_lab_copy": "labs/long-horizon-harness/qualification/lh06-red-2026-09-21/",
+    "factory_root_copy": "qualification/lh06-red-qualification01/",
+    "worker_verdict": "FAIL_SEMANTIC_DRIFT",
+    "supervisor_verdict": "FAIL_WORKER"
+  },
+  "ready_for_lh07": true,
+  "frozen_at": "2026-09-22T00:00:00Z"
+}

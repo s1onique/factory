@@ -1,0 +1,11 @@
+{
+  "schema": "lh06.commit-witness/v1",
+  "result_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-deterministic-soak.json",
+  "result_sha256": "b55ba6179ef1533b85499c083142604d869549e4fd9b0300b730854a62f6464b",
+  "supervisor_run_id": "f7f4b208772caa8b",
+  "run_id": "9abce4954edbdb34",
+  "profile": "QUALIFICATION",
+  "verdict": "PASS_DETERMINISTIC_SOAK",
+  "durability": "CRASH_DURABLE",
+  "captured_at_ms": 1790028495531
+}

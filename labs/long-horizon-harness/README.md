@@ -1445,3 +1445,86 @@ READY_FOR_LH_03_REAL_HARNESS_ADAPTER_QUALIFICATION = YES
 
 - `src/metrics/` — full LH-02 implementation
 - `test/metrics/` — adversarial corpus `metric-*.test.ts`
+
+---
+
+## LH-06 — Deterministic Soak / Qualification
+
+> Phase F continues with the deterministic 60-minute soak
+> qualification and its frozen evidence record.
+
+### LH-06 board
+
+```text
+LH-06  deterministic soak / qualification
+       🟢 GREEN_FROZEN
+       QUALIFICATION02 PASS
+       60m / 31,531 epochs / 977,461 cases
+       semantic drift = 0
+       lifecycle drift = 0
+       resource balance failures = 0
+       workspace leaks = 0
+       heap = STABLE
+       latency = STABLE
+       frozen mutation = false
+       durable result+witness+telemetry bound
+
+QUALIFICATION01 = RED / preserved
+  (worker FAIL_SEMANTIC_DRIFT / LIFECYCLE_DRIFT
+   supervisor FAIL_WORKER / verifier_rejected:INCOMPLETE_SUBSTRATE
+   run_id 7aab74ed17082938 / supervisor 423d4674a3883634)
+
+QUALIFIED_SUBJECT  = 5d4c9d258446cba1b018ab689433bafe162feefb
+QUALIFICATION_RUN  = 9abce4954edbdb34
+SUPERVISOR_RUN     = f7f4b208772caa8b
+RESULT_SHA         = b55ba6179ef1533b85499c083142604d869549e4fd9b0300b730854a62f6464b
+TELEMETRY_SHA      = fb17967cd3c9375a938937db50447c4a8c2002ed3f5374cfaea8245fbc1538dd
+TELEMETRY_LINES    = 31531
+READY_FOR_LH_07    = YES
+```
+
+### LH-06 frozen evidence
+
+| artifact | path | role |
+| --- | --- | --- |
+| freeze record | `qualification/lh06-frozen.json` | canonical closure-of-record (Factory-root) |
+| evidence packet | `labs/long-horizon-harness/qualification/lh06-qualification02/` | byte-faithful preservation of `result.json`, `result.commit.json`, `telemetry.jsonl`, `qualification.log`, `MANIFEST.json`, `README.md`, `SHA256SUMS` |
+| frozen verifier | `scripts/verify_lh06_frozen.sh` | single deterministic freeze guard |
+| adversarial corpus | `tests/lh06-frozen/test_lh06_frozen.sh` | 1 control + 15 mutation oracles |
+| QUALIFICATION01 RED | `qualification/lh06-red-qualification01/`, `labs/long-horizon-harness/qualification/lh06-red-2026-09-21/` | preserved negative history |
+| freeze report | `docs/LH-06-FREEZE.md` | durable human-readable closure narrative |
+
+### LH-06 authoritative exit invariants
+
+```text
+QUALIFICATION_PASS_WITH_DURATION_LT_60M                = IMPOSSIBLE
+QUALIFICATION_PASS_WITH_EPOCHS_LT_500                 = IMPOSSIBLE
+PASS_WITH_SEMANTIC_DRIFT                              = IMPOSSIBLE
+PASS_WITH_LIFECYCLE_DRIFT                             = IMPOSSIBLE
+PASS_WITH_FAULT_ESCAPE                                = IMPOSSIBLE
+PASS_WITH_PREDECESSOR_DEPENDENCY                      = IMPOSSIBLE
+PASS_WITH_MULTIPLE_SEMANTICS_PER_CASE                 = IMPOSSIBLE
+PASS_WITH_RESOURCE_IMBALANCE                          = IMPOSSIBLE
+PASS_WITH_WORKSPACE_LEAK                              = IMPOSSIBLE
+PASS_WITH_UNSTABLE_HEAP                               = IMPOSSIBLE
+PASS_WITH_UNSTABLE_LATENCY                            = IMPOSSIBLE
+PASS_WITH_FROZEN_TREE_MUTATION                        = IMPOSSIBLE
+PASS_WITH_INCOMPLETE_SUBSTRATE                        = IMPOSSIBLE
+PASS_WITH_RESULT_HASH_DRIFT                           = IMPOSSIBLE
+PASS_WITH_TELEMETRY_HASH_DRIFT                        = IMPOSSIBLE
+PASS_WITH_TELEMETRY_COUNT_DRIFT                       = IMPOSSIBLE
+PASS_WITH_ATOMIC_ONLY_PUBLICATION                     = IMPOSSIBLE
+PASS_WITHOUT_COMMIT_WITNESS                           = IMPOSSIBLE
+GREEN_FREEZE_WITHOUT_PRESERVED_RED_HISTORY            = IMPOSSIBLE
+```
+
+### LH-06 next step
+
+```text
+NEXT = DEFINE_LH07_ACT_FROM_REMAINING_BOARD_WORK
+```
+
+The ACT does not invent LH-07's mission. The next action is
+to inspect the remaining Long-Horizon epic board and define
+the next unresolved LH item rather than continuing to harden
+an already-qualified soak laboratory.

@@ -15,6 +15,8 @@
 #                                             (fault lab @ d50f6d8)
 #   5. scripts/verify_lh05_frozen.sh       — LH-05 frozen-contract guard
 #                                             (adversarial lifecycle corpus)
+#   6. scripts/verify_lh06_frozen.sh       — LH-06 frozen-contract guard
+#                                             (deterministic-soak QUALIFICATION02)
 
 set -euo pipefail
 
@@ -27,7 +29,7 @@ errors=0
 echo "=== Factory authoritative verification gate ==="
 echo ""
 
-echo "--- 1/5 FACTORY_GIT_WORKTREE_POLICY ---"
+echo "--- 1/6 FACTORY_GIT_WORKTREE_POLICY ---"
 if bash scripts/verify_worktree_policy.sh; then
     echo "  [OK]  worktree topology is canonical"
 else
@@ -36,7 +38,7 @@ else
 fi
 echo ""
 
-echo "--- 2/5 documentation link sanity ---"
+echo "--- 2/6 documentation link sanity ---"
 if bash scripts/check_links.sh; then
     echo "  [OK]  documentation links resolve"
 else
@@ -45,7 +47,7 @@ else
 fi
 echo ""
 
-echo "--- 3/5 LH-03 frozen-contract guard ---"
+echo "--- 3/6 LH-03 frozen-contract guard ---"
 if bash scripts/verify_lh03_frozen.sh; then
     echo "  [OK]  LH-03 frozen-contract guard (Phase E + LH-02 unchanged)"
 else
@@ -54,7 +56,7 @@ else
 fi
 echo ""
 
-echo "--- 4/5 LH-04 frozen-contract guard ---"
+echo "--- 4/6 LH-04 frozen-contract guard ---"
 if bash scripts/verify_lh04_frozen.sh; then
     echo "  [OK]  LH-04 frozen-contract guard (fault laboratory unchanged)"
 else
@@ -63,11 +65,20 @@ else
 fi
 echo ""
 
-echo "--- 5/5 LH-05 frozen-contract guard ---"
+echo "--- 5/6 LH-05 frozen-contract guard ---"
 if bash scripts/verify_lh05_frozen.sh; then
     echo "  [OK]  LH-05 frozen-contract guard (adversarial lifecycle corpus intact)"
 else
     echo "  [FAIL]  LH-05 frozen-contract guard detected a change"
+    errors=$((errors + 1))
+fi
+echo ""
+
+echo "--- 6/6 LH-06 frozen-contract guard ---"
+if bash scripts/verify_lh06_frozen.sh; then
+    echo "  [OK]  LH-06 frozen-contract guard (deterministic-soak QUALIFICATION02 frozen)"
+else
+    echo "  [FAIL]  LH-06 frozen-contract guard detected an issue"
     errors=$((errors + 1))
 fi
 echo ""

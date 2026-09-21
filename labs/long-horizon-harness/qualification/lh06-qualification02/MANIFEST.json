@@ -1,0 +1,42 @@
+{
+  "schema": "lh06.qualification.evidence-manifest/v1",
+  "subject_commit": "5d4c9d258446cba1b018ab689433bafe162feefb",
+  "run_id": "9abce4954edbdb34",
+  "supervisor_run_id": "f7f4b208772caa8b",
+  "profile": "QUALIFICATION",
+  "verdict": "PASS_DETERMINISTIC_SOAK",
+  "observed": {
+    "duration_ms": 3600018,
+    "epochs_completed": 31531,
+    "cases_completed": 977461,
+    "started_at": "2026-09-21T21:08:15.454Z",
+    "finished_at": "2026-09-21T22:08:15.472Z"
+  },
+  "artifacts": {
+    "result": {
+      "path": "qualification/lh06-qualification02/result.json",
+      "original_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-deterministic-soak.json",
+      "sha256": "b55ba6179ef1533b85499c083142604d869549e4fd9b0300b730854a62f6464b"
+    },
+    "commit_witness": {
+      "path": "qualification/lh06-qualification02/result.commit.json",
+      "original_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-deterministic-soak.json.commit.json",
+      "sha256": "0c5f365112e01b92807e016b3250e2b46378007d3318fb2e44bf9c395e6d52fe"
+    },
+    "telemetry": {
+      "path": "qualification/lh06-qualification02/telemetry.jsonl",
+      "original_path": "/var/folders/0g/mpt_55f524ndzxymkp20wjfc0000gn/T/factory-lh06-supervisor-f7f4b208772caa8b/lh06-9abce4954edbdb34.telemetry.jsonl",
+      "sha256": "fb17967cd3c9375a938937db50447c4a8c2002ed3f5374cfaea8245fbc1538dd",
+      "bytes": 4357011,
+      "lines": 31531
+    },
+    "qualification_log": {
+      "path": "qualification/lh06-qualification02/qualification.log",
+      "original_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-qualification02.log",
+      "sha256": "67cb87ba1267e7afea1b3ed33513e34b782832afd866a2b00c1d8f63ca4a2286"
+    }
+  },
+  "original_runtime_telemetry_path_required_for_freeze": false,
+  "immutable": true,
+  "witness_original_path_note": "result.commit.json was originally issued for /Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory/labs/long-horizon-harness/qualification/lh06-deterministic-soak.json. The witness bytes are preserved verbatim; the freeze manifest records both the original path and the preserved archive path. The witness SHA relationship proves byte-identity between the archive result.json and the result path that was originally witnessed."
+}
