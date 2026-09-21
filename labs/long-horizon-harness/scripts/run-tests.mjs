@@ -152,6 +152,15 @@ const args = [
   "--import", "tsx",
   "--test",
   "--test-reporter=spec",
+  // L06-CORRECTION03 L06-C17/L06-C21: tests that read
+  // the live repo's frozen-tree digest (LEAK01..LEAK06,
+  // worker-epoch, supervisor-subprocess) MUST NOT race
+  // with the supervisor child that writes telemetry to
+  // `qualification/`. A concurrent supervisor worker
+  // changes the digest mid-run and the LEAK tests flag
+  // a spurious FROZEN_MUTATION. Pin concurrency to 1 so
+  // file-level test ordering is deterministic.
+  "--test-concurrency=1",
   ...files,
 ];
 trace({
