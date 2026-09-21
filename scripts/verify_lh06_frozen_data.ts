@@ -253,6 +253,3 @@ switch (kind) {
     console.error("unknown kind: " + kind);
     process.exit(1);
 }
-
-
-
