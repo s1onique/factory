@@ -128,8 +128,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LIB="${HERE}/ml_smoke_01_lib.mjs"
 TOOL="${HERE}/ml_smoke_01_tool.mjs"
 REPORTER="${HERE}/ml_smoke_01_test_reporter.mjs"
+FAILCLOSED="${HERE}/ml_failclosed.mjs"
 
-if [ ! -f "${LIB}" ] || [ ! -f "${REPORTER}" ] || [ ! -f "${TOOL}" ]; then
+if [ ! -f "${LIB}" ] || [ ! -f "${REPORTER}" ] || [ ! -f "${TOOL}" ] || [ ! -f "${FAILCLOSED}" ]; then
     echo "ML_SMOKE_01_ERROR=oracle_components_missing" >&2
     echo "ML_SMOKE_01_DISPOSITION=HALT"
     exit 2
@@ -202,8 +203,13 @@ echo "ML_SMOKE_01_REFERENCE_KIND=PREPARED_DIR"
 # a reference: it is a HALT.
 # ---------------------------------------------------------------------------
 
-reference_digest="$("${NODE_BIN}" "${TOOL}" digest "${prepared_dir}" 2>/dev/null | head -1)"
-if [ -z "${reference_digest}" ]; then
+"${NODE_BIN}" "${TOOL}" digest "${prepared_dir}" > "${work_dir}/reference.digest" 2>"${work_dir}/reference.digest.err"
+reference_digest_status=$?
+reference_digest="$(head -1 "${work_dir}/reference.digest" 2>/dev/null)"
+if [ "${reference_digest_status}" -ne 0 ] || [ -z "${reference_digest}" ]; then
+    # The digest computation FAILED. An empty digest must never reach the
+    # comparison below: the empty string is not a valid digest, and a
+    # comparison against it would be a comparison against nothing.
     echo "ML_SMOKE_01_REFERENCE_IDENTITY=INVALID"
     echo "ML_SMOKE_01_ERROR=reference_digest_uncomputable" >&2
     echo "ML_SMOKE_01_DISPOSITION=HALT"
@@ -244,16 +250,39 @@ echo "ML_SMOKE_01_REFERENCE_IDENTITY=VALID"
 # changes are recorded as scope violations rather than silently skipped.
 # ---------------------------------------------------------------------------
 
-scope_report="$("${NODE_BIN}" "${TOOL}" scope "${prepared_dir}" "${workspace}" "${ALLOWED_PATHS}" 2>/dev/null)"
-scope_error="$("${NODE_BIN}" "${TOOL}" scope-error "${scope_report}" 2>/dev/null)"
-if [ -n "${scope_error}" ]; then
-    echo "ML_SMOKE_01_SCOPE_ERROR=${scope_error}"
-    # A self-comparison or an overlapping root is not a scope verdict at
-    # all: it is an unusable comparison. It HALTs; it never PASSes.
+# FAIL-CLOSED SCOPE INSPECTION.
+#
+# The scope-tool invocation MUST succeed, MUST produce a VALID STRUCTURED
+# response, and MUST report a VALID NONNEGATIVE violation count. A missing,
+# malformed or failed inspection result HALTs.
+#
+# The reproduced defect: the scope-tool invocation was UNCHECKED, and the
+# violation count was then used in a NUMERIC shell comparison. Bash treats
+# an invalid integer comparison as a failed CONDITION, so an EMPTY scope
+# result could reach the execution path.
+"${NODE_BIN}" "${FAILCLOSED}" scope "${TOOL}" "${prepared_dir}" "${workspace}" "${ALLOWED_PATHS}" \
+    > "${work_dir}/scope.fc" 2>"${work_dir}/scope.fc.err"
+scope_fc_status=$?
+scope_fc_state="$(grep -a '^FC_STATUS=' "${work_dir}/scope.fc" 2>/dev/null | tail -1 | cut -d= -f2-)"
+scope_fc_error="$(grep -a '^FC_ERROR=' "${work_dir}/scope.fc" 2>/dev/null | tail -1 | cut -d= -f2-)"
+scope_error="$(grep -a '^FC_ERROR_CODE=' "${work_dir}/scope.fc" 2>/dev/null | tail -1 | cut -d= -f2-)"
+if [ "${scope_fc_status}" -ne 0 ] || [ "${scope_fc_state}" != "OK" ]; then
+    # The inspection itself FAILED. This is an EVALUATOR-side failure:
+    # it is a HALT, never a candidate verdict.
+    echo "ML_SMOKE_01_SCOPE_ERROR=${scope_error:-scope_inspection_failed}"
+    echo "ML_SMOKE_01_SCOPE_INSPECTION=${scope_fc_state:-FAILED}"
+    echo "ML_SMOKE_01_SCOPE_INSPECTION_ERROR=${scope_fc_error:-unknown}"
     echo "ML_SMOKE_01_DISPOSITION=HALT"
     exit 2
 fi
-scope_violations="$(printf '%s' "${scope_report}" | "${NODE_BIN}" "${TOOL}" scope-violations 2>/dev/null)"
+scope_violations="$(grep -a '^FC_VIOLATIONS=' "${work_dir}/scope.fc" | tail -1 | cut -d= -f2-)"
+scope_report="$(grep -a '^FC_OUTPUT=' "${work_dir}/scope.fc" | tail -1 | cut -d= -f2-)"
+if ! printf '%s' "${scope_violations}" | grep -aqE '^[0-9]+$'; then
+    # The violation count is not a valid nonnegative integer.
+    echo "ML_SMOKE_01_SCOPE_ERROR=scope_violation_count_invalid"
+    echo "ML_SMOKE_01_DISPOSITION=HALT"
+    exit 2
+fi
 printf '%s' "${scope_report}" | "${NODE_BIN}" "${TOOL}" scope-lines 2>/dev/null
 
 # ---------------------------------------------------------------------------
@@ -313,17 +342,22 @@ echo "ML_SMOKE_01_SCOPE_VIOLATIONS=${scope_violations}"
 # the original test assertions intact.
 # ---------------------------------------------------------------------------
 
-allowed_region="$("${NODE_BIN}" "${TOOL}" validate-allowed "${prepared_dir}/${REQUIRED_TEST_FILE}" "${workspace}/${REQUIRED_TEST_FILE}" 2>/dev/null)"
-if [ -z "${allowed_region}" ]; then
+allowed_region="$("${NODE_BIN}" "${FAILCLOSED}" json "${TOOL}" validate-allowed \
+    "${prepared_dir}/${REQUIRED_TEST_FILE}" "${workspace}/${REQUIRED_TEST_FILE}" 2>/dev/null)"
+allowed_region_status=$?
+if [ "${allowed_region_status}" -ne 0 ]; then
+    # The allowed-region INSPECTION failed. This is an evaluator-side
+    # failure: it is a HALT, never a candidate verdict.
     echo "ML_SMOKE_01_ALLOWED_REGION=INVALID"
     echo "ML_SMOKE_01_ERROR=allowed_region_unreadable" >&2
     echo "ML_SMOKE_01_DISPOSITION=HALT"
     exit 2
 fi
-echo "ML_SMOKE_01_ALLOWED_REGION=$("${NODE_BIN}" "${TOOL}" field "${allowed_region}" ok)"
+allowed_region_payload="$(printf '%s' "${allowed_region}" | grep -a '^FC_OUTPUT=' | tail -1 | cut -d= -f2-)"
+echo "ML_SMOKE_01_ALLOWED_REGION=$("${NODE_BIN}" "${TOOL}" field "${allowed_region_payload}" ok)"
 allowed_region_violation=0
-if ! "${NODE_BIN}" "${TOOL}" has "${allowed_region}" ok; then
-    echo "ML_SMOKE_01_ALLOWED_REGION_REASON=$("${NODE_BIN}" "${TOOL}" field "${allowed_region}" reason)"
+if ! "${NODE_BIN}" "${TOOL}" has "${allowed_region_payload}" ok; then
+    echo "ML_SMOKE_01_ALLOWED_REGION_REASON=$("${NODE_BIN}" "${TOOL}" field "${allowed_region_payload}" reason)"
     echo "SCOPE_VIOLATION CONTENT_OUTSIDE_ALLOWED_REGION ${REQUIRED_TEST_FILE}"
     allowed_region_violation=1
 fi
@@ -363,11 +397,48 @@ fi
 
 echo "ML_SMOKE_01_SCOPE_VIOLATIONS=${scope_violations}"
 echo "ML_SMOKE_01_ALLOWED_REGION_VIOLATION=${allowed_region_violation}"
-if [ "${scope_violations}" -ne 0 ]; then
-    echo "ML_SMOKE_01_GATE_EXECUTED=NO"
-    echo "ML_SMOKE_01_ERROR=unauthorized_patch_rejected_before_execution" >&2
-    echo "ML_SMOKE_01_DISPOSITION=FAIL"
-    exit 1
+
+# ---------------------------------------------------------------------------
+# THE AUTHORITATIVE PATH.
+#
+# An unauthorised patch is REJECTED BEFORE IT IS EXECUTED — and this now
+# includes an IN-FILE change that violates the permitted content region.
+#
+# The previous revision excluded the allowed file from the pre-execution
+# rejection, because the evaluator deliberately RUNS that file and the
+# allowed-region rule is a CONTENT check on it rather than a statement that
+# its bytes are untrusted. That exemption let a candidate whose bytes
+# violate the permitted region reach the evaluator's process.
+#
+# The invariant is now UNIFORM: the authoritative path executes NOTHING of
+# the candidate's until BOTH the out-of-file scope verdict AND the in-file
+# allowed-region verdict are clean.
+#
+# The BEHAVIOURAL probes (which need the allowed file's own diagnostics to
+# be observable) are a SEPARATE, explicitly NON-AUTHORITATIVE mode. They
+# never mint a verdict: their disposition is `BEHAVIORAL`, and their exit
+# code is 3.
+#
+# The rejection is a FAIL (the candidate is unauthorised), never a HALT: the
+# oracle's own authorities — base identity, reference identity, scope
+# comparison, allowed-region validation — were all established.
+# ---------------------------------------------------------------------------
+
+BEHAVIORAL=0
+if [ "${6:-}" = "--behavioral-probe" ]; then
+    BEHAVIORAL=1
+fi
+
+if [ "${BEHAVIORAL}" -eq 0 ]; then
+    if [ "${scope_violations}" -ne 0 ] || [ "${allowed_region_violation}" -ne 0 ]; then
+        echo "ML_SMOKE_01_GATE_EXECUTED=NO"
+        echo "ML_SMOKE_01_ERROR=unauthorized_patch_rejected_before_execution" >&2
+        echo "ML_SMOKE_01_DISPOSITION=FAIL"
+        exit 1
+    fi
+else
+    echo "ML_SMOKE_01_MODE=BEHAVIORAL_PROBE"
+    echo "ML_SMOKE_01_AUTHORITY=NONE"
 fi
 
 # ---------------------------------------------------------------------------
@@ -563,6 +634,14 @@ if [ "${acceptance}" != "PASS" ]; then
 fi
 if [ "${mutation_detected}" != "YES" ]; then
     disposition="FAIL"
+fi
+
+if [ "${BEHAVIORAL}" -eq 1 ]; then
+    # The behavioural mode NEVER mints a verdict. Its observations are
+    # evidence about the fixture, not an acceptance authority.
+    echo "ML_SMOKE_01_DISPOSITION=BEHAVIORAL"
+    echo "ML_SMOKE_01_AUTHORITY=NONE"
+    exit 3
 fi
 
 echo "ML_SMOKE_01_DISPOSITION=${disposition}"

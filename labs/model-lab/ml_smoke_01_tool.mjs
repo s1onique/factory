@@ -31,13 +31,16 @@ import {
 	ML06A_REQUIRED_TESTS,
 	REQUIRED_SOCK_TESTS,
 	REQUIRED_TESTS,
+	TREE_MANIFEST_VERSION,
 	applyKnownBadMutation,
 	classifyEvents,
 	compareTrees,
 	decideAcceptance,
 	decideMutation,
 	digestOfDirectory,
+	digestOfDirectoryVersioned,
 	findRequiredTest,
+	treeManifest,
 	validateAllowedRegion,
 } from "./ml_smoke_01_lib.mjs"
 
@@ -59,6 +62,22 @@ switch (command) {
 	case "digest": {
 		process.stdout.write(await digestOfDirectory(rest[0]))
 		process.stdout.write("\n")
+		break
+	}
+	case "digest-v2": {
+		// The EXPLICITLY VERSIONED tree-manifest digest. It is a
+		// DIFFERENT identity from the historical `v1` digest and is never
+		// compared with one.
+		process.stdout.write(await digestOfDirectoryVersioned(rest[0]))
+		process.stdout.write("\n")
+		break
+	}
+	case "manifest": {
+		process.stdout.write(JSON.stringify(await treeManifest(rest[0])) + "\n")
+		break
+	}
+	case "manifest-version": {
+		process.stdout.write(TREE_MANIFEST_VERSION + "\n")
 		break
 	}
 	case "scope": {
@@ -87,6 +106,26 @@ switch (command) {
 		)
 		break
 	}
+	case "classify-json": {
+		// The STRUCTURED form of `classify`, for the fail-closed
+		// invocation surface. The shell oracles must be able to consume a
+		// JSON object and validate its fields, not a free-text block.
+		const classified = classifyEvents(await readFile(rest[0], "utf8"))
+		const unavailable = classified.fileError || classified.total === 0
+		process.stdout.write(
+			JSON.stringify({
+				counts: classified.counts,
+				fileError: classified.fileError,
+				total: classified.total,
+				expectedTotal: classified.expectedTotal ?? null,
+				unavailable,
+				error: classified.error ?? null,
+				complete: classified.complete,
+				completeReasons: classified.completeReasons ?? [],
+			}) + "\n",
+		)
+		break
+	}
 	case "scope-error": {
 		process.stdout.write(String(JSON.parse(await readJson(rest[0])).error ?? ""))
 		process.stdout.write("\n")
@@ -110,8 +149,18 @@ switch (command) {
 		break
 	}
 	case "field": {
-		// `field <json> <key>` — read one top-level field of a JSON object.
-		process.stdout.write(String(JSON.parse(await readJson(rest[0]))[rest[1]] ?? ""))
+		// `field <json> <key>` — read one field of a JSON object.
+		//
+		// The key may be a DOT-SEPARATED PATH (`counts.passed`), so the
+		// structured classification payload can be consumed without
+		// embedding JavaScript in the shell.
+		const parsed = JSON.parse(await readJson(rest[0]))
+		let current = parsed
+		for (const segment of String(rest[1] ?? "").split(".")) {
+			if (current === null || current === undefined) break
+			current = current[segment]
+		}
+		process.stdout.write(String(current ?? ""))
 		process.stdout.write("\n")
 		break
 	}

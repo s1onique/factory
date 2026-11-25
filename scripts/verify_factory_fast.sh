@@ -84,7 +84,7 @@ else
 fi
 echo ""
 
-echo "--- 6/6 Model Lab decision-logic regression controls ---"
+echo "--- 6/7 Model Lab decision-logic regression controls ---"
 NODE_BIN="${NODE_BIN:-}"
 if [ -z "${NODE_BIN}" ]; then
     for candidate_node in /opt/homebrew/bin/node "$(command -v node 2>/dev/null || true)"; do
@@ -101,6 +101,18 @@ elif "${NODE_BIN}" tests/model_lab/test_ml_smoke_01_lib.mjs; then
     echo "  [OK]  Model Lab decision-logic regression controls (failure-identity discipline)"
 else
     echo "  [FAIL]  Model Lab decision-logic regression controls detected a defect"
+    errors=$((errors + 1))
+fi
+echo ""
+
+echo "--- 7/7 Model Lab RUNNER regression controls (simulated native seam) ---"
+if [ -z "${NODE_BIN}" ]; then
+    echo "  [FAIL] node runtime unavailable — cannot run the runner controls"
+    errors=$((errors + 1))
+elif "${NODE_BIN}" tests/model_lab/test_ml_02_runner.mjs; then
+    echo "  [OK]  Model Lab runner regression controls (single-start authority)"
+else
+    echo "  [FAIL]  Model Lab runner regression controls detected a defect"
     errors=$((errors + 1))
 fi
 echo ""

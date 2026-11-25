@@ -101,6 +101,16 @@ export const KNOWN_BAD_SEAM_STATEMENT =
 export const INTENDED_FAILURE_CODE = "ENOENT"
 
 /**
+ * The ESTABLISHED Node test-runner test-failure process exit.
+ *
+ * Node's test runner exits `1` when a test fails. A mutation detection
+ * requires EXACTLY this exit: a timeout, a signal death, a missing exit,
+ * a parser failure and any other exit are unrelated execution failures,
+ * never detections.
+ */
+export const MUTANT_FAILURE_EXIT = 1
+
+/**
  * The ML-06A acceptance test identities.
  *
  * Each entry is the EXACT test name the evaluator's own acceptance test
@@ -187,11 +197,17 @@ export async function listTree(root, { stopAt = ["node_modules"] } = {}) {
 }
 
 /**
- * The fixture identity digest.
+ * The HISTORICAL fixture identity digest (version `v1`).
  *
  * It is the SHA-256 of the concatenated per-file SHA-256 listing of every
  * regular file, ordered by relative path. The reference preparation and the
  * oracle both compute it through THIS function, so the two can never drift.
+ *
+ * HISTORICAL MEANING IS PRESERVED. The digests recorded by the ML-SMOKE-01
+ * and ML-06A qualifications were computed with THIS function, so this
+ * function is NOT changed by the introduction of the versioned tree
+ * manifest below. A historical digest keeps its historical meaning; it is
+ * never silently reinterpreted through the new format.
  */
 export async function digestOfDirectory(root) {
 	const entries = (await listTree(root)).filter((e) => e.type === "file")
@@ -203,6 +219,74 @@ export async function digestOfDirectory(root) {
 		lines.push(`${hash}  ./${entry.path}\n`)
 	}
 	return createHash("sha256").update(lines.join("")).digest("hex")
+}
+
+/**
+ * The VERSIONED tree-manifest format.
+ *
+ * The historical `v1` digest binds only FILE CONTENT. It cannot see:
+ *
+ *   - a removed EMPTY DIRECTORY (it contributes no file);
+ *   - an object TYPE substitution (a file replaced by a directory);
+ *   - a MODE change;
+ *   - the identity of a directory at all.
+ *
+ * The manifest below binds, for every entry in the tree:
+ *
+ *   - the RELATIVE path;
+ *   - the OBJECT TYPE (`file`, `dir`, `symlink`, `other`);
+ *   - the MODE (`st_mode & 0o7777`);
+ *   - the FILE-CONTENT SHA-256 (`file` entries only);
+ *   - the PRESENCE of a DIRECTORY, including an EMPTY one.
+ *
+ * The serialization is UNAMBIGUOUS: one JSON object per entry, one entry
+ * per line, entries ordered by relative path, and the format version on
+ * the first line. No timestamps, no absolute paths, no ambient state: two
+ * INDEPENDENTLY MATERIALIZED trees with the same content have the same
+ * manifest digest.
+ */
+export const TREE_MANIFEST_VERSION = "ml-tree-manifest/v2"
+
+/** The SHA-256 of one file's bytes. */
+async function hashFile(path) {
+	return createHash("sha256").update(await readFile(path)).digest("hex")
+}
+
+/**
+ * The deterministic tree manifest of a directory.
+ *
+ * Returns `{ version, entries }` where `entries` is an ordered array of
+ * `{ path, type, mode, sha256? }` records. An unsupported object type is
+ * RECORDED (never silently dropped), so a caller can reject it.
+ */
+export async function treeManifest(root, { stopAt = ["node_modules"] } = {}) {
+	const entries = await listTree(root, { stopAt })
+	entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+	const records = []
+	for (const entry of entries) {
+		const record = { path: entry.path, type: entry.type, mode: entry.mode }
+		if (entry.type === "file") record.sha256 = await hashFile(join(root, entry.path))
+		records.push(record)
+	}
+	return { version: TREE_MANIFEST_VERSION, entries: records }
+}
+
+/**
+ * The VERSIONED tree-manifest digest.
+ *
+ * `digestOfDirectory(root)` is the HISTORICAL `v1` digest and keeps its
+ * historical meaning. `digestOfDirectory(root, { version: "v2" })` is the
+ * NEW, explicitly versioned digest, and it is a DIFFERENT identity: it is
+ * never compared with a `v1` digest and never overwrites one.
+ */
+export async function digestOfDirectoryVersioned(root, { version = TREE_MANIFEST_VERSION } = {}) {
+	if (version === "v1") return digestOfDirectory(root)
+	if (version !== TREE_MANIFEST_VERSION) {
+		throw new Error(`unknown_tree_manifest_version:${version}`)
+	}
+	const manifest = await treeManifest(root)
+	const payload = `${manifest.version}\n${manifest.entries.map((e) => JSON.stringify(e)).join("\n")}\n`
+	return createHash("sha256").update(payload).digest("hex")
 }
 
 /**
@@ -401,7 +485,7 @@ export async function compareTrees(
 	const refMap = new Map(refEntries.filter((e) => e.type !== "dir").map((e) => [e.path, e]))
 	const wsMap = new Map(wsEntries.filter((e) => e.type !== "dir").map((e) => [e.path, e]))
 
-	// PROTECTED DIRECTORY MODES.
+	// PROTECTED DIRECTORY IDENTITY AND MODES.
 	//
 	// The previous revision compared modes only for NON-DIRECTORY entries,
 	// so a candidate could `chmod 700` a protected DIRECTORY and the
@@ -409,12 +493,27 @@ export async function compareTrees(
 	// trees, so it was not an ADDED entry, and directories were excluded
 	// from the content comparison, so its mode was never read.
 	//
-	// A directory's mode is part of the protected tree's identity. Every
-	// directory present in BOTH trees must carry the SAME mode.
+	// A directory's PRESENCE and MODE are part of the protected tree's
+	// identity. Every directory present in BOTH trees must carry the SAME
+	// mode, and a directory present ONLY in the reference (including an
+	// EMPTY one, which contributes no file and was therefore invisible to
+	// the previous revision) is a DELETION.
 	for (const [path, ref] of refAll) {
 		if (ref.type !== "dir") continue
 		const ws = wsAll.get(path)
-		if (!ws || ws.type !== "dir") continue
+		if (!ws) {
+			// The directory was removed — including an EMPTY directory,
+			// which carries no file and was invisible to the previous
+			// revision.
+			violations.push({ kind: "DELETED", path })
+			continue
+		}
+		if (ws.type !== "dir") {
+			// A protected directory replaced by a non-directory is a TYPE
+			// SUBSTITUTION.
+			violations.push({ kind: "TYPE_SUBSTITUTED", path })
+			continue
+		}
 		if (ws.mode !== ref.mode) {
 			violations.push({ kind: "MODE_CHANGED", path })
 		}
@@ -423,6 +522,15 @@ export async function compareTrees(
 	for (const [path, ref] of refMap) {
 		const ws = wsMap.get(path)
 		if (!ws) {
+			// The entry may have been replaced by a DIRECTORY. The
+			// previous revision compared only NON-DIRECTORY entries, so a
+			// type substitution was reported as a plain DELETION — or, when
+			// the directory was empty, was invisible altogether.
+			const wsDir = wsAll.get(path)
+			if (wsDir && wsDir.type === "dir") {
+				violations.push({ kind: "TYPE_SUBSTITUTED", path })
+				continue
+			}
 			violations.push({ kind: "DELETED", path })
 			continue
 		}
@@ -430,6 +538,15 @@ export async function compareTrees(
 			// A protected regular file replaced with a symlink is an
 			// unsupported object type for this oracle. Fail closed.
 			violations.push({ kind: "UNSUPPORTED_OBJECT", path })
+			continue
+		}
+		if (ws.type !== ref.type) {
+			// A protected regular file replaced by a DIRECTORY is a TYPE
+			// SUBSTITUTION. The previous revision compared the CONTENT of
+			// the two entries, and a directory cannot be read as a file, so
+			// the substitution was either invisible or crashed the
+			// comparison.
+			violations.push({ kind: "TYPE_SUBSTITUTED", path })
 			continue
 		}
 		if (ws.mode !== ref.mode) {
@@ -559,8 +676,16 @@ export function classifyEvents(stdout, { runnerCounts } = {}) {
 	}
 	const tests = []
 	let fileError = false
+	// MALFORMED OR UNKNOWN terminal observations are NOT silently
+	// discarded. The previous revision `continue`d past them, so a stream
+	// carrying a malformed or unknown record still produced a complete,
+	// reconciling verdict about a SUBSET of the run.
+	const malformedReasons = []
 	for (const event of parsed.records) {
-		if (typeof event.name !== "string") continue
+		if (typeof event.name !== "string" || event.name.length === 0) {
+			malformedReasons.push("terminal_observation_without_identity")
+			continue
+		}
 		if (event.kind === "file") {
 			// A FILE-LEVEL failure: the test file could not even be loaded.
 			fileError = true
@@ -581,6 +706,7 @@ export function classifyEvents(stdout, { runnerCounts } = {}) {
 			status !== "cancel"
 		) {
 			// An invalid terminal status is an invalid observation.
+			malformedReasons.push(`unknown_terminal_status:${String(status)}`)
 			continue
 		}
 		tests.push({
@@ -622,38 +748,75 @@ export function classifyEvents(stdout, { runnerCounts } = {}) {
 	}
 	const reported = parsed.complete?.counts ?? null
 	const observed = tests.length
-	const expected = typeof runnerCounts?.tests === "number" ? runnerCounts.tests : undefined
-	const runnerTotal = typeof reported?.tests === "number" ? reported.tests : expected
 	let complete = true
-	const reasons = []
-	if (reported === null || typeof reported !== "object") {
+	const reasons = [...malformedReasons]
+	if (malformedReasons.length > 0) {
+		complete = false
+		reasons.unshift("malformed_terminal_observations")
+	}
+	// THE COMPLETE EVENT-COUNTER CONTRACT.
+	//
+	// The pinned runner contract (the Node test runner's own
+	// `test:summary` counts, as observed on THIS host's Node v26.0.0)
+	// carries these counters:
+	//
+	//   tests     the cumulative test count of the whole invocation
+	//   passed    the tests that PASSED
+	//   failed    the tests that FAILED
+	//   skipped   the tests that were SKIPPED
+	//   todo      the tests that are TODO
+	//   cancelled the tests that were CANCELLED
+	//
+	// EVERY ONE OF THEM MUST BE PRESENT and MUST be a NONNEGATIVE
+	// INTEGER. The previous revision only compared the per-status counts
+	// that happened to be present (`if (typeof runnerValue !== "number")
+	// continue`), so a completion record that carried only
+	// `{"counts":{"tests":9}}` was accepted, and its missing per-status
+	// counters were silently ignored. A completion record that does not
+	// carry the WHOLE contract is not completion evidence.
+	//
+	// The reconciliation is UNCONDITIONAL: the five per-status counters
+	// must sum to the reported total, and each must equal the number of
+	// observed terminal observations with that status. A zero sum is NOT
+	// exempt: an all-zero record still has to be consistent with zero
+	// observations.
+	const statusMap = [
+		["passed", "passed"],
+		["failed", "failed"],
+		["skipped", "skipped"],
+		["todo", "todo"],
+		["cancelled", "cancelled"],
+	]
+	let runnerTotal
+	if (reported === null || typeof reported !== "object" || Array.isArray(reported)) {
 		// A completion record with NO counts is not completion evidence.
 		complete = false
 		reasons.push("completion_record_carries_no_counts")
 	} else {
-		if (typeof runnerTotal !== "number") {
-			complete = false
-			reasons.push("completion_record_carries_no_total")
-		} else if (observed < runnerTotal) {
-			// The stream carries FEWER terminal observations than the runner
-			// reported: records were lost. Not acceptable.
-			complete = false
-			reasons.push("fewer_observations_than_reported")
-		} else if (observed > runnerTotal) {
-			// The stream carries MORE terminal observations than the runner
-			// reported: the observations are not the runner's own. Not
-			// acceptable.
-			complete = false
-			reasons.push("more_observations_than_reported")
+		const required = ["tests", ...statusMap.map(([runnerKey]) => runnerKey)]
+		for (const key of required) {
+			const value = reported[key]
+			if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+				complete = false
+				reasons.push(`completion_record_counter_missing_or_invalid:${key}`)
+			}
+		}
+		runnerTotal = typeof reported.tests === "number" ? reported.tests : undefined
+		if (typeof runnerTotal === "number") {
+			if (observed < runnerTotal) {
+				// The stream carries FEWER terminal observations than the
+				// runner reported: records were lost. Not acceptable.
+				complete = false
+				reasons.push("fewer_observations_than_reported")
+			} else if (observed > runnerTotal) {
+				// The stream carries MORE terminal observations than the
+				// runner reported: the observations are not the runner's
+				// own. Not acceptable.
+				complete = false
+				reasons.push("more_observations_than_reported")
+			}
 		}
 		// PER-STATUS RECONCILIATION.
-		const statusMap = [
-			["passed", "passed"],
-			["failed", "failed"],
-			["skipped", "skipped"],
-			["todo", "todo"],
-			["cancelled", "cancelled"],
-		]
 		let statusSum = 0
 		for (const [runnerKey, observedKey] of statusMap) {
 			const runnerValue = reported[runnerKey]
@@ -664,7 +827,7 @@ export function classifyEvents(stdout, { runnerCounts } = {}) {
 				reasons.push(`count_mismatch_${runnerKey}`)
 			}
 		}
-		if (statusSum > 0 && typeof runnerTotal === "number" && statusSum !== runnerTotal) {
+		if (typeof runnerTotal === "number" && statusSum !== runnerTotal) {
 			// The runner's own per-status counts do not sum to its own
 			// total. The completion record contradicts itself.
 			complete = false
@@ -887,6 +1050,18 @@ export function decideMutation(
 		}
 	}
 	// THE EXPECTED MUTANT TEST-FAILURE PROCESS EXIT.
+	//
+	// The detection requires EXACTLY the established Node test-runner
+	// failure exit: `processExit === 1`.
+	//
+	// The previous revision refused only a TIMEOUT (124) and a SIGNAL
+	// DEATH (>= 128), and accepted every other status — including 2, 125,
+	// 126 and 127, which are NOT the Node test runner's failure exit. A
+	// mutant that died for an unrelated infrastructure reason, or that
+	// exited with some other non-zero status, was reported DETECTED.
+	//
+	// A timeout, a signal death, a missing exit, a parser failure and any
+	// unrelated execution failure are NOT mutation detection.
 	if (processExit === undefined) {
 		return {
 			status: "EXECUTION_FAILURE",
@@ -913,6 +1088,15 @@ export function decideMutation(
 			status: "EXECUTION_FAILURE",
 			detected: false,
 			note: "mutant_process_exit_zero_contradicts_observed_failure",
+		}
+	}
+	if (processExit !== MUTANT_FAILURE_EXIT) {
+		// Any other non-zero exit is an UNRELATED execution failure, not
+		// the runner's own test-failure verdict.
+		return {
+			status: "EXECUTION_FAILURE",
+			detected: false,
+			note: `mutant_process_exit_unexpected_${processExit}`,
 		}
 	}
 	if (found.codes.includes(intendedCode)) {

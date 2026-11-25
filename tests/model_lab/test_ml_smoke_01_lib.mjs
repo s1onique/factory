@@ -40,13 +40,16 @@ import { fileURLToPath } from "node:url"
 
 import {
 	REQUIRED_TESTS,
+	TREE_MANIFEST_VERSION,
 	applyKnownBadMutation,
 	classifyEvents,
 	compareTrees,
 	decideAcceptance,
 	decideMutation,
 	digestOfDirectory,
+	digestOfDirectoryVersioned,
 	locateSeam,
+	treeManifest,
 	validateAllowedRegion,
 } from "../../labs/model-lab/ml_smoke_01_lib.mjs"
 
@@ -54,6 +57,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..", "..")
 const PREPARE = join(REPO_ROOT, "labs", "model-lab", "prepare_ml_smoke_01.sh")
 const REPORTER = join(REPO_ROOT, "labs", "model-lab", "ml_smoke_01_test_reporter.mjs")
+const TOOL = join(REPO_ROOT, "labs", "model-lab", "ml_smoke_01_tool.mjs")
+const FAILCLOSED = join(REPO_ROOT, "labs", "model-lab", "ml_failclosed.mjs")
 const BASE_COMMIT = "09fc12c6fb051dce096252bf30c2e96debed962c"
 
 let passCount = 0
@@ -501,6 +506,328 @@ console.log("")
 		rmSync(root, { recursive: true, force: true })
 	}
 }
+
+// -----------------------------------------------------------------------
+// L30 — the MUTANT verdict requires EXACTLY the Node test-failure exit.
+//
+// The reproduced defect: the previous revision refused only a timeout
+// (124) and a signal death (>= 128), and accepted every other status —
+// including 2, 125, 126 and 127 — as a DETECTION. None of those is the
+// Node test runner's failure exit.
+//
+// This control is TABLE-DRIVEN: every exit is exercised, and only the
+// established one is a detection.
+// -----------------------------------------------------------------------
+
+{
+	const enoentStream = () => log(reqEvent(REC1, "fail", ["ERR_TEST_FAILURE", "ENOENT"]))
+	const table = [
+		{ exit: 1, detected: true, note: "required_test_failed_with_intended_code" },
+		{ exit: 0, detected: false, note: "mutant_process_exit_zero_contradicts_observed_failure" },
+		{ exit: 2, detected: false, note: "mutant_process_exit_unexpected_2" },
+		{ exit: 124, detected: false, note: "mutant_run_timed_out" },
+		{ exit: 125, detected: false, note: "mutant_process_exit_unexpected_125" },
+		{ exit: 126, detected: false, note: "mutant_process_exit_unexpected_126" },
+		{ exit: 127, detected: false, note: "mutant_process_exit_unexpected_127" },
+		{ exit: 137, detected: false, note: "mutant_process_killed_exit_137" },
+	]
+	for (const row of table) {
+		const decision = decideMutation(classifyEvents(enoentStream()), REC1, "ENOENT", {
+			requiredFile: REC_FILE,
+			processExit: row.exit,
+		})
+		assert(
+			decision.detected === row.detected,
+			`L30 exit ${row.exit} detected=${row.detected} (expected ${row.detected})`,
+		)
+		assert(
+			decision.note === row.note,
+			`L30 exit ${row.exit} is named ${row.note} (got ${decision.note})`,
+		)
+	}
+	const unknown = decideMutation(classifyEvents(enoentStream()), REC1, "ENOENT", {
+		requiredFile: REC_FILE,
+	})
+	assert(unknown.detected === false, "L30 an UNKNOWN exit is NOT a detection")
+	assert(unknown.note === "mutant_process_exit_unknown", "L30 the unknown exit is named")
+}
+
+// -----------------------------------------------------------------------
+// L31 — the COMPLETE event-counter contract.
+//
+// The reproduced defect: a completion record carrying only
+// `{"counts":{"tests":9}}` after nine passing observations was accepted,
+// and its missing per-status counters were silently ignored.
+//
+// The contract requires EVERY counter: tests, passed, failed, skipped,
+// todo, cancelled — each a nonnegative integer — and the reconciliation
+// is UNCONDITIONAL.
+// -----------------------------------------------------------------------
+
+{
+	// The EXACT counterexample from the review: nine passing
+	// observations and a completion record with only the total.
+	const ninePassing = []
+	for (let index = 0; index < 9; index += 1) ninePassing.push(reqEvent(`T${index}`, "pass"))
+	const counterexample =
+		ninePassing.join("\n") +
+		"\n" +
+		JSON.stringify({ kind: "complete", counts: { tests: 9 } }) +
+		"\n"
+	const classified = classifyEvents(counterexample)
+	assert(classified.complete === false, "L31 a completion record with ONLY the total is INCOMPLETE")
+	assert(
+		classified.completeReasons.includes("completion_record_counter_missing_or_invalid:passed"),
+		"L31 the missing per-status counter is named",
+	)
+	assert(
+		classified.completeReasons.includes("completion_record_counter_missing_or_invalid:cancelled"),
+		"L31 every missing counter is named",
+	)
+	assert(decideAcceptance(classified, REQUIRED_TESTS).acceptance === "FAIL", "L31 the counterexample is never an acceptance")
+
+	// A NEGATIVE counter is invalid.
+	const negative =
+		reqEvent(REC1, "pass") +
+		"\n" +
+		JSON.stringify({
+			kind: "complete",
+			counts: { tests: 1, passed: -1, failed: 0, skipped: 0, todo: 0, cancelled: 0 },
+		}) +
+		"\n"
+	assert(
+		classifyEvents(negative).completeReasons.includes("completion_record_counter_missing_or_invalid:passed"),
+		"L31 a NEGATIVE counter is invalid",
+	)
+
+	// A NON-INTEGER counter is invalid.
+	const fractional =
+		reqEvent(REC1, "pass") +
+		"\n" +
+		JSON.stringify({
+			kind: "complete",
+			counts: { tests: 1, passed: 0.5, failed: 0, skipped: 0, todo: 0, cancelled: 0 },
+		}) +
+		"\n"
+	assert(
+		classifyEvents(fractional).completeReasons.includes("completion_record_counter_missing_or_invalid:passed"),
+		"L31 a NON-INTEGER counter is invalid",
+	)
+
+	// The reconciliation is UNCONDITIONAL: a zero sum is NOT exempt.
+	const zeroSum =
+		reqEvent(REC1, "pass") +
+		"\n" +
+		JSON.stringify({
+			kind: "complete",
+			counts: { tests: 1, passed: 0, failed: 0, skipped: 0, todo: 0, cancelled: 0 },
+		}) +
+		"\n"
+	const zeroClassified = classifyEvents(zeroSum)
+	assert(zeroClassified.complete === false, "L31 a zero-sum completion record is INCOMPLETE")
+	assert(
+		zeroClassified.completeReasons.includes("runner_counts_inconsistent"),
+		"L31 the zero-sum inconsistency is named",
+	)
+
+	// A MALFORMED terminal observation is NOT silently discarded.
+	const malformed =
+		JSON.stringify({ kind: "test", status: "pass", codes: [], messages: [] }) +
+		"\n" +
+		JSON.stringify({
+			kind: "complete",
+			counts: { tests: 0, passed: 0, failed: 0, skipped: 0, todo: 0, cancelled: 0 },
+		}) +
+		"\n"
+	const malformedClassified = classifyEvents(malformed)
+	assert(malformedClassified.complete === false, "L31 a malformed terminal observation is INCOMPLETE")
+	assert(
+		malformedClassified.completeReasons.includes("malformed_terminal_observations"),
+		"L31 the malformed observation is named",
+	)
+
+	// An UNKNOWN terminal status is NOT silently discarded.
+	const unknownStatus =
+		JSON.stringify({ kind: "test", name: "X", status: "weird", codes: [], messages: [] }) +
+		"\n" +
+		JSON.stringify({
+			kind: "complete",
+			counts: { tests: 0, passed: 0, failed: 0, skipped: 0, todo: 0, cancelled: 0 },
+		}) +
+		"\n"
+	assert(
+		classifyEvents(unknownStatus).completeReasons.includes("malformed_terminal_observations"),
+		"L31 an unknown terminal status is INCOMPLETE",
+	)
+}
+
+
+// -----------------------------------------------------------------------
+// L32 — the VERSIONED tree manifest binds directories, types and modes.
+//
+// The reproduced defect: the historical `v1` digest binds only FILE
+// CONTENT, so it cannot see a removed EMPTY DIRECTORY, an object TYPE
+// substitution, or a MODE change. `compareTrees()` now reports all three.
+//
+// The HISTORICAL digest keeps its historical meaning: it is unchanged,
+// and it is a DIFFERENT identity from the versioned manifest.
+// -----------------------------------------------------------------------
+
+{
+	const root = mkdtempSync(join(tmpdir(), "ml-smoke-01-l32-"))
+	try {
+		const ref = join(root, "ref")
+		const ws = join(root, "ws")
+		mkdirSync(join(ref, "protected"), { recursive: true })
+		mkdirSync(join(ws, "protected"), { recursive: true })
+		// An EMPTY protected directory in the reference.
+		mkdirSync(join(ref, "protected", "empty-dir"), { recursive: true })
+		writeFileSync(join(ref, "protected", "a.ts"), "export const a = 1\n")
+		writeFileSync(join(ws, "protected", "a.ts"), "export const a = 1\n")
+
+		// The EMPTY directory is REMOVED in the workspace.
+		const removed = await compareTrees(ref, ws)
+		const deletion = removed.violations.find((v) => v.kind === "DELETED" && v.path === "protected/empty-dir")
+		assert(deletion !== undefined, "L32 a removed EMPTY protected directory is a DELETED violation")
+		assert(
+			removed.violations.length === 1,
+			"L32 the removed empty directory produces exactly one violation (not zero)",
+		)
+
+		// The TYPE is SUBSTITUTED: a protected file becomes a directory.
+		const substituted = join(root, "substituted")
+		mkdirSync(join(substituted, "protected"), { recursive: true })
+		mkdirSync(join(substituted, "protected", "a.ts"), { recursive: true })
+		const typeResult = await compareTrees(ref, substituted)
+		const substitution = typeResult.violations.find((v) => v.kind === "TYPE_SUBSTITUTED")
+		assert(substitution !== undefined, "L32 a protected file replaced by a directory is a TYPE_SUBSTITUTED violation")
+
+		// The MODE of a protected DIRECTORY is changed.
+		chmodSync(join(ws, "protected"), 0o700)
+		const modeResult = await compareTrees(ref, ws)
+		const mode = modeResult.violations.find((v) => v.kind === "MODE_CHANGED" && v.path === "protected")
+		assert(mode !== undefined, "L32 a protected directory mode change is a MODE_CHANGED violation")
+
+		// The VERSIONED manifest sees what the historical one cannot.
+		const historical = await digestOfDirectory(ref)
+		const versioned = await digestOfDirectoryVersioned(ref)
+		assert(historical !== versioned, "L32 the versioned digest is a DIFFERENT identity from the historical one")
+		assert(versioned.length === 64, "L32 the versioned digest is a SHA-256 hex digest")
+
+		// The versioned manifest is STABLE and EQUIVALENT across
+		// independently materialized trees.
+		const a = join(root, "a")
+		const b = join(root, "b")
+		for (const target of [a, b]) {
+			mkdirSync(join(target, "protected", "empty-dir"), { recursive: true })
+			writeFileSync(join(target, "protected", "a.ts"), "export const a = 1\n")
+		}
+		assert(
+			(await digestOfDirectoryVersioned(a)) === (await digestOfDirectoryVersioned(b)),
+			"L32 two independently materialized trees have the SAME versioned identity",
+		)
+
+		// The versioned manifest BINDS the empty directory's presence.
+		rmSync(join(b, "protected", "empty-dir"), { recursive: true })
+		assert(
+			(await digestOfDirectoryVersioned(a)) !== (await digestOfDirectoryVersioned(b)),
+			"L32 the versioned identity CHANGES when an empty directory is removed",
+		)
+
+		// The manifest records the OBJECT TYPE and the MODE.
+		const manifest = await treeManifest(a)
+		const entry = manifest.entries.find((e) => e.path === "protected/empty-dir")
+		assert(entry !== undefined, "L32 the manifest records the empty directory")
+		assert(entry.type === "dir", "L32 the manifest records the object's TYPE")
+		assert(typeof entry.mode === "number", "L32 the manifest records the object's MODE")
+		assert(manifest.version === TREE_MANIFEST_VERSION, "L32 the manifest carries its explicit version")
+	} finally {
+		rmSync(root, { recursive: true, force: true })
+	}
+}
+
+// -----------------------------------------------------------------------
+// L33 — the FAIL-CLOSED invocation surface.
+//
+// The reproduced defect: the shell oracles invoked the scope tool
+// WITHOUT checking its exit status, then used a NUMERIC shell comparison
+// on whatever the tool printed. An EMPTY result could therefore reach
+// the execution path.
+//
+// The fail-closed surface refuses to produce a violation count unless
+// the CLI SUCCEEDED, the payload is NON-EMPTY, the payload is VALID
+// JSON, and the count is a VALID NONNEGATIVE INTEGER.
+// -----------------------------------------------------------------------
+
+{
+	const root = mkdtempSync(join(tmpdir(), "ml-smoke-01-l33-"))
+	try {
+		const failing = join(root, "failing-tool.mjs")
+		writeFileSync(failing, "process.exit(7)\n")
+		const failingRun = spawnSync(process.execPath, [FAILCLOSED, "scope", failing, root, root], {
+			encoding: "utf8",
+		})
+		assert(failingRun.status !== 0, "L33 a FAILED scope-tool invocation is REFUSED")
+		assert(
+			(failingRun.stdout ?? "").includes("FC_STATUS=FAILED"),
+			"L33 the refusal names the FAILED state",
+		)
+		assert(
+			!(failingRun.stdout ?? "").includes("FC_VIOLATIONS="),
+			"L33 a failed invocation produces NO violation count at all",
+		)
+
+		const empty = join(root, "empty-tool.mjs")
+		writeFileSync(empty, "process.stdout.write('')\n")
+		const emptyRun = spawnSync(process.execPath, [FAILCLOSED, "scope", empty, root, root], {
+			encoding: "utf8",
+		})
+		assert(emptyRun.status !== 0, "L33 an EMPTY scope-tool payload is REFUSED")
+		assert(
+			!(emptyRun.stdout ?? "").includes("FC_VIOLATIONS="),
+			"L33 an empty payload produces NO violation count at all",
+		)
+
+		const malformed = join(root, "malformed-tool.mjs")
+		writeFileSync(malformed, "process.stdout.write('not json\\n')\n")
+		const malformedRun = spawnSync(process.execPath, [FAILCLOSED, "scope", malformed, root, root], {
+			encoding: "utf8",
+		})
+		assert(malformedRun.status !== 0, "L33 a MALFORMED scope-tool payload is REFUSED")
+		assert(
+			(malformedRun.stdout ?? "").includes("FC_STATUS=MALFORMED"),
+			"L33 the refusal names the MALFORMED state",
+		)
+
+		// A VALID invocation produces a VALID NONNEGATIVE count.
+		const good = join(root, "good-tool.mjs")
+		writeFileSync(good, "process.stdout.write(JSON.stringify({ error: null, violations: [] }) + '\\n')\n")
+		const goodRun = spawnSync(process.execPath, [FAILCLOSED, "scope", good, root, root], {
+			encoding: "utf8",
+		})
+		assert(goodRun.status === 0, "L33 a VALID scope-tool invocation is ACCEPTED")
+		assert(
+			(goodRun.stdout ?? "").includes("FC_VIOLATIONS=0"),
+			"L33 a valid invocation reports the violation count",
+		)
+
+		// An UNUSABLE comparison (a self-comparison) is a REFUSAL, never
+		// a count.
+		const selfRun = spawnSync(
+			process.execPath,
+			[FAILCLOSED, "scope", TOOL, root, root],
+			{ encoding: "utf8" },
+		)
+		assert(selfRun.status !== 0, "L33 a self-comparison is REFUSED")
+		assert(
+			(selfRun.stdout ?? "").includes("FC_ERROR_CODE=reference_and_workspace_are_the_same_tree"),
+			"L33 the refusal names the unusable comparison",
+		)
+	} finally {
+		rmSync(root, { recursive: true, force: true })
+	}
+}
+
 
 console.log("")
 // ---------------------------------------------------------------------------

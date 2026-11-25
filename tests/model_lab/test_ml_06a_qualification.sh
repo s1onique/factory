@@ -39,6 +39,23 @@ ALLOWED_PATH="labs/long-horizon-harness/src/subject/subject-json.ts"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ml-06a-qual-XXXXXX")"
 trap 'rm -rf "${WORK}"' EXIT
 
+# The Node runtime is resolved EXPLICITLY. The interactive shell's PATH is
+# not assumed to match the extension host's PATH.
+NODE_BIN="${NODE_BIN:-}"
+if [ -z "${NODE_BIN}" ]; then
+    for candidate_node in /opt/homebrew/bin/node "$(command -v node 2>/dev/null || true)"; do
+        if [ -n "${candidate_node}" ] && [ -x "${candidate_node}" ]; then
+            NODE_BIN="${candidate_node}"
+            break
+        fi
+    done
+fi
+if [ -z "${NODE_BIN}" ]; then
+    echo "node runtime unavailable" >&2
+    exit 1
+fi
+echo "  node runtime: ${NODE_BIN} ($("${NODE_BIN}" --version))"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -101,26 +118,70 @@ assert_disposition "M01 known-bad" "FAIL" "1" "${WORK}/m01.out" "${rc}"
 assert_has "M01 the acceptance verdict is FAIL" "ML_06A_ACCEPTANCE=FAIL" "${WORK}/m01.out"
 assert_has "M01 the allowed file was NOT changed" "ML_06A_ALLOWED_PATH_CHANGED=false" "${WORK}/m01.out"
 
-# The INTENDED BEHAVIORAL REASON: the shared-substructure assertions are
-# the ones that fail, and the cycle and invalid-value assertions still
-# hold. This distinguishes "the defect" from "the harness is broken".
+# The INTENDED BEHAVIORAL REASON, read from STRUCTURED observations.
+#
+# The previous revision searched the human-readable `spec` reporter output
+# for several identifiers without requiring the corresponding FAILED
+# status, and without requiring the unrelated validation controls to have
+# PASSED. A free-text search is not an observation.
+#
+# The structured event stream is used instead: each assertion's terminal
+# observation carries its exact status. The control requires:
+#
+#   - the three shared-substructure assertions to have FAILED;
+#   - the ordinary-tree assertion to have PASSED;
+#   - the three cycle-rejection assertions to have PASSED;
+#   - the invalid-value assertion to have PASSED;
+#   - the additional ML06A-10 failure caused by the SAME underlying defect.
+#
+# The ML06A-10 failure is a CONSEQUENCE of the same defect: the known-bad
+# validator refuses the shared-substructure manifest, so the immutability
+# assertion's precondition (the manifest is accepted) does not hold.
 rm -rf "${WORK}/m01-probe"; cp -R "${WORK}/prep/workspace" "${WORK}/m01-probe"
 DEPS="${REPO_ROOT}/labs/long-horizon-harness/node_modules"
 mkdir -p "${WORK}/m01-probe/labs/long-horizon-harness/test/subject"
 cp "${REPO_ROOT}/labs/model-lab/ml_06a_acceptance.test.ts" \
    "${WORK}/m01-probe/labs/long-horizon-harness/test/subject/ml-06a-acceptance.test.ts"
-( cd "${WORK}/m01-probe/labs/long-horizon-harness" && TMPDIR=/tmp /opt/homebrew/bin/node \
-    --import "${DEPS}/tsx/dist/loader.mjs" --test --test-reporter=spec \
-    test/subject/ml-06a-acceptance.test.ts ) > "${WORK}/m01-probe.out" 2>&1
-assert_has "M01 the shared-SIBLING-OBJECT assertion is the failing one" "ML06A-02" "${WORK}/m01-probe.out"
-assert_has "M01 the shared-SIBLING-ARRAY assertion is the failing one" "ML06A-03" "${WORK}/m01-probe.out"
-assert_has "M01 the shared-DEPTH assertion is the failing one" "ML06A-04" "${WORK}/m01-probe.out"
-assert_has "M01 the ordinary-tree assertion PASSED" "✔ ML06A-01" "${WORK}/m01-probe.out"
-assert_has "M01 the direct-cycle assertion PASSED" "✔ ML06A-05" "${WORK}/m01-probe.out"
-assert_has "M01 the indirect-cycle assertion PASSED" "✔ ML06A-06" "${WORK}/m01-probe.out"
-assert_has "M01 the cycle-in-shared assertion PASSED" "✔ ML06A-07" "${WORK}/m01-probe.out"
-assert_has "M01 the invalid-value assertion PASSED" "✔ ML06A-08" "${WORK}/m01-probe.out"
-assert_has "M01 the immutability assertion FAILED (the defect is also there)" "✖ ML06A-10" "${WORK}/m01-probe.out"
+( cd "${WORK}/m01-probe/labs/long-horizon-harness" && TMPDIR=/tmp "${NODE_BIN}" \
+     --import "${DEPS}/tsx/dist/loader.mjs" --test \
+     --test-reporter="${REPO_ROOT}/labs/model-lab/ml_smoke_01_test_reporter.mjs" \
+     test/subject/ml-06a-acceptance.test.ts ) > "${WORK}/m01-probe.jsonl" 2> "${WORK}/m01-probe.err"
+probe_payload="$("${NODE_BIN}" "${REPO_ROOT}/labs/model-lab/ml_smoke_01_tool.mjs" \
+    classify-json "${WORK}/m01-probe.jsonl" 2>/dev/null)"
+probe_field() {
+    printf '%s' "${probe_payload}" | "${NODE_BIN}" "${REPO_ROOT}/labs/model-lab/ml_smoke_01_tool.mjs" \
+        field - "$1" 2>/dev/null
+}
+probe_status_of() {
+    # probe_status_of <test name> -> the terminal STATUS of that identity.
+    "${NODE_BIN}" -e '
+        const fs = require("node:fs")
+        const lines = fs.readFileSync(process.argv[1], "utf8").split("\n")
+        let found = "ABSENT"
+        for (const line of lines) {
+            if (!line.trim()) continue
+            let rec
+            try { rec = JSON.parse(line) } catch { continue }
+            if (rec.kind === "test" && rec.name === process.argv[2]) found = rec.status
+        }
+        process.stdout.write(found)
+    ' "${WORK}/m01-probe.jsonl" "$1"
+}
+assert_eq() {
+    # assert_eq <label> <expected> <actual>
+    if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi
+}
+assert_eq "M01 ML06A-01 (ordinary tree) PASSED" "pass" "$(probe_status_of 'ML06A-01: an ordinary JSON tree is accepted')"
+assert_eq "M01 ML06A-02 (shared sibling OBJECTS) FAILED" "fail" "$(probe_status_of 'ML06A-02: shared sibling OBJECTS are accepted')"
+assert_eq "M01 ML06A-03 (shared sibling ARRAYS) FAILED" "fail" "$(probe_status_of 'ML06A-03: shared sibling ARRAYS are accepted')"
+assert_eq "M01 ML06A-04 (shared substructure at different depths) FAILED" "fail" "$(probe_status_of 'ML06A-04: shared substructure at DIFFERENT DEPTHS is accepted')"
+assert_eq "M01 ML06A-05 (direct cycle) PASSED" "pass" "$(probe_status_of 'ML06A-05: a DIRECT cycle is rejected')"
+assert_eq "M01 ML06A-06 (indirect cycle) PASSED" "pass" "$(probe_status_of 'ML06A-06: an INDIRECT cycle is rejected')"
+assert_eq "M01 ML06A-07 (cycle within shared substructure) PASSED" "pass" "$(probe_status_of 'ML06A-07: a cycle WITHIN shared substructure is rejected')"
+assert_eq "M01 ML06A-08 (invalid-value behaviour) PASSED" "pass" "$(probe_status_of 'ML06A-08: the existing invalid-value behaviour is preserved')"
+assert_eq "M01 ML06A-10 (the same underlying defect) FAILED" "fail" "$(probe_status_of 'ML06A-10: the input is not reshaped and the returned value is the SAME reference')"
+assert_eq "M01 the observed failure count is exactly 4 (the three shared-substructure failures plus ML06A-10)" "4" "$(probe_field counts.failed)"
+assert_eq "M01 the observed pass count is exactly 5" "5" "$(probe_field counts.passed)"
 
 # ---------------------------------------------------------------------------
 # M02 — the KNOWN-GOOD revision must PASS.
@@ -268,18 +329,50 @@ assert_disposition "M08 invalid base" "HALT" "2" "${WORK}/m08.out" "${rc}"
 echo ""
 echo "--- M09 solution-leakage scan of the candidate-visible fixture ---"
 LEAKS=0
+# The scan's DISPOSITIONS are explicit:
+#
+#   CLEAN            the required files were inspected and no match was found
+#   LEAK_DETECTED    the required files were inspected and a match WAS found
+#   SCAN_INCOMPLETE  the required files could NOT be inspected
+#
+# The previous revision conflated "no match" with "inspection failure": a
+# `grep` that could not read the tree returned a non-zero status, which was
+# indistinguishable from a clean tree. A scan that could not inspect the
+# required files CANNOT establish CLEAN.
+scan_marker() {
+    # scan_marker <label> <marker>
+    #
+    # The enumeration is performed FIRST, and its status is checked. Only
+    # when the required files were enumerated successfully can a "no match"
+    # be read as CLEAN.
+    local label="$1" marker="$2"
+    local enumeration
+    enumeration="$(find "${WORK}/prep/workspace" -type f 2>/dev/null)"
+    local enum_status=$?
+    if [ "${enum_status}" -ne 0 ] || [ -z "${enumeration}" ]; then
+        bad "${label}: SCAN_INCOMPLETE (the candidate-visible tree could not be enumerated)"
+        LEAKS=$((LEAKS + 1))
+        return
+    fi
+    local hits
+    hits="$(printf '%s\n' "${enumeration}" | while IFS= read -r f; do
+        grep -lF "${marker}" "${f}" 2>/dev/null || true
+    done)"
+    if [ -n "${hits}" ]; then
+        bad "${label}: LEAK_DETECTED (${marker})"
+        LEAKS=$((LEAKS + 1))
+    else
+        ok "${label}: CLEAN (${marker})"
+    fi
+}
 # (a) The historical solution's MARKERS must not appear anywhere in the
 #     candidate-visible fixture.
 for marker in 'ancestors' 'validateJsonValueInner' 'ancestors.delete' 'boundary_exception'; do
-    if grep -rqF "${marker}" "${WORK}/prep/workspace" 2>/dev/null; then
-        bad "M09 the historical solution's marker '${marker}' IS present in the candidate-visible fixture"
-        LEAKS=$((LEAKS + 1))
-    else
-        ok "M09 the historical solution's marker '${marker}' is ABSENT from the candidate-visible fixture"
-    fi
+    scan_marker "M09 the historical solution's marker '${marker}' is absent" "${marker}"
 done
 # (b) NO evaluator-only test file may be present.
-if find "${WORK}/prep/workspace" -name '*ml-06a*' -o -name '*ml_06a*' 2>/dev/null | grep -q .; then
+evaluator_files="$(find "${WORK}/prep/workspace" \( -name '*ml-06a*' -o -name '*ml_06a*' \) 2>/dev/null)"
+if [ -n "${evaluator_files}" ]; then
     bad "M09 an evaluator-only ML-06A file IS present in the candidate-visible fixture"
     LEAKS=$((LEAKS + 1))
 else
@@ -296,12 +389,7 @@ fi
 # identity, and the evaluator's own fixture names. These are the markers
 # that would let a candidate recognise the fixture's own history.
 for marker in 'KNOWN_GOOD' '5b7508f' 'ml_06a' 'ml-06a' '0bd72f4'; do
-    if grep -rqF "${marker}" "${WORK}/prep/workspace" 2>/dev/null; then
-        bad "M09 the ML-06A correction-evidence marker '${marker}' IS present in the candidate-visible fixture"
-        LEAKS=$((LEAKS + 1))
-    else
-        ok "M09 the ML-06A correction-evidence marker '${marker}' is ABSENT from the candidate-visible fixture"
-    fi
+    scan_marker "M09 the ML-06A correction-evidence marker '${marker}' is absent" "${marker}"
 done
 # The GENERIC historical markers. These are the base commit's OWN
 # repository content (the harness README names historical ACTs, and

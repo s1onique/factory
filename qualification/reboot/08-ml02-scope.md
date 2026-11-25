@@ -2,6 +2,18 @@
 
 > Status: **proposed**. Nothing in this document has been implemented.
 > This is the scope proposal for the next ACT, per REBOOT-01's exit contract.
+>
+> **SUPERSEDED (ACT-FACTORY-ML-02-MINIMAL-RUNNER-01).** This proposal was
+> never implemented as written. The ACT that superseded it delivered a
+> DIFFERENT scope: the ML-06A production-code fixture (not the D01 smoke
+> fixture), the REAL native Unix-domain-socket transport (not a candidate
+> transport stub), and a commit-per-ACT evidence-locality discipline (not a
+> "no commit" rule).
+>
+> This document is PRESERVED VERBATIM as the historical record of what was
+> believed at the time it was written. It is NOT rewritten to make it appear
+> that it originally described ML-06A or the live native transport. The
+> active operational description lives in `labs/model-lab/README.md`.
 
 ---
 

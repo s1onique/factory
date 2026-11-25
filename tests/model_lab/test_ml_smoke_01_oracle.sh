@@ -95,6 +95,20 @@ run_oracle() {
     echo "$?"
 }
 
+run_behavioral() {
+    # run_behavioral <workspace> <outfile> -> echoes the exit code
+    #
+    # The BEHAVIOURAL mode executes the candidate's allowed file and
+    # observes its diagnostics. It NEVER mints a verdict: its disposition
+    # is `BEHAVIORAL` and its exit code is 3. It exists so the DIRECT
+    # behavioural and mutation controls can observe the fixture's own
+    # behaviour without weakening the AUTHORITATIVE path.
+    local ws="$1" out="$2"
+    bash "${ORACLE}" "${REPO_ROOT}" "${BASE_COMMIT}" "${ws}" "${WORK}/prep/workspace" \
+        "${REFERENCE_DIGEST}" --behavioral-probe > "${out}" 2>&1
+    echo "$?"
+}
+
 # Apply the historical fix to a workspace copy: the seam is anchored under
 # os.tmpdir() and the `tmpdir` import is added. NOTHING else changes.
 make_known_good() {
@@ -196,7 +210,12 @@ open(p, "w").write(t[:i] + t[j:])
 PYEOF
 rc="$(run_oracle "${WORK}/c03" "${WORK}/c03.out")"
 assert_disposition "C03 REC-TMP01 deleted" "FAIL" "1" "${WORK}/c03.out" "${rc}"
-assert_has "C03 missing required test reported" "ML_SMOKE_01_REQUIRED_MISSING REC-TMP01" "${WORK}/c03.out"
+assert_has "C03 the unauthorised in-file change was rejected BEFORE execution" "ML_SMOKE_01_GATE_EXECUTED=NO" "${WORK}/c03.out"
+# The DIRECT behavioural control observes the fixture's OWN diagnostic. It
+# never mints a verdict: its disposition is BEHAVIORAL.
+rc="$(run_behavioral "${WORK}/c03" "${WORK}/c03.behavioural.out")"
+assert_has "C03 the behavioural probe observed the missing required test" "ML_SMOKE_01_REQUIRED_MISSING REC-TMP01" "${WORK}/c03.behavioural.out"
+assert_has "C03 the behavioural probe minted NO verdict" "ML_SMOKE_01_DISPOSITION=BEHAVIORAL" "${WORK}/c03.behavioural.out"
 
 # ---------------------------------------------------------------------------
 # C04 — REC-TMP01 skipped must FAIL.
@@ -217,7 +236,8 @@ open(p, "w").write(t.replace(old, new, 1))
 PYEOF
 rc="$(run_oracle "${WORK}/c04" "${WORK}/c04.out")"
 assert_disposition "C04 REC-TMP01 skipped" "FAIL" "1" "${WORK}/c04.out" "${rc}"
-assert_has "C04 skipped required test reported" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP01" "${WORK}/c04.out"
+rc="$(run_behavioral "${WORK}/c04" "${WORK}/c04.behavioural.out")"
+assert_has "C04 skipped required test reported" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP01" "${WORK}/c04.behavioural.out"
 
 # ---------------------------------------------------------------------------
 # C05 — every test skipped must FAIL.
@@ -237,7 +257,8 @@ open(p, "w").write(t)
 PYEOF
 rc="$(run_oracle "${WORK}/c05" "${WORK}/c05.out")"
 assert_disposition "C05 all skipped" "FAIL" "1" "${WORK}/c05.out" "${rc}"
-assert_has "C05 all-skipped reported" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP01" "${WORK}/c05.out"
+rc="$(run_behavioral "${WORK}/c05" "${WORK}/c05.behavioural.out")"
+assert_has "C05 all-skipped reported" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP01" "${WORK}/c05.behavioural.out"
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +274,7 @@ echo ""
 echo "--- C06 mutation with invalid syntax -> NOT DETECTED ---"
 rm -rf "${WORK}/c06"; cp -R "${WORK}/c02" "${WORK}/c06"
 printf '\nconst factory_syntax_error_probe = ;\n' >> "${WORK}/c06/labs/long-horizon-harness/test/recovery/cp-crash.test.ts"
-rc="$(run_oracle "${WORK}/c06" "${WORK}/c06.out")"
+rc="$(run_behavioral "${WORK}/c06" "${WORK}/c06.out")"
 assert_has "C06 invalid mutation classified INVALID_MUTATION" "ML_SMOKE_01_MUTATION_STATUS=INVALID_MUTATION" "${WORK}/c06.out"
 assert_has "C06 invalid mutation NOT counted as detected" "ML_SMOKE_01_MUTATION_DETECTED=NO" "${WORK}/c06.out"
 
@@ -270,7 +291,7 @@ probe = ('async () => {\n  assert.fail("UNRELATED_FAILURE_MARKER");\n'
 assert anchor in t, "anchor not found"
 open(p, "w").write(t.replace(anchor, probe, 1))
 PYEOF
-rc="$(run_oracle "${WORK}/c07" "${WORK}/c07.out")"
+rc="$(run_behavioral "${WORK}/c07" "${WORK}/c07.out")"
 assert_has "C07 unrelated failure classified WRONG_FAILURE" "ML_SMOKE_01_MUTATION_STATUS=WRONG_FAILURE" "${WORK}/c07.out"
 assert_has "C07 unrelated failure NOT counted as detected" "ML_SMOKE_01_MUTATION_DETECTED=NO" "${WORK}/c07.out"
 
@@ -292,7 +313,8 @@ open(p, "w").write(t.replace(old, new, 1))
 PYEOF
 rc="$(run_oracle "${WORK}/c08" "${WORK}/c08.out")"
 assert_disposition "C08 regression skipped" "FAIL" "1" "${WORK}/c08.out" "${rc}"
-assert_has "C08 skipped regression test reported" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP02" "${WORK}/c08.out"
+rc="$(run_behavioral "${WORK}/c08" "${WORK}/c08.behavioural.out")"
+assert_has "C08 skipped regression test reported" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP02" "${WORK}/c08.behavioural.out"
 
 # ---------------------------------------------------------------------------
 # C09 — unauthorised changed file must FAIL.
@@ -345,8 +367,9 @@ open(p, "w").write(t.replace(old, new, 1))
 PYEOF
 rc="$(run_oracle "${WORK}/c11" "${WORK}/c11.out")"
 assert_disposition "C11 counterexample" "FAIL" "1" "${WORK}/c11.out" "${rc}"
-assert_has "C11 counterexample actually SKIPPED (not a thrown ReferenceError)" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP01" "${WORK}/c11.out"
-assert_not_has "C11 counterexample did not fail through an unrelated mechanism" "ML_SMOKE_01_REQUIRED_FAILED REC-TMP01" "${WORK}/c11.out"
+rc="$(run_behavioral "${WORK}/c11" "${WORK}/c11.behavioural.out")"
+assert_has "C11 counterexample actually SKIPPED (not a thrown ReferenceError)" "ML_SMOKE_01_REQUIRED_SKIPPED REC-TMP01" "${WORK}/c11.behavioural.out"
+assert_not_has "C11 counterexample did not fail through an unrelated mechanism" "ML_SMOKE_01_REQUIRED_FAILED REC-TMP01" "${WORK}/c11.behavioural.out"
 
 # ---------------------------------------------------------------------------
 # C12 — no prepared reference must HALT. The oracle must NEVER fall back to
@@ -407,7 +430,7 @@ assert_has "C15 the mode change is a scope violation" "SCOPE_VIOLATION MODE_CHAN
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "--- C16 changed assertion in the allowed file -> FAIL ---"
+echo "--- C16 changed assertion in the allowed file -> FAIL, REJECTED BEFORE EXECUTION ---"
 rm -rf "${WORK}/c16"; cp -R "${WORK}/c02" "${WORK}/c16"
 python3 - "${WORK}/c16/labs/long-horizon-harness/test/recovery/cp-crash.test.ts" <<'PYEOF'
 import sys
@@ -416,25 +439,57 @@ t = open(p).read()
 old = '`REC-TMP01: ${d} must be the freshly created run dir`'
 new = '`REC-TMP01: ${d} must be the freshly created run dir (tampered)`'
 assert old in t, "anchor not found"
+# The EVALUATOR-OWNED EXECUTION SENTINEL.
+#
+# The tampered candidate bytes carry a statement that would CREATE a
+# sentinel file if they were ever EXECUTED. The sentinel path is derived
+# from an environment variable the evaluator sets for the run, so the
+# candidate's bytes cannot name it statically: the bytes only create it if
+# they actually run.
+#
+# The sentinel is the PROOF of non-execution. Elapsed time alone is not a
+# proof: a fast rejection and a fast execution are indistinguishable by
+# elapsed time alone.
+sentinel = ('import { writeFileSync } from "node:fs";\n'
+            'writeFileSync(process.env.FACTORY_EXECUTION_SENTINEL as string, "EXECUTED\\n");\n')
+t = t.replace('import { test, after } from "node:test";', sentinel + 'import { test, after } from "node:test";', 1)
 open(p, "w").write(t.replace(old, new, 1))
 PYEOF
-rc="$(run_oracle "${WORK}/c16" "${WORK}/c16.out")"
-assert_disposition "C16 changed assertion" "FAIL" "1" "${WORK}/c16.out" "${rc}"
-echo ""
-echo "--- C16 changed assertion in the allowed file -> FAIL ---"
-rm -rf "${WORK}/c16"; cp -R "${WORK}/c02" "${WORK}/c16"
-python3 - "${WORK}/c16/labs/long-horizon-harness/test/recovery/cp-crash.test.ts" <<'PYEOF'
-import sys
-p = sys.argv[1]
-t = open(p).read()
-old = '`REC-TMP01: ${d} must be the freshly created run dir`'
-new = '`REC-TMP01: ${d} must be the freshly created run dir (tampered)`'
-assert old in t, "anchor not found"
-open(p, "w").write(t.replace(old, new, 1))
-PYEOF
+export FACTORY_EXECUTION_SENTINEL="${WORK}/c16-sentinel.txt"
+rm -f "${FACTORY_EXECUTION_SENTINEL}"
 rc="$(run_oracle "${WORK}/c16" "${WORK}/c16.out")"
 assert_disposition "C16 changed assertion" "FAIL" "1" "${WORK}/c16.out" "${rc}"
 assert_has "C16 the changed assertion is a scope violation" "SCOPE_VIOLATION CONTENT_OUTSIDE_ALLOWED_REGION" "${WORK}/c16.out"
+assert_has "C16 the gate was NOT executed" "ML_SMOKE_01_GATE_EXECUTED=NO" "${WORK}/c16.out"
+if [ ! -e "${FACTORY_EXECUTION_SENTINEL}" ]; then
+    ok "C16 the EVALUATOR-OWNED SENTINEL was NOT created: the prohibited candidate bytes never executed"
+else
+    bad "C16 the EVALUATOR-OWNED SENTINEL WAS created: the prohibited candidate bytes executed"
+fi
+unset FACTORY_EXECUTION_SENTINEL
+
+# The behavioural probe DOES execute the file, so the sentinel is created
+# there. This proves the sentinel is effective: it is not a sentinel that
+# can never fire.
+rm -rf "${WORK}/c16b"; cp -R "${WORK}/c02" "${WORK}/c16b"
+python3 - "${WORK}/c16b/labs/long-horizon-harness/test/recovery/cp-crash.test.ts" <<'PYEOF'
+import sys
+p = sys.argv[1]
+t = open(p).read()
+sentinel = ('import { writeFileSync } from "node:fs";\n'
+            'writeFileSync(process.env.FACTORY_EXECUTION_SENTINEL as string, "EXECUTED\\n");\n')
+t = t.replace('import { test, after } from "node:test";', sentinel + 'import { test, after } from "node:test";', 1)
+open(p, "w").write(t)
+PYEOF
+export FACTORY_EXECUTION_SENTINEL="${WORK}/c16b-sentinel.txt"
+rm -f "${FACTORY_EXECUTION_SENTINEL}"
+rc="$(run_behavioral "${WORK}/c16b" "${WORK}/c16b.out")"
+if [ -e "${FACTORY_EXECUTION_SENTINEL}" ]; then
+    ok "C16 the sentinel DOES fire when the bytes are executed: it is an effective execution witness"
+else
+    bad "C16 the sentinel did NOT fire in the behavioural probe: it cannot witness execution"
+fi
+unset FACTORY_EXECUTION_SENTINEL
 
 # ---------------------------------------------------------------------------
 # C17 — two CONCURRENT oracle runs on the SAME workspace must both reach the

@@ -17,14 +17,151 @@ an independent, evaluator-owned acceptance oracle.
 | `ml_06a_observations.test.ts` | The evaluator-owned OBSERVATION file for ML-06A. Exercised and reported, but NOT bound to the verdict. |
 | `prepare_ml_06a.sh` | Materializes the ML-06A fixture. NO overlay. Requires a FRESH output directory. |
 | `verify_codium_lab_readonly.sh` | READ-ONLY verification of the dedicated `codium-lab` instance and its control seam. |
+| `ml_02_client.mjs` | The NATIVE control-seam client (the ACTUAL NDJSON protocol over the AF_UNIX socket) and its SIMULATED counterpart. |
+| `ml_02_runner.mjs` | The runner's decision logic: readiness, single-start authority, event collection, quiescence, independent evaluation. |
+| `ml_02_cli.mjs` | The operator-facing CLI: `prepare`, `verify`, `execute`, `evaluate`, `inspect`. |
 
 Regression controls live in `tests/model_lab/`:
 
 | Path | Level | Runtime |
 | --- | --- | --- |
-| `test_ml_smoke_01_lib.mjs` | FAST — synthetic structured events and synthetic trees. No fixture execution. | ~0.9 s |
-| `test_ml_smoke_01_oracle.sh` | FULL QUALIFICATION — executes the real historical fixture end to end. | ~184 s |
-| `test_ml_06a_qualification.sh` | FULL QUALIFICATION — qualifies the ML-06A production-code fixture and scans it for solution leakage. | ~10 s |
+| `test_ml_smoke_01_lib.mjs` | FAST — synthetic structured events and synthetic trees. No fixture execution. | ~1.4 s |
+| `test_ml_02_runner.mjs` | FAST — the REAL client and the REAL runner against the SIMULATED native seam. | ~1.4 s |
+| `test_ml_smoke_01_oracle.sh` | FULL QUALIFICATION — executes the real historical fixture end to end. | ~150 s |
+| `test_ml_06a_qualification.sh` | FULL QUALIFICATION — qualifies the ML-06A production-code fixture and scans it for solution leakage. | ~25 s |
+
+## The runner: ML-02
+
+The runner is the smallest deterministic software that executes ONE
+authorized experiment against ONE qualified fixture. It is deterministic
+software, not an LLM-dependent orchestrator: every decision it makes is a
+pure function over recorded observations, and every step is bounded.
+
+### The five logical capabilities
+
+| Capability | Command | What it does | Inference |
+| --- | --- | --- | --- |
+| Prepare | `prepare --out <dir>` | Materialize the fixture, freeze the experiment identity, record the manifest. | NO |
+| Verify readiness | `verify --seam <dir>` | Establish the seam identity, the protocol version, the extension build identity, and the absence of a conflicting active run. | NO |
+| Execute | `execute --manifest <m> --authorization <a> --seam <dir>` | Execute EXACTLY ONE explicitly authorized experiment. | YES |
+| Evaluate | `evaluate --manifest <m> --seam <dir>` | Collect the deliverable and evaluate it independently. | NO |
+| Inspect | `inspect --bundle <dir>` | Inspect the resulting run bundle. | NO |
+
+### The authority hierarchy
+
+1. The **oracle** (`ml_06a_acceptance_oracle.sh`) is the ONLY authority
+   that may declare a candidate result correct.
+2. The **runner** records observations and binds identities. It never
+   re-implements a verdict.
+3. The **candidate**'s own statement of success is an observation, never
+   an acceptance.
+
+### Execution authorization
+
+`execute` REQUIRES an authorization file bound to the EXACT prepared
+experiment: the file must carry the experiment's `runId` AND its
+`identityDigest`. Without it, `execute` performs ZERO start calls.
+
+Authorization is NOT inferred from an existing API credential, a previous
+authorized experiment, a write token, a mutation-capability
+advertisement, auto-approval, or a model configured in the UI.
+
+### The single-start authority
+
+The runner claims the experiment authorization with an atomic directory
+creation BEFORE it sends the mutating request, and records the attempt
+inside the claim. A second invocation, or a restart of the runner, is
+REFUSED: an uncertain prior attempt stays uncertain until it is reconciled
+through READ-ONLY observations.
+
+### The control seam
+
+The runner speaks the ACTUAL native protocol: NDJSON over the AF_UNIX
+socket, `v: 1`, the read bearer token, the SEPARATE write token for
+mutations, and the operation-specific payload. MCP remains the
+interactive supervision channel; the runner uses the socket directly.
+
+### The operator workflow for a later authorized execution
+
+```bash
+# 1. Prepare (no inference).
+node labs/model-lab/ml_02_cli.mjs prepare --out /tmp/ml02/live-01 --run-id live-01
+
+# 2. Verify readiness (no inference).
+node labs/model-lab/ml_02_cli.mjs verify \
+  --seam "$HOME/.vscodium-lab/cline-data/control-seam" \
+  --workspace /tmp/ml02/live-01/workspace \
+  --extension 4.1.26-821b20e7a
+
+# 3. The operator writes the authorization, bound to the prepared run.
+#    (The operator must open the candidate workspace in codium-lab first.)
+cat > /tmp/ml02/live-01/authorization.json <<'JSON'
+{ "runId": "live-01", "identityDigest": "<the digest printed by prepare>" }
+JSON
+
+# 4. Execute EXACTLY ONE authorized experiment.
+node labs/model-lab/ml_02_cli.mjs execute \
+  --manifest /tmp/ml02/live-01/experiment.json \
+  --authorization /tmp/ml02/live-01/authorization.json \
+  --seam "$HOME/.vscodium-lab/cline-data/control-seam"
+
+# 5. Evaluate independently and inspect the bundle.
+node labs/model-lab/ml_02_cli.mjs evaluate \
+  --manifest /tmp/ml02/live-01/experiment.json \
+  --seam "$HOME/.vscodium-lab/cline-data/control-seam"
+node labs/model-lab/ml_02_cli.mjs inspect --bundle /tmp/ml02/live-01/bundle
+```
+
+## The fixture contract: ML-06A, V1
+
+| Property | Value |
+| --- | --- |
+| Contract version | `ml-06a-contract/v1` |
+| Base commit | `0bd72f4b97486b9b95cbb75e7e384586d03aa22f` |
+| Known good | `5b7508fa09e6f10b6ec683e94a35758a15f9d827` (NOT disclosed to the candidate) |
+| Overlay | none |
+| Allowed production path | `labs/long-horizon-harness/src/subject/subject-json.ts` |
+| Required acceptance tests | nine, evaluator-owned, immutable |
+| Observations | one, non-binding, executed in its own process |
+
+### Candidate dependency and scratch policy
+
+- The candidate receives a **disposable dependency tree** compatible with
+  the fixture's lockfile and toolchain, materialized BEFORE execution.
+- The candidate's dependency tree is **independent** of the evaluator's.
+  The evaluator's reconstruction always receives the evaluator's own tree.
+- There are **no writable symlinks or hardlink aliases** to
+  evaluator-owned dependency files: the evaluator materializes its own
+  disposable COPY.
+- The designated candidate scratch path is the harness's own
+  `labs/long-horizon-harness/.tmp-home`. It is disposable candidate
+  scratch state and does NOT enter the deliverable. It is NOT a blanket
+  exemption for every directory named `node_modules`.
+- **Network package installation is prohibited** for this initial
+  experimental profile. The candidate-visible task says so explicitly.
+
+### Qualification reuse conditions
+
+A qualification identity may be reused ONLY when BOTH the oracle
+implementation identity AND the applicable environment identity are
+unchanged. A reuse must be EXPLICIT and identity-bound. Any reuse that is
+not identity-bound is an undocumented bypass and is refused.
+
+### Experimental limitations
+
+- A separate VSCodium profile is **not a sandbox**. The candidate and
+  the evaluator run as the SAME OS USER on the SAME host. Absence of
+  registered supervisory MCP tools does NOT establish OS-level
+  inaccessibility of the supervisory socket.
+- The initial runner is for **cooperative engineering experiments under a
+  disclosed same-user limitation**. It makes NO claim of adversarially
+  trustworthy evaluation.
+- The 300-second candidate deadline is a **wall-clock** bound enforced
+  by the runner. No provider-enforceable token or financial cap was
+  available; that limitation is recorded explicitly.
+- Provider protocol fidelity is **NOT** established by this ACT. No
+  comparative eligibility is published.
+
 
 ## The two gate levels
 
@@ -50,10 +187,19 @@ controls were moved to their own level, and they remain mandatory.
 
 ## What does not live here yet
 
-There is **no runner** yet. ML-02 will add the minimal single-run executor
-(scope: `qualification/reboot/08-ml02-scope.md`). Until then this directory
-contains only the fixture preparation and the acceptance oracle, and nothing
-can be executed as a model comparison.
+The runner exists but has **NOT** been executed against a model through
+the live native transport. ML-02 delivered the deterministic runner, its
+simulated-seam controls and the corrected oracle authority. The next
+milestone is ONE authorized live ML-06A execution through this runner,
+followed by repeated baseline experiments once provider fidelity and live
+lifecycle qualification are established.
+
+The historical scope proposal `qualification/reboot/08-ml02-scope.md` is
+**SUPERSEDED** by this ACT's implementation. The proposal described the
+D01 smoke fixture, a candidate-transport STUB and a "no commit" rule; it
+never described ML-06A, the live native transport, or the commit-per-ACT
+evidence-locality discipline. The proposal is preserved verbatim as the
+historical record of what was believed at that time.
 
 ## The fixture: ML-SMOKE-01
 

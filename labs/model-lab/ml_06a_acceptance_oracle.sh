@@ -91,8 +91,9 @@ TOOL="${HERE}/ml_smoke_01_tool.mjs"
 REPORTER="${HERE}/ml_smoke_01_test_reporter.mjs"
 ACCEPTANCE_TEST="${HERE}/ml_06a_acceptance.test.ts"
 OBSERVATIONS_TEST="${HERE}/ml_06a_observations.test.ts"
+FAILCLOSED="${HERE}/ml_failclosed.mjs"
 
-if [ ! -f "${TOOL}" ] || [ ! -f "${ACCEPTANCE_TEST}" ] || [ ! -f "${OBSERVATIONS_TEST}" ] || [ ! -f "${REPORTER}" ]; then
+if [ ! -f "${TOOL}" ] || [ ! -f "${ACCEPTANCE_TEST}" ] || [ ! -f "${OBSERVATIONS_TEST}" ] || [ ! -f "${REPORTER}" ] || [ ! -f "${FAILCLOSED}" ]; then
     echo "ML_06A_ERROR=oracle_components_missing" >&2
     echo "ML_06A_DISPOSITION=HALT"
     exit 2
@@ -139,8 +140,13 @@ echo "ML_06A_REFERENCE_KIND=PREPARED_DIR"
 # Step 1 — reference identity, against the SUPERVISOR'S expected digest.
 # ---------------------------------------------------------------------------
 
-reference_digest="$("${NODE_BIN}" "${TOOL}" digest "${prepared_dir}" 2>/dev/null | head -1)"
-if [ -z "${reference_digest}" ]; then
+"${NODE_BIN}" "${TOOL}" digest "${prepared_dir}" > "${work_dir}/reference.digest" 2>"${work_dir}/reference.digest.err"
+reference_digest_status=$?
+reference_digest="$(head -1 "${work_dir}/reference.digest" 2>/dev/null)"
+if [ "${reference_digest_status}" -ne 0 ] || [ -z "${reference_digest}" ]; then
+    # The digest computation FAILED. An empty digest must never reach the
+    # comparison below: the empty string is not a valid digest, and a
+    # comparison against it would be a comparison against nothing.
     echo "ML_06A_REFERENCE_IDENTITY=INVALID"
     echo "ML_06A_ERROR=reference_digest_uncomputable" >&2
     echo "ML_06A_DISPOSITION=HALT"
@@ -160,14 +166,31 @@ echo "ML_06A_REFERENCE_IDENTITY=VALID"
 # Step 2 — scope enforcement against the evaluator-owned reference.
 # ---------------------------------------------------------------------------
 
-scope_report="$("${NODE_BIN}" "${TOOL}" scope "${prepared_dir}" "${workspace}" "${ALLOWED_PATH}" 2>/dev/null)"
-scope_error="$("${NODE_BIN}" "${TOOL}" scope-error "${scope_report}" 2>/dev/null)"
-if [ -n "${scope_error}" ]; then
-    echo "ML_06A_SCOPE_ERROR=${scope_error}"
+# FAIL-CLOSED SCOPE INSPECTION.
+#
+# The scope-tool invocation MUST succeed, MUST produce a VALID STRUCTURED
+# response, and MUST report a VALID NONNEGATIVE violation count. A missing,
+# malformed or failed inspection result HALTs.
+"${NODE_BIN}" "${FAILCLOSED}" scope "${TOOL}" "${prepared_dir}" "${workspace}" "${ALLOWED_PATH}" \
+    > "${work_dir}/scope.fc" 2>"${work_dir}/scope.fc.err"
+scope_fc_status=$?
+scope_fc_state="$(grep -a '^FC_STATUS=' "${work_dir}/scope.fc" 2>/dev/null | tail -1 | cut -d= -f2-)"
+scope_fc_error="$(grep -a '^FC_ERROR=' "${work_dir}/scope.fc" 2>/dev/null | tail -1 | cut -d= -f2-)"
+scope_error="$(grep -a '^FC_ERROR_CODE=' "${work_dir}/scope.fc" 2>/dev/null | tail -1 | cut -d= -f2-)"
+if [ "${scope_fc_status}" -ne 0 ] || [ "${scope_fc_state}" != "OK" ]; then
+    echo "ML_06A_SCOPE_ERROR=${scope_error:-scope_inspection_failed}"
+    echo "ML_06A_SCOPE_INSPECTION=${scope_fc_state:-FAILED}"
+    echo "ML_06A_SCOPE_INSPECTION_ERROR=${scope_fc_error:-unknown}"
     echo "ML_06A_DISPOSITION=HALT"
     exit 2
 fi
-scope_violations="$("${NODE_BIN}" "${TOOL}" scope-violations "${scope_report}" 2>/dev/null)"
+scope_violations="$(grep -a '^FC_VIOLATIONS=' "${work_dir}/scope.fc" | tail -1 | cut -d= -f2-)"
+scope_report="$(grep -a '^FC_OUTPUT=' "${work_dir}/scope.fc" | tail -1 | cut -d= -f2-)"
+if ! printf '%s' "${scope_violations}" | grep -aqE '^[0-9]+$'; then
+    echo "ML_06A_SCOPE_ERROR=scope_violation_count_invalid"
+    echo "ML_06A_DISPOSITION=HALT"
+    exit 2
+fi
 printf '%s' "${scope_report}" | "${NODE_BIN}" "${TOOL}" scope-lines 2>/dev/null
 
 # Did the candidate actually change the allowed file?
@@ -331,20 +354,28 @@ echo "ML_06A_OBSERVATION_PROCESS_EXIT=${observe_exit}"
 # completion record, and the classifier RECONCILES it against the
 # observed records. A missing test file, a truncated stream and a
 # contradictory completion record are all rejected.
-classify_report="$("${NODE_BIN}" "${TOOL}" classify "${work_dir}/gate.jsonl" 2>/dev/null)"
-for kv in ${classify_report}; do
-    echo "ML_06A_GATE_${kv}"
-done
-# The `classify` command prints KEY=VALUE lines, not a JSON object, so the
-# counts are read out of those lines directly.
+classify_report="$("${NODE_BIN}" "${FAILCLOSED}" json "${TOOL}" classify-json "${work_dir}/gate.jsonl" 2>/dev/null)"
+classify_status=$?
+if [ "${classify_status}" -ne 0 ]; then
+    # The CLASSIFICATION FAILED. The evaluator cannot classify the gate's
+    # own event stream: this is an EVALUATOR-side failure, not a
+    # candidate verdict.
+    echo "ML_06A_ERROR=gate_classification_failed" >&2
+    echo "ML_06A_DISPOSITION=HALT"
+    exit 2
+fi
+classify_payload="$(printf '%s' "${classify_report}" | grep -a '^FC_OUTPUT=' | tail -1 | cut -d= -f2-)"
 classify_value() {
-    printf '%s\n' "${classify_report}" | grep -a "^$1=" | tail -1 | cut -d= -f2-
+    "${NODE_BIN}" "${TOOL}" field "${classify_payload}" "$1"
 }
-echo "ML_06A_ACCEPTANCE_TESTS_PASSED=$(classify_value PASSED)"
-echo "ML_06A_ACCEPTANCE_TESTS_FAILED=$(classify_value FAILED)"
-echo "ML_06A_ACCEPTANCE_TESTS_SKIPPED=$(classify_value SKIPPED)"
-echo "ML_06A_ACCEPTANCE_TESTS_TODO=$(classify_value TODO)"
-echo "ML_06A_ACCEPTANCE_TESTS_CANCELLED=$(classify_value CANCELLED)"
+echo "ML_06A_ACCEPTANCE_TESTS_PASSED=$(classify_value counts.passed)"
+echo "ML_06A_ACCEPTANCE_TESTS_FAILED=$(classify_value counts.failed)"
+echo "ML_06A_ACCEPTANCE_TESTS_SKIPPED=$(classify_value counts.skipped)"
+echo "ML_06A_ACCEPTANCE_TESTS_TODO=$(classify_value counts.todo)"
+echo "ML_06A_ACCEPTANCE_TESTS_CANCELLED=$(classify_value counts.cancelled)"
+echo "ML_06A_GATE_STREAM_COMPLETE=$(classify_value complete)"
+echo "ML_06A_GATE_STREAM_ERROR=$(classify_value error)"
+echo "ML_06A_GATE_STREAM_COMPLETE_REASONS=$(classify_value completeReasons)"
 
 # The acceptance decision is bound to the EXACT identity of every
 # required test: all nine must be PRESENT, EXECUTED and PASSING.
@@ -352,19 +383,33 @@ echo "ML_06A_ACCEPTANCE_TESTS_CANCELLED=$(classify_value CANCELLED)"
 # The OBSERVATIONS are exercised and reported, but they are NOT bound to
 # the verdict: each one describes a behaviour the task prompt never
 # states, and requiring it would impose a hidden requirement.
-accept_report="$("${NODE_BIN}" "${TOOL}" accept-ml06a "${work_dir}/gate.jsonl" "${gate_exit}" 2>/dev/null)"
-required_present="$("${NODE_BIN}" "${TOOL}" field "${accept_report}" present)"
-required_executed="$("${NODE_BIN}" "${TOOL}" field "${accept_report}" executed)"
-acceptance="$("${NODE_BIN}" "${TOOL}" field "${accept_report}" acceptance)"
-printf '%s' "${accept_report}" | "${NODE_BIN}" "${TOOL}" reasons 2>/dev/null | sed 's/^/ML_06A_REQUIRED_/'
+accept_report="$("${NODE_BIN}" "${FAILCLOSED}" json "${TOOL}" accept-ml06a "${work_dir}/gate.jsonl" "${gate_exit}" 2>/dev/null)"
+accept_status=$?
+if [ "${accept_status}" -ne 0 ]; then
+    echo "ML_06A_ERROR=acceptance_classification_failed" >&2
+    echo "ML_06A_DISPOSITION=HALT"
+    exit 2
+fi
+accept_payload="$(printf '%s' "${accept_report}" | grep -a '^FC_OUTPUT=' | tail -1 | cut -d= -f2-)"
+required_present="$("${NODE_BIN}" "${TOOL}" field "${accept_payload}" present)"
+required_executed="$("${NODE_BIN}" "${TOOL}" field "${accept_payload}" executed)"
+acceptance="$("${NODE_BIN}" "${TOOL}" field "${accept_payload}" acceptance)"
+printf '%s' "${accept_payload}" | "${NODE_BIN}" "${TOOL}" reasons 2>/dev/null | sed 's/^/ML_06A_REQUIRED_/'
 echo "ML_06A_REQUIRED_TESTS_PRESENT=$( [ "${required_present}" = "true" ] && echo YES || echo NO )"
 echo "ML_06A_REQUIRED_TESTS_EXECUTED=${required_executed}/9"
 
 # The OBSERVATIONS' own outcomes.
-observe_report="$("${NODE_BIN}" "${TOOL}" observe-ml06a "${work_dir}/observe.jsonl" 2>/dev/null)"
-printf '%s' "${observe_report}" | "${NODE_BIN}" "${TOOL}" reasons 2>/dev/null | sed 's/^/ML_06A_OBSERVATION_/'
+observe_report="$("${NODE_BIN}" "${FAILCLOSED}" json "${TOOL}" observe-ml06a "${work_dir}/observe.jsonl" 2>/dev/null)"
+observe_status=$?
+if [ "${observe_status}" -ne 0 ]; then
+    echo "ML_06A_ERROR=observation_classification_failed" >&2
+    echo "ML_06A_DISPOSITION=HALT"
+    exit 2
+fi
+observe_payload="$(printf '%s' "${observe_report}" | grep -a '^FC_OUTPUT=' | tail -1 | cut -d= -f2-)"
+printf '%s' "${observe_payload}" | "${NODE_BIN}" "${TOOL}" reasons 2>/dev/null | sed 's/^/ML_06A_OBSERVATION_/'
 for label in ML06A-OBS-01; do
-    status="$(printf '%s' "${observe_report}" | "${NODE_BIN}" "${TOOL}" observation-status "${label}" 2>/dev/null)"
+    status="$("${NODE_BIN}" "${TOOL}" observation-status "${observe_payload}" "${label}" 2>/dev/null)"
     echo "ML_06A_OBSERVATION_${label}=${status:-ABSENT}"
 done
 echo "ML_06A_ACCEPTANCE=${acceptance}"
