@@ -1,0 +1,24 @@
+{
+  "act": "ACT-FACTORY-LIVE-SMOKE-01B",
+  "continuation_of": "ACT-FACTORY-LIVE-SMOKE-01",
+  "date": "2026-11-25",
+  "entry_head": "df77c61a8daa15dadfc1424054b3edb37436cb40",
+  "entry_branch": "main",
+  "expected_head": "df77c61a8daa15dadfc1424054b3edb37436cb40",
+  "expected_head_match": true,
+  "worktrees": "worktree /Volumes/UserData/Users/chistyakov/Projects/SPbNIX/factory\nHEAD df77c61a8daa15dadfc1424054b3edb37436cb40\nbranch refs/heads/main",
+  "linked_worktrees": 0,
+  "detached_count": 0,
+  "main_worktrees": 1,
+  "predecessor_disposition": "BLOCKED_PREFLIGHT",
+  "predecessor_report_preserved": "qualification/live-smoke-01/ (unchanged; NOT rewritten)",
+  "frozen_substrates_preserved": [
+    "qualification/lh07/ (unchanged)",
+    "qualification/lh07-duty-corpus.json (unchanged)",
+    "qualification/reboot/ (unchanged)",
+    "qualification/reboot-corr01/ (unchanged, including superseded/d01_acceptance_oracle.sh)",
+    "qualification/reboot-corr02/ (unchanged)",
+    "qualification/live-smoke-01/ (unchanged — the predecessor's evidence)"
+  ],
+  "no_commit_no_push": true
+}

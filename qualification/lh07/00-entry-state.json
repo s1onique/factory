@@ -1,0 +1,42 @@
+{
+  "schema": "lh07.entry-state/v1",
+  "act": "ACT-FACTORY-LONG-HORIZON-LAB-LH07-REAL-HARNESS-PRODUCTION-DUTY-QUALIFICATION01",
+  "captured_at_iso": "2026-09-22T09:10:00Z",
+  "entry_head_sha256": "df77c61a8daa15dadfc1424054b3edb37436cb40",
+  "git": {
+    "branch": "main",
+    "head": "df77c61a8daa15dadfc1424054b3edb37436cb40",
+    "worktree_count": 1,
+    "linked_worktree_count": 0,
+    "detached_count": 0,
+    "status_short": ""
+  },
+  "frozen_substrates": {
+    "phase_e_head": "61b0979ebba52e391e1408561fb2c20a79d28af7",
+    "phase_e_changed": false,
+    "lh_02_head": "715e6390d78228f089270259e1bd1307140adb75",
+    "lh_02_changed": false,
+    "lh_03_frozen_commit": "7be31164b939f327c557847eb9a8b0c4ffd16b87",
+    "lh_04_frozen_commit": "a8caa82655ca6036bc40a43be5000bdda5bb84bf",
+    "lh_05_corpus_commit": "c898f05ccb1966c5074f6483bad106b3d093b169",
+    "lh_06_frozen_commit": "5d4c9d258446cba1b018ab689433bafe162feefb",
+    "lh_06_frozen_record": "qualification/lh06-frozen.json",
+    "all_changed": false
+  },
+  "verifier_outputs": {
+    "verify_worktree_policy": {
+      "main_count": 1,
+      "linked_count": 0,
+      "detached_count": 0,
+      "branch": "refs/heads/main",
+      "disposition": "OK"
+    },
+    "verify_lh03_frozen": "OK",
+    "verify_lh04_frozen": "OK",
+    "verify_lh05_frozen": "OK",
+    "verify_lh06_frozen": "OK",
+    "verify_factory": "OK",
+    "check_links": "PASS"
+  },
+  "ready_for_lh07": true
+}

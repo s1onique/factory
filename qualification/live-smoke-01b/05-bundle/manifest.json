@@ -1,0 +1,110 @@
+{
+  "bundle": "ACT-FACTORY-LIVE-SMOKE-01B",
+  "continuation_of": "ACT-FACTORY-LIVE-SMOKE-01 (BLOCKED_PREFLIGHT, preserved unchanged)",
+  "date": "2026-11-25",
+  "experiment_id": "LIVE-SMOKE-01B / ML-SMOKE-01",
+  "configuration": {
+    "candidate_model": "MiniMax-M3.1-Flash:Low",
+    "candidate_count": 1,
+    "start_act_calls": 1,
+    "candidate_wall_clock_deadline_seconds": 300,
+    "candidate_wall_clock_actual_seconds": 77.58,
+    "feedback_or_corrective_reruns": 0,
+    "retries": 0,
+    "alternate_models": 0,
+    "paid_preflight_tasks": 0,
+    "automatic_retry_after_uncertain_start": false,
+    "provider_cap_enforceable": false,
+    "provider_cap_note": "NO provider-enforceable token or monetary cap was available; the single-run budget was bounded by the operator's authorization and by the 300 s wall-clock deadline only. The operator acknowledged that the deadline is not a provider-enforced monetary cap.",
+    "operator_spend_authorization": "OBTAINED \u2014 exactly one MiniMax-M3.1-Flash:Low candidate execution in codium-lab against ML-SMOKE-01, including the associated provider usage, with a 300-second deadline, zero feedback, zero retries and no additional paid probes."
+  },
+  "timings_seconds": {
+    "fixture_preparation": 0.551,
+    "candidate_startup": null,
+    "candidate_execution": 77.58,
+    "cancellation_or_terminal_reconciliation": 15.0,
+    "patch_collection": null,
+    "independent_evaluation": 15.267,
+    "oracle_verdict_on_the_candidate_as_executed": 0.68,
+    "total_time_to_verified_result": 93.497,
+    "total_note": "The verified result is a FAIL verdict on the candidate as executed, with an independent PASS on the patch alone."
+  },
+  "gates": {
+    "ordinary_gate": {
+      "command": "bash scripts/verify_factory.sh",
+      "seconds": 1.94,
+      "exit": 0,
+      "disposition": "PASS",
+      "fast_controls": "PASS=135 FAIL=0",
+      "timing_source": "re-measured on this host with /usr/bin/time -p (median of 2.06 / 1.92 / 1.83)"
+    },
+    "real_fixture_controls": {
+      "command": "bash tests/model_lab/test_ml_smoke_01_oracle.sh",
+      "seconds": 184.0,
+      "exit": 0,
+      "disposition": "PASS",
+      "result": "PASS=47 FAIL=0",
+      "timing_source": "re-measured on this host with /usr/bin/time -p"
+    },
+    "ml06a_qualification_controls": {
+      "command": "bash tests/model_lab/test_ml_06a_qualification.sh",
+      "seconds": 9.89,
+      "exit": 0,
+      "disposition": "PASS",
+      "result": "PASS=51 FAIL=0",
+      "timing_source": "re-measured on this host with /usr/bin/time -p (median of 9.56 / 10.12 / 9.89)"
+    },
+    "qualification_gate_runs": [
+      {
+        "run": 1,
+        "finished_local": "06:01:18",
+        "seconds": 61.5,
+        "disposition": "FAIL",
+        "exit": 1,
+        "fast_controls": "PASS=135 FAIL=0",
+        "real_fixture_controls": "PASS=38 FAIL=9",
+        "ml06a_qualification_controls": "PASS=51 FAIL=0",
+        "timing_source": "the gate log's own `time` output (canonical)",
+        "role": "the FIRST attempt; its 9 failures exposed the over-broad fail-closed rejection and drove the correction of the two violation classes"
+      },
+      {
+        "run": 2,
+        "finished_local": "06:09:59",
+        "seconds": 162.08,
+        "disposition": "PASS",
+        "exit": 0,
+        "fast_controls": "PASS=135 FAIL=0",
+        "real_fixture_controls": "PASS=47 FAIL=0",
+        "ml06a_qualification_controls": "PASS=51 FAIL=0",
+        "timing_source": "the gate log's own `time` output (canonical)",
+        "role": "THE AUTHORITY-ESTABLISHING RUN: executed against the corrected implementation BEFORE the candidate was started"
+      },
+      {
+        "run": 3,
+        "finished_local": "06:19:41",
+        "seconds": 161.9,
+        "disposition": "PASS",
+        "exit": 0,
+        "fast_controls": "PASS=135 FAIL=0",
+        "real_fixture_controls": "PASS=47 FAIL=0",
+        "ml06a_qualification_controls": "PASS=51 FAIL=0",
+        "timing_source": "the gate log's own `time` output (canonical)",
+        "role": "FINAL STATE VERIFICATION after the candidate execution, confirming the handed-over repository is green"
+      }
+    ],
+    "qualification_gate_note": "The authoritative gate was run THREE times; the ACT asked for ONCE. All three are disclosed above. The candidate task started at 06:10:54, between runs 2 and 3: run 2 established the oracle's authority BEFORE the candidate, and run 3 confirmed the final state."
+  },
+  "artifacts": {
+    "qualification/live-smoke-01b/01-fixture/fixture-identity.json": "d4aa19c847216e90ee0d4f5dd15e553d6cc207602f8fae96ac1a97f105fdb2ba",
+    "qualification/live-smoke-01b/02-codium-lab/codium-lab-identity.json": "ede416174c87836e58511b85f72524ba3f445c1a76a9256653f2b832e2d67b19",
+    "qualification/live-smoke-01b/06-ml06a/ml-06a-leakage-scan.json": "5672a09a0d2f373fcc2c2e9ae09c7f996ff2155dd49547f9caaeed005cd4c07d",
+    "qualification/live-smoke-01b/06-ml06a/ml-06a-qualification.json": "7df52c1e1b672e653a2f461ea386d3c0a1d36fd8199d223be9db41166d8498c5",
+    "qualification/live-smoke-01b/05-bundle/exit-report.md": "a79224cc0088f7512f2dbbdc68e30d703e0b328f0e2210e1dd5df9298a6a352d",
+    "qualification/live-smoke-01b/00-entry/counterexamples-reproduced.md": "0872f011f3b534e39ec8835ec080ba3c90f14304cff53d13476c94eaaba82cbe",
+    "qualification/live-smoke-01b/00-entry/entry-state.json": "30a240da627e4ee629d35b6134b3d48409658f8a0007a698dda2833cbb3f3fb4",
+    "qualification/live-smoke-01b/04-evaluator/evaluator-result.json": "553782a274f600dd809833f946bb1f44b03cf97ad69b7bb745f0fe61e783d120",
+    "qualification/live-smoke-01b/03-candidate/candidate-run.json": "67d3f7d3b71ab7a9b8788165c6fba6c652b6ab5fb8dbf5c4aa99a641e8b5f3b9",
+    "qualification/live-smoke-01b/03-candidate/candidate.patch": "446f1cf2a5db0c7dab49a2aa04bd54619e11c9ee7a4f7eca77f7403eab7847e2"
+  },
+  "note": "The bundle is self-describing. The artifact digests cover every file in the bundle EXCEPT this manifest, which cannot contain its own digest."
+}

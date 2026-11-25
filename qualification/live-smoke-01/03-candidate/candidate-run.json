@@ -1,0 +1,18 @@
+{
+  "candidate_start_count": 0,
+  "candidate_task_started": false,
+  "reason": "WORKSPACE_BINDING was BLOCKED before the candidate task start, so the ACT's single-run budget was never entered",
+  "provider_usage": "NONE \u2014 no inference was initiated, no tokens were spent",
+  "terminal_state": "NOT_STARTED",
+  "patch": null,
+  "patch_sha256": null,
+  "events_collected": [],
+  "events_omitted": "not applicable \u2014 no candidate task existed",
+  "usage_metrics": {
+    "tokens": "UNAVAILABLE \u2014 the native event surface was never entered",
+    "cost": "UNAVAILABLE \u2014 no provider usage",
+    "ttft": "UNAVAILABLE \u2014 no provider usage",
+    "generation_throughput": "UNAVAILABLE \u2014 no provider usage"
+  },
+  "note": "the only task that was ever started in this ACT was the WORKSPACE-BINDING PROBE (session 1795572934352_z1xru), which ran in the SDK's chat-fallback workspace, never touched the candidate workspace, and was cancelled. It is NOT a candidate run and it is not reported as one."
+}

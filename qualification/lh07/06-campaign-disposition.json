@@ -1,0 +1,40 @@
+{
+  "schema": "lh07.campaign-disposition/v1",
+  "captured_at_iso": "2026-09-22T09:15:00Z",
+  "phase": "DETERMINISTIC_PREFLIGHT_COMPLETE",
+  "preflight_gates": {
+    "entry_state_canonical": true,
+    "worktree_policy_ok": true,
+    "phase_e_changed": false,
+    "lh_02_changed": false,
+    "lh_03_changed": false,
+    "lh_04_changed": false,
+    "lh_05_changed": false,
+    "lh_06_changed": false,
+    "candidate_discovery_bound": true,
+    "auth_readiness_present": true,
+    "protocol_selection_locked": true,
+    "model_parity_eligible": true,
+    "duty_corpus_frozen": true,
+    "duty_count": 6
+  },
+  "deterministic_setup_completed": [
+    "F. duty corpus frozen at qualification/lh07-duty-corpus.json (6 duties)",
+    "G. candidate discovery bound at qualification/lh07/01-candidate-discovery.json",
+    "H. auth readiness recorded at qualification/lh07/02-auth-readiness.json",
+    "I. protocols locked at qualification/lh07/03-protocol-selection.json",
+    "J. model parity recorded at qualification/lh07/04-model-parity.json (lane B ELIGIBLE)",
+    "K. duty-corpus proposal recorded at qualification/lh07/05-duty-corpus-proposal.md"
+  ],
+  "live_campaign_phase": "HALTED_AT_BUDGET_AUTHORIZATION_BOUNDARY",
+  "halt_disposition": "HALT_BUDGET",
+  "halt_rationale": "The full live campaign (24 production-duty runs + 4 probes = 28 harness invocations of a paid LLM provider) requires explicit user authorization of model/API spend. The single MiniMax API key present in the local secrets store belongs to the user, not to the ACT operator. Per ACT §71 (HALT_BUDGET not candidate failure) and §89 (truthful halt disposition), the deterministic preflight is preserved as authoritative evidence and the live campaign is paused at the budget-authorization boundary. Discovery-time probes already consumed tokens; further runs would compound spend without authorization.",
+  "halt_truthfully_recorded_negative_evidence": [
+    "Token consumption in two discovery probes already observed (Pi ~1.6k tokens, ClineMM ~2.9k tokens); a full 28-invocation campaign would consume orders of magnitude more.",
+    "No upstream Cline substitution occurred; upstream Cline was recorded only as DISCOVERY_REFERENCE per ACT §38.",
+    "Candidate self-report remains observation only; no RUN_SUCCEEDED was emitted from harness self-report during this ACT."
+  ],
+  "live_run_count_planned": 24,
+  "live_run_count_executed": 0,
+  "next_action_required_for_resumption": "Operator (the human user) must explicitly authorize the live campaign budget (token spend / wall-clock budget) before any D01..D06 harness invocation. Once authorized, resume at step C (secret canary live capture) of ACT §87."
+}

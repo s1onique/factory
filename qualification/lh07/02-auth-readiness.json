@@ -1,0 +1,33 @@
+{
+  "schema": "lh07.auth-readiness/v1",
+  "captured_at_iso": "2026-09-22T09:10:00Z",
+  "secret_disclosure_policy": "presence-only; values never recorded",
+  "candidates": [
+    {
+      "candidate": "PI",
+      "auth_disposition": "AUTH_READY",
+      "credentials_present": true,
+      "credential_storage": "MINIMAX_API_KEY env var at run time",
+      "credential_source": "factory-local secrets store (read at preflight)",
+      "credential_value_present": true,
+      "credential_format_first_chars": "sk-cp-",
+      "credential_format_redacted": true,
+      "auth_probe_outcome": "PASS",
+      "auth_probe_summary": "Pi --mode json -p 'say hello' against provider=minimax, model=MiniMax-M3 emitted session header + assistant message_end with provider/minimax and model/MiniMax-M3.",
+      "no_secret_in_durable_evidence_at_probe": true
+    },
+    {
+      "candidate": "CLINEMM",
+      "auth_disposition": "AUTH_READY",
+      "credentials_present": true,
+      "credential_storage": "MINIMAX_API_KEY env var at run time",
+      "credential_source": "factory-local secrets store (read at preflight)",
+      "credential_value_present": true,
+      "credential_format_first_chars": "sk-cp-",
+      "credential_format_redacted": true,
+      "auth_probe_outcome": "PASS",
+      "auth_probe_summary": "ClineMM --provider minimax --model MiniMax-M3 --json emitted agent_event envelope with model.id=MiniMax-M3, model.provider=minimax, usage.inputTokens, usage.outputTokens, usage.totalCost.",
+      "no_secret_in_durable_evidence_at_probe": true
+    }
+  ]
+}

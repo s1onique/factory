@@ -1,0 +1,23 @@
+{
+  "schema": "lh07.protocol-selection/v1",
+  "captured_at_iso": "2026-09-22T09:10:00Z",
+  "selection_policy": "Frozen before any production duty run. No mid-campaign switching.",
+  "selections": [
+    {
+      "candidate": "PI",
+      "protocol": "JSON_EVENTS",
+      "invocation_form": "pi --mode json -p <prompt>",
+      "rationale": "Native JSONL envelope (session/agent_start/turn_start/message_*/turn_end/agent_end/agent_settled) is the highest-fidelity protocol offered by Pi and was used by LH-03's frozen adapter. RPC is bidirectional but unnecessary for bounded production duties.",
+      "alternate_considered": "RPC (not chosen; not required)",
+      "switch_mid_campaign_allowed": false
+    },
+    {
+      "candidate": "CLINEMM",
+      "protocol": "JSON_EVENT_STREAM",
+      "invocation_form": "cline --json -y --auto-approve true --cwd <root> --data-dir <isolated> --provider minimax --model MiniMax-M3 <prompt>",
+      "rationale": "ClineMM's --json flag emits a JSON event stream (agent_event envelope) with structured iteration_start/content_start/content_end/usage/tool/done events plus a final run_result block. This is the closest analogue to Pi's JSON_EVENTS and the path with the highest-fidelity tool/usage evidence.",
+      "alternate_considered": "ACP (not chosen; not part of LH-03 contract for this candidate)",
+      "switch_mid_campaign_allowed": false
+    }
+  ]
+}

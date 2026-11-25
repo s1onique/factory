@@ -1,0 +1,88 @@
+{
+  "fixture_id": "ML-06A",
+  "role": "FIRST_SOLUTION_BLIND_PRODUCTION_CODE_FIXTURE",
+  "status": "QUALIFIED",
+  "executed_against_a_model": false,
+  "base_commit": "0bd72f4b97486b9b95cbb75e7e384586d03aa22f",
+  "known_good_commit": "5b7508fa09e6f10b6ec683e94a35758a15f9d827",
+  "identities_confirmed_against_actual_history": {
+    "base_is_a_real_commit": true,
+    "known_good_is_a_real_commit": true,
+    "known_good_is_an_ancestor_of_HEAD": true,
+    "base_is_an_ancestor_of_known_good": true,
+    "relationship": "0bd72f4 -> 9d54d62 -> 5b7508f (the known-good revision is the known-bad revision's direct descendant through 'Add a torch :)')"
+  },
+  "overlay": "NONE \u2014 the base commit already carries the defect, so no preparation overlay is applied and the fixture is the base commit's tree verbatim.",
+  "allowed_path": "labs/long-horizon-harness/src/subject/subject-json.ts",
+  "allowed_path_policy": "The ENTIRE file stays editable. The fixture does NOT impose the historical patch's implementation shape, and does NOT restrict the edit to a sub-region.",
+  "forbidden_paths": [
+    "labs/long-horizon-harness/src/** (except the allowed path)",
+    "labs/long-horizon-harness/test/**",
+    "labs/long-horizon-harness/lifecycle-corpus/**"
+  ],
+  "evaluator_tests": {
+    "acceptance": "labs/model-lab/ml_06a_acceptance.test.ts",
+    "observations": "labs/model-lab/ml_06a_observations.test.ts",
+    "immutable": true,
+    "inside_candidate_authority": false,
+    "note": "Both files live BESIDE the oracle, never inside the fixture. The evaluator COPIES them into its own reconstruction; they are never present in the candidate's workspace."
+  },
+  "fixture_digest": "62d3e75a2ba415b2049e7735e8eca08461b9bd4e42191bc8a4f28c0ff5906787",
+  "task_prompt_sha256": "a61875c5b4f7a54643927de5f8548b94cf4045d5e132afddae8c2b0cd3f7a5c5",
+  "task_prompt": "The subject-manifest trust boundary rejects some manifests that are perfectly legal.\n\nA manifest may legitimately reuse the SAME nested object in more than one place \u2014 for example a configuration that references one shared options object from two different sections. Today such a manifest is refused with a \"cyclic value is not a JsonValue\" error, even though it contains no cycle at all.\n\nA manifest that genuinely contains a recursive back-edge (an object that contains itself, directly or indirectly) must still be refused.\n\nFix the validator so that only true recursive back-edges are refused. Do not change any test file.\n",
+  "task_prompt_solution_blindness": "The prompt names the SYMPTOM (a legal manifest is refused with a 'cyclic value' error) and the required OUTCOME (only true recursive back-edges are refused). It does NOT name WeakSet, Set, recursion stacks, ancestors, try/finally, or any data structure.",
+  "required_acceptance_tests": [
+    "ML06A-01: an ordinary JSON tree is accepted",
+    "ML06A-02: shared sibling OBJECTS are accepted",
+    "ML06A-03: shared sibling ARRAYS are accepted",
+    "ML06A-04: shared substructure at DIFFERENT DEPTHS is accepted",
+    "ML06A-05: a DIRECT cycle is rejected",
+    "ML06A-06: an INDIRECT cycle is rejected",
+    "ML06A-07: a cycle WITHIN shared substructure is rejected",
+    "ML06A-08: the existing invalid-value behaviour is preserved",
+    "ML06A-10: the input is not reshaped and the returned value is the SAME reference"
+  ],
+  "observations": [
+    {
+      "label": "ML06A-OBS-01",
+      "name": "the validator never throws on hostile input",
+      "bound_to_the_verdict": false,
+      "why": "The known-bad revision violates its OWN documented 'NEVER throws' contract on hostile Proxy input. The task prompt does not state this requirement, so requiring it would impose a HIDDEN requirement. The observation is EXERCISED and REPORTED, in its OWN file and its OWN process, so it cannot affect the acceptance verdict."
+    }
+  ],
+  "controls": {
+    "command": "bash tests/model_lab/test_ml_06a_qualification.sh",
+    "result": "PASS=51 FAIL=0",
+    "M01_known_bad_fails_for_the_intended_behavioral_reason": "PASS \u2014 ML06A-02, ML06A-03 and ML06A-04 fail (the shared-substructure assertions); ML06A-01, ML06A-05, ML06A-06, ML06A-07 and ML06A-08 PASS (the ordinary tree, the three cycle rejections and the invalid-value behaviour are intact). The failure is the DEFECT, not a broken harness.",
+    "M02_known_good_passes": "PASS \u2014 DISPOSITION=PASS, exit 0, 9/9 required tests executed and present, 0 failed.",
+    "M03_a_differently_shaped_candidate_fix_passes": "PASS \u2014 a recursion-path ARRAY (pushed on entry, popped on exit) with an extracted helper function, materially different from the known-good revision's Set-with-try/finally, is ACCEPTED. The historical patch's shape is therefore NOT required.",
+    "M04_unauthorized_patch_rejected_before_execution": "PASS \u2014 GATE_EXECUTED=NO, 0 s, DISPOSITION=FAIL.",
+    "M05_unchanged_allowed_file_is_not_an_acceptance": "PASS",
+    "M06_no_prepared_reference_halts": "PASS",
+    "M07_wrong_expected_digest_halts": "PASS",
+    "M08_invalid_base_commit_halts": "PASS",
+    "M09_solution_leakage_scan": "PASS (see ml-06a-leakage-scan.json)",
+    "M10_fresh_output_directory": "PASS"
+  },
+  "durations_seconds": {
+    "ml06a_qualification_controls_total": 9.89,
+    "known_good_acceptance_run": 1.1,
+    "known_bad_acceptance_run": 1.0,
+    "unauthorized_rejection": 0.7,
+    "authoritative_qualification_gate_total": 162.08,
+    "authoritative_qualification_gate_note": "The authoritative gate was run three times in this ACT (the ACT asked for once): 61.50 s (FAIL, 9 controls), 162.08 s (PASS, before the candidate), 161.90 s (PASS, final state verification). This value is the authority-establishing run."
+  },
+  "evaluator_identity": {
+    "labs/model-lab/ml_06a_acceptance_oracle.sh": "534364bb1735de595b8c4670975a4cf207440c6b20d0e309c20410a4b0714f2c",
+    "labs/model-lab/ml_06a_acceptance.test.ts": "85a1ca886fdcb3587b03818a19bd58084509a503a66f5624a30b7643a91a1db6",
+    "labs/model-lab/ml_06a_observations.test.ts": "fcf0ff934068f3ed1e5894605c684b242c4c669becbbd9771e2ab850933d9d42",
+    "labs/model-lab/prepare_ml_06a.sh": "92725420dc855ce93a45b06de685f82f948d7c09a88793100df540f9e2a83ffa",
+    "tests/model_lab/test_ml_06a_qualification.sh": "194b8536fdfb7f7565b8b45f5c44aafaab1e77a2539c969897530deb0e77b85d"
+  },
+  "explicit_non_claims": [
+    "No model was executed against ML-06A in this ACT.",
+    "ML-06A makes NO claim about any model's ranking ability.",
+    "The fixture is ONE fixture, not a corpus, and it does not require a generalized benchmark framework.",
+    "The failure-identity discipline remains PROVISIONAL."
+  ]
+}

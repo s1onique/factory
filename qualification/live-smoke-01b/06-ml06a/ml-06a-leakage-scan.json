@@ -1,0 +1,85 @@
+{
+  "scan": "ML-06A SOLUTION-LEAKAGE SCAN",
+  "date": "2026-11-25",
+  "scanned_tree": "/tmp/ml06a_ref/prep/workspace (the candidate-visible ML-06A fixture, freshly prepared)",
+  "fixture_digest": "62d3e75a2ba415b2049e7735e8eca08461b9bd4e42191bc8a4f28c0ff5906787",
+  "allowed_path": "labs/long-horizon-harness/src/subject/subject-json.ts",
+  "disposition": "CLEAN",
+  "checks": [
+    {
+      "id": "LS-01",
+      "question": "Does the candidate-visible fixture contain the HISTORICAL SOLUTION's markers?",
+      "method": "recursive literal grep over the whole candidate-visible tree",
+      "markers": {
+        "ancestors": 0,
+        "validateJsonValueInner": 0,
+        "ancestors.delete": 0,
+        "ancestors.has": 0,
+        "boundary_exception": 0
+      },
+      "result": "CLEAN — none of the known-good revision's identifiers appear anywhere in the candidate-visible tree."
+    },
+    {
+      "id": "LS-02",
+      "question": "Does the candidate-visible fixture contain FUTURE GIT HISTORY?",
+      "method": "existence check for a .git directory in the fixture root",
+      "result": "CLEAN — the fixture is materialized with `git archive`, so it carries no .git directory, no refs, no objects and no log."
+    },
+    {
+      "id": "LS-03",
+      "question": "Does the candidate-visible fixture contain EVALUATOR-ONLY TESTS?",
+      "method": "filename search for *ml-06a* and *ml_06a* over the whole tree",
+      "count": 0,
+      "result": "CLEAN — the evaluator's acceptance file and its observation file live BESIDE the oracle, never inside the fixture. The oracle COPIES them into its own reconstruction."
+    },
+    {
+      "id": "LS-04",
+      "question": "Does the candidate-visible fixture contain CORRECTION EVIDENCE?",
+      "method": "recursive literal grep for the fixture's own revision identities and for this campaign's evidence paths",
+      "markers": {
+        "KNOWN_GOOD": 0,
+        "5b7508f": 0,
+        "0bd72f4": 0,
+        "ACT-FACTORY-LIVE-SMOKE": 0,
+        "qualification/live-smoke": 0
+      },
+      "result": "CLEAN — no revision identity and no evidence path appears in the candidate-visible tree."
+    },
+    {
+      "id": "LS-05",
+      "question": "Does the candidate-visible fixture carry the KNOWN-GOOD production file?",
+      "method": "SHA-256 comparison of the fixture's allowed file against the known-bad and known-good revisions",
+      "fixture_sha256": "1f553039a7df0c89fba0b9fff8372e6b05a5ee1d56330330c470a0efd726aae8",
+      "known_bad_sha256": "1f553039a7df0c89fba0b9fff8372e6b05a5ee1d56330330c470a0efd726aae8",
+      "known_good_sha256": "d2cd73f380a1221c3947d55e3005dee0f983a5ea1a9903277d3ebd0176530c64",
+      "result": "CLEAN — the fixture's allowed file is BYTE-IDENTICAL to the known-bad revision and differs from the known-good revision."
+    }
+  ],
+  "incidental_occurrences_recorded": [
+    {
+      "marker": "try/finally",
+      "files": 1,
+      "path": "labs/long-horizon-harness/test/process/fixture-contract.test.ts",
+      "assessment": "NOT A LEAK. The phrase appears in an unrelated harness test's prose about fixture cleanup. It does not describe the ML-06A defect, the fix, or any data structure the candidate could copy. The historical solution's actual identifiers (LS-01) are absent."
+    },
+    {
+      "marker": "ACT-FACTORY",
+      "files": 1,
+      "path": "labs/long-horizon-harness/README.md",
+      "assessment": "NOT A LEAK. The base commit's own README names historical ACTs of the long-horizon harness. It does not describe ML-06A, the subject module's path-cycle defect, or the fix."
+    },
+    {
+      "marker": "correction",
+      "files": 9,
+      "assessment": "NOT A LEAK. The base commit's own harness sources use the word 'correction' in unrelated contexts. None of them concerns the subject module's cycle guard."
+    }
+  ],
+  "residual_limitation": "Removing the incidental occurrences would require a PREPARATION OVERLAY on the fixture. The ACT specifies NO overlay unless demonstrated necessary, and an overlay would itself introduce new, non-historical content into the candidate-visible tree. The occurrences are therefore RECORDED rather than removed, and none of them is a solution leak: every identifier, structure and behaviour of the historical fix is absent from the candidate-visible tree.",
+  "containment_limitations": [
+    "The candidate-visible fixture is a plain directory on the SAME host, under the SAME OS user, as the evaluator's own tree. A candidate that explores the host can read the evaluator's reference tree, the evaluator's dependency tree and the evaluator's source code. The fixture's isolation is a WORKING-DIRECTORY boundary, not a security boundary.",
+    "The ML-SMOKE-01 candidate demonstrated this in practice: it ran `npm ci` inside the candidate workspace, creating a candidate-owned dependency tree that the oracle correctly refused to trust.",
+    "The ML-06A fixture is not yet executed against any model, so its behaviour under a model that actively explores the host is UNKNOWN.",
+    "No claim of adversarial isolation is made against same-user temporary directories.",
+    "The failure-identity discipline remains PROVISIONAL."
+  ]
+}

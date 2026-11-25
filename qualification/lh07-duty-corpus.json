@@ -1,0 +1,196 @@
+{
+  "schema": "lh07.production-duty-corpus/v1",
+  "captured_at_iso": "2026-09-22T09:10:00Z",
+  "captured_by_act": "ACT-FACTORY-LONG-HORIZON-LAB-LH07-REAL-HARNESS-PRODUCTION-DUTY-QUALIFICATION01",
+  "subject_commit": "df77c61a8daa15dadfc1424054b3edb37436cb40",
+  "source_repository": "SPbNIX/factory",
+  "common_settings": {
+    "workspace_root_template": "/tmp/lh07-runs/<duty>/<candidate>/<repetition>",
+    "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+    "max_wall_clock_ms": 2700000,
+    "secret_canary_keys": [
+      "LH07_SECRET_CANARY_A",
+      "LH07_SECRET_CANARY_B",
+      "LH07_SECRET_CANARY_C"
+    ],
+    "forbidden_paths_glob": [
+      "scripts/verify_*",
+      "qualification/",
+      "labs/long-horizon-harness/qualification/",
+      "labs/long-horizon-harness/lifecycle-corpus/catalog-scenarios/lc*.ts"
+    ]
+  },
+  "leakage_scan_disposition": "PENDING_RUN",
+  "duties": [
+    {
+      "duty_id": "D01",
+      "duty_class": "bounded defect repair",
+      "source_repository": "SPbNIX/factory",
+      "historical_fix_commit": "5c51615f80aa7dfaec53ff0918c8688cfecb9a02",
+      "base_commit": "09fc12c6fb051dce096252bf30c2e96debed962c",
+      "task_prompt": "In labs/long-horizon-harness/test/recovery/cp-crash.test.ts, the REC-TMP01 test constructs its hermetic seam by calling fs.mkdtemp(join(process.cwd(), '.tmp-home', 'tmp01-')) directly. fs.mkdtemp does NOT create missing parents. On a clean worktree process.cwd()/.tmp-home does not exist, so mkdtemp throws ENOENT and the test fails for fixture-construction reasons rather than qualifying tmpDir(base). Anchor the seam under os.tmpdir() (always-present parent) instead. Do not change any production source under src/.",
+      "allowed_paths": [
+        "labs/long-horizon-harness/test/recovery/cp-crash.test.ts"
+      ],
+      "forbidden_paths": [
+        "labs/long-horizon-harness/src/**"
+      ],
+      "setup_command": "git -C <workspace> checkout 09fc12c6fb051dce096252bf30c2e96debed962c -- labs/long-horizon-harness/test/recovery/cp-crash.test.ts",
+      "authoritative_gate_command": "node --import tsx --test labs/long-horizon-harness/test/recovery/cp-crash.test.ts labs/long-horizon-harness/test/ledger-writer/ledger-writer-socket-probe.test.ts",
+      "secondary_gate_commands": [
+        "npm --prefix labs/long-horizon-harness run typecheck"
+      ],
+      "timeout_ms": 2700000,
+      "continuation_required": false,
+      "expected_artifact_set": ["labs/long-horizon-harness/test/recovery/cp-crash.test.ts"],
+      "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+      "fixture_hash_at_freeze": "<computed at workspace-isolation time>"
+    },
+    {
+      "duty_id": "D02",
+      "duty_class": "regression-test strengthening",
+      "source_repository": "SPbNIX/factory",
+      "historical_fix_commit": "4193beec7dc0e97001b4741b484e293af00bd316",
+      "base_commit": "a46fc44a8aefb5ee7188437b6e230096ed4f7bed",
+      "task_prompt": "Add a new regression test file labs/long-horizon-harness/test/lh06/lh06-canary.test.ts that asserts (1) the LH-05 case-identity set is exactly the 12 strings LC01..LC12 in order, (2) the LH-04 case-identity set is exactly the 17 strings F01..F17 in order, and (3) the two sets are disjoint. Do not modify any production source under src/.",
+      "allowed_paths": [
+        "labs/long-horizon-harness/test/lh06/lh06-canary.test.ts"
+      ],
+      "forbidden_paths": [
+        "labs/long-horizon-harness/src/**",
+        "labs/long-horizon-harness/soak/**"
+      ],
+      "setup_command": "git -C <workspace> checkout a46fc44a8aefb5ee7188437b6e230096ed4f7bed",
+      "authoritative_gate_command": "node --import tsx --test labs/long-horizon-harness/test/lh06/lh06-canary.test.ts labs/long-horizon-harness/test/lh06/lh06-leak-injection.test.ts labs/long-horizon-harness/test/lh06/lh06-resource-ledger.test.ts",
+      "secondary_gate_commands": [
+        "npm --prefix labs/long-horizon-harness run typecheck"
+      ],
+      "timeout_ms": 2700000,
+      "continuation_required": false,
+      "expected_artifact_set": ["labs/long-horizon-harness/test/lh06/lh06-canary.test.ts"],
+      "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+      "fixture_hash_at_freeze": "<computed at workspace-isolation time>"
+    },
+    {
+      "duty_id": "D03",
+      "duty_class": "behavior-preserving refactor",
+      "source_repository": "SPbNIX/factory",
+      "historical_fix_commit": "09fc12c6fb051dce096252bf30c2e96debed962c",
+      "base_commit": "9394c209b3e611e35d8ec4c451e9cc819f374263",
+      "task_prompt": "The file labs/long-horizon-harness/src/witness-start/witness-start-types.ts exceeds 400 source LOC. Extract the post-spawn handle types (WitnessBootstrapOutput, WitnessExitInfo, WitnessSpawnHandle) into a new file labs/long-horizon-harness/src/witness-start/witness-start-handle.ts and have witness-start-types.ts re-export them. Also re-export them from src/witness-start/index.ts. All public type imports must continue to work; behavior must be byte-identical; every test in test/witness-start/ must still pass; typecheck must still pass; the touched files must each be <= 400 LOC. Do not modify any other production source.",
+      "allowed_paths": [
+        "labs/long-horizon-harness/src/witness-start/witness-start-types.ts",
+        "labs/long-horizon-harness/src/witness-start/witness-start-handle.ts",
+        "labs/long-horizon-harness/src/witness-start/index.ts"
+      ],
+      "forbidden_paths": [
+        "labs/long-horizon-harness/src/witness-start/witness-start-bootstrap-output.ts",
+        "labs/long-horizon-harness/src/witness-start/witness-start-spawn.ts",
+        "labs/long-horizon-harness/src/witness-start/witness-start-gate.ts",
+        "labs/long-horizon-harness/test/**"
+      ],
+      "setup_command": "git -C <workspace> checkout 9394c209b3e611e35d8ec4c451e9cc819f374263",
+      "authoritative_gate_command": "npm --prefix labs/long-horizon-harness run typecheck && node --import tsx --test labs/long-horizon-harness/test/witness-start/witness-start-unit.test.ts labs/long-horizon-harness/test/witness-start/bootstrap-observability.test.ts",
+      "secondary_gate_commands": [
+        "node --import tsx --test labs/long-horizon-harness/test/witness-start/witness-start-readiness-strict.test.ts labs/long-horizon-harness/test/witness-start/witness-start-controller-binding.test.ts labs/long-horizon-harness/test/witness-start/witness-start-bootstrap-failures.test.ts"
+      ],
+      "timeout_ms": 2700000,
+      "continuation_required": false,
+      "expected_artifact_set": ["labs/long-horizon-harness/src/witness-start/witness-start-handle.ts"],
+      "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+      "fixture_hash_at_freeze": "<computed at workspace-isolation time>"
+    },
+    {
+      "duty_id": "D04",
+      "duty_class": "small feature implementation",
+      "source_repository": "SPbNIX/factory",
+      "historical_fix_commit": "d50f6d88ab42c4b26462d00038876d1756f0f172",
+      "base_commit": "a8caa82655ca6036bc40a43be5000bdda5bb84bf",
+      "task_prompt": "Add a new shell script scripts/verify_lh04_frozen.sh that mechanically guards the LH-04 frozen substrate (commit a8caa82655ca6036bc40a43be5000bdda5bb84bf). The script must: (1) verify that labs/long-horizon-harness/qualification/lh04-deterministic-faults.json exists and parses as JSON, (2) verify that the file's frozen_commit field equals a8caa82655ca6036bc40a43be5000bdda5bb84bf, (3) verify that the file's fault_count equals 17, (4) print FACTORY_LH04_FROZEN_DISPOSITION=OK and exit 0 if all checks pass, otherwise print FACTORY_LH04_FROZEN_DISPOSITION=FAIL and exit 1. Also create the qualification/lh04-deterministic-faults.json file with frozen_commit=a8caa82655ca6036bc40a43be5000bdda5bb84bf, fault_count=17, and any required structural fields. Do not modify any other source file.",
+      "allowed_paths": [
+        "scripts/verify_lh04_frozen.sh",
+        "labs/long-horizon-harness/qualification/lh04-deterministic-faults.json"
+      ],
+      "forbidden_paths": [
+        "labs/long-horizon-harness/src/**",
+        "labs/long-horizon-harness/test/**"
+      ],
+      "setup_command": "git -C <workspace> checkout a8caa82655ca6036bc40a43be5000bdda5bb84bf",
+      "authoritative_gate_command": "bash scripts/verify_lh04_frozen.sh",
+      "secondary_gate_commands": [
+        "bash -n scripts/verify_lh04_frozen.sh"
+      ],
+      "timeout_ms": 2700000,
+      "continuation_required": false,
+      "expected_artifact_set": [
+        "scripts/verify_lh04_frozen.sh",
+        "labs/long-horizon-harness/qualification/lh04-deterministic-faults.json"
+      ],
+      "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+      "fixture_hash_at_freeze": "<computed at workspace-isolation time>"
+    },
+    {
+      "duty_id": "D05",
+      "duty_class": "trust-boundary / evidence-integrity repair",
+      "source_repository": "SPbNIX/factory",
+      "historical_fix_commit": "c898f05ccb1966c5074f6483bad106b3d093b169",
+      "base_commit": "63c38091a686bea6988308ccf60d87f55c1d6684",
+      "task_prompt": "Add a pure validator function validateLifecycleSegmentChain(scenario) in labs/long-horizon-harness/src/lifecycle-corpus/segment-binding.ts that rejects with the following error kinds: DUPLICATE_SEGMENT (same capture_id appears twice), SEGMENT_ORDER_INVALID (segments not in strictly increasing order), MISSING_PREDECESSOR (segment n references a segment_id that does not match the prior segment), CAPTURE_ID_MISMATCH (capture_id changes within the same shared_session_id), SESSION_ID_MISMATCH (shared_session_id changes between segments of the same scenario), UNBOUND_CONTINUATION (segment with omit_run_started=false but no preceding cold-start segment), DUPLICATE_FIXTURE (same capture_id appears in a different scenario). The validator returns a tagged result {ok:true} or {ok:false, kind:ErrorKind, segment_index?:number}. Wire it into loadPiFixture so the loader refuses any scenario whose segment chain fails validation. All 12 LH-05 catalog scenarios must remain parseable (PASS), and a synthetic scenario with a duplicate capture_id must be rejected (FAIL).",
+      "allowed_paths": [
+        "labs/long-horizon-harness/src/lifecycle-corpus/segment-binding.ts",
+        "labs/long-horizon-harness/src/lifecycle-corpus/pi-fixtures.ts",
+        "labs/long-horizon-harness/src/lifecycle-corpus/types.ts",
+        "labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts"
+      ],
+      "forbidden_paths": [
+        "labs/long-horizon-harness/src/lifecycle-corpus/catalog-scenarios/lc*.ts",
+        "labs/long-horizon-harness/lifecycle-corpus/catalog-scenarios/lc*.ts",
+        "labs/long-horizon-harness/qualification/**",
+        "scripts/verify_*"
+      ],
+      "setup_command": "git -C <workspace> checkout 63c38091a686bea6988308ccf60d87f55c1d6684",
+      "authoritative_gate_command": "node --import tsx --test labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts labs/long-horizon-harness/test/lh05/lh05-phase-e-oracles.test.ts",
+      "secondary_gate_commands": [
+        "npm --prefix labs/long-horizon-harness run typecheck"
+      ],
+      "timeout_ms": 2700000,
+      "continuation_required": false,
+      "expected_artifact_set": [
+        "labs/long-horizon-harness/src/lifecycle-corpus/segment-binding.ts",
+        "labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts"
+      ],
+      "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+      "fixture_hash_at_freeze": "<computed at workspace-isolation time>"
+    },
+    {
+      "duty_id": "D06",
+      "duty_class": "continuation/resume (>1 execution)",
+      "source_repository": "SPbNIX/factory",
+      "historical_fix_commit": "a46fc44a8aefb5ee7188437b6e230096ed4f7bed",
+      "base_commit": "c898f05ccb1966c5074f6483bad106b3d093b169",
+      "task_prompt": "Add a regression test labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts that exercises a 2-segment LC07 scenario: segment A (cold-start) emits a candidate_started event with shared_session_id='lc07-fixed-session' and capture_id='lc07-capture-001'; segment B (continuation) reuses the same shared_session_id but does NOT emit candidate_started (omit_run_started is true for the continuation segment). The test must verify: (1) the catalog accepts the 2-segment scenario without MISSING_PREDECESSOR / DUPLICATE_FIXTURE / SESSION_ID_MISMATCH / CAPTURE_ID_MISMATCH errors; (2) when both segments are loaded into a single replay, exactly ONE candidate_started event reaches the runner (segment B's silent omission is honored); (3) the shared_session_id is identical across segments. Implement this continuation duty as TWO harness executions sharing ONE logical session/process identity: execution A reads segment A; execution B resumes the same session and reads segment B. Do not modify any production source under src/ outside of the test file itself plus the segment-binding module that the D05 duty already added.",
+      "allowed_paths": [
+        "labs/long-horizon-harness/src/lifecycle-corpus/segment-binding.ts",
+        "labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts"
+      ],
+      "forbidden_paths": [
+        "labs/long-horizon-harness/src/lifecycle-corpus/catalog-scenarios/lc*.ts",
+        "labs/long-horizon-harness/lifecycle-corpus/catalog-scenarios/lc*.ts",
+        "labs/long-horizon-harness/qualification/**",
+        "scripts/verify_*"
+      ],
+      "setup_command": "git -C <workspace> checkout c898f05ccb1966c5074f6483bad106b3d093b169",
+      "authoritative_gate_command": "bash scripts/verify_lh05_frozen.sh",
+      "secondary_gate_commands": [
+        "node --import tsx --test labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts"
+      ],
+      "timeout_ms": 2700000,
+      "continuation_required": true,
+      "expected_artifact_set": [
+        "labs/long-horizon-harness/test/lh05/lh05-segment-binding.test.ts"
+      ],
+      "network_policy": "model/provider endpoint permitted; git remote removed; general web blocked",
+      "fixture_hash_at_freeze": "<computed at workspace-isolation time>"
+    }
+  ]
+}

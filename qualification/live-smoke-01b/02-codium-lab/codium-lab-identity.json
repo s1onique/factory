@@ -1,0 +1,75 @@
+{
+  "instance": "codium-lab",
+  "instance_root": "/Volumes/UserData/Users/chistyakov/.vscodium-lab",
+  "extension_version": "4.1.26-821b20e7a",
+  "cline_data_dir": "/Volumes/UserData/Users/chistyakov/.vscodium-lab/cline-data",
+  "control_seam_dir": "/Volumes/UserData/Users/chistyakov/.vscodium-lab/cline-data/control-seam",
+  "control_seam_socket_present": true,
+  "read_credential_present": true,
+  "write_credential_present": true,
+  "mutation_grant_armed": { "v": 1, "enabled": true, "allowContentRead": true },
+  "owner_pid": 63810,
+  "owner_alive": true,
+  "owner_started_at": "2026-11-25T03:10:54.303Z (epoch ms 1795573872805)",
+  "capabilities_protocol_version": 1,
+  "capabilities_read_only_with_write_token": false,
+  "operations": [
+    "clinemm_capabilities",
+    "clinemm_get_run",
+    "clinemm_start_act",
+    "clinemm_read_events",
+    "clinemm_send_feedback",
+    "clinemm_cancel_run"
+  ],
+  "mcp_client_registration": "factory-lab",
+  "mcp_client_registered_in": "codium-factory (the SUPERVISOR's instance)",
+  "mcp_proxy_target": "codium-lab only (CLINE_DATA_DIR=.vscodium-lab/cline-data)",
+  "model_selection": {
+    "act_mode_api_provider": "minimax",
+    "act_mode_api_model_id": "MiniMax-M3.1-Flash",
+    "act_mode_reasoning_effort": "low",
+    "plan_mode_api_provider": "minimax",
+    "plan_mode_api_model_id": "MiniMax-M3.1-Flash",
+    "plan_mode_reasoning_effort": "low"
+  },
+  "auto_approval": {
+    "enabled": true,
+    "maxRequests": 20,
+    "readFiles": true,
+    "editFiles": true,
+    "executeAllCommands": true,
+    "useMcp": true
+  },
+  "workspace_binding": {
+    "status": "RESOLVED",
+    "resolved_workspace": "/private/tmp/mlsmoke/live/candidate",
+    "operator_action_performed": "the operator opened /tmp/mlsmoke/live/candidate in codium-lab and the window was reloaded; the extension host restarted at 2026-11-25T03:10:54Z and re-captured its mutation grant against the now-open folder",
+    "proof": [
+      "the instance's User/workspaceStorage/2d255f31502bdc1546132ee5e5c01977/workspace.json names file:///private/tmp/mlsmoke/live/candidate",
+      "the Cline per-workspace storage directory is 505276ae, which is the SDK's own hash of /private/tmp/mlsmoke/live/candidate",
+      "the candidate session's OWN record reports cwd = workspace_root = /private/tmp/mlsmoke/live/candidate",
+      "the start_act asserting /private/tmp/mlsmoke/live/candidate was ACCEPTED"
+    ],
+    "predecessor_status": "BLOCKED (the grant was bound to the SDK's no-workspace chat fallback)",
+    "predecessor_preserved": true,
+    "chat_fallback_probe": {
+      "session_id": "1795572934352_z1xru",
+      "state": "INACTIVE and NOT RESUMABLE",
+      "evidence": "the seam reports control_seam_no_active_run; the probe session's own record shows status=idle, exit_code=null, and its last message is its own submit_and_exit at ts 1795573197543. Its cwd was the chat fallback workspaces/chat directory, NOT the candidate workspace.",
+      "accidental_resume_possible": false
+    }
+  },
+  "candidate_side_permissions": {
+    "mcp_servers_registered_in_the_lab_instance": [],
+    "supervisory_mcp_interface_reachable_by_the_candidate": false,
+    "supervisory_mcp_evidence": "the factory-lab registration exists ONLY in /Volumes/UserData/Users/chistyakov/.vscodium-factory/cline-data/settings/cline_mcp_settings.json (the supervisor's instance). The lab instance's own cline_mcp_settings.json is {\"mcpServers\": {}}.",
+    "command_execution": "ENABLED (autoApproval.executeAllCommands=true) — the candidate ran shell commands, including npm ci.",
+    "file_editing": "ENABLED (autoApproval.editFiles=true) — the candidate edited the allowed file.",
+    "file_reading": "ENABLED (autoApproval.readFiles=true, readFilesExternally=true)",
+    "browser": "ENABLED (autoApproval.useBrowser=true) — not exercised by this candidate.",
+    "containment_claim": "NONE. The candidate and the evaluator run as the SAME OS USER on the SAME host. The lab instance provides IDENTITY separation and a distinct data directory, NOT a security sandbox. The candidate could read any file the user can read, including the evaluator's own reference tree and dependency tree on this host. This limitation is recorded explicitly and is NOT a claim of containment.",
+    "same_user_profile_separation_is_not_a_sandbox": true
+  },
+  "credentials_printed": false,
+  "notes": "credentials are recorded by PRESENCE ONLY; no token value appears in this record"
+}

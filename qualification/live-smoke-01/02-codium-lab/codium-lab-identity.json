@@ -1,0 +1,74 @@
+{
+  "instance": "codium-lab",
+  "instance_root": "/Volumes/UserData/Users/chistyakov/.vscodium-lab",
+  "extension_version": "4.1.26-821b20e7a",
+  "extension_bundle_sha256": "f9c68389ad3a4b5e1e9673b7376a4964904caebba4e55b9cae14c9aaccb4248a",
+  "cline_data_dir": "/Volumes/UserData/Users/chistyakov/.vscodium-lab/cline-data",
+  "control_seam_dir": "/Volumes/UserData/Users/chistyakov/.vscodium-lab/cline-data/control-seam",
+  "control_seam_socket_present": true,
+  "read_credential_present": true,
+  "write_credential_present": true,
+  "mutation_grant_armed": {
+    "v": 1,
+    "enabled": true,
+    "allowContentRead": true
+  },
+  "owner_pid": 46678,
+  "owner_alive": true,
+  "capabilities_protocol_version": 1,
+  "capabilities_read_only_with_write_token": false,
+  "operations": [
+    "clinemm_capabilities",
+    "clinemm_get_run",
+    "clinemm_start_act",
+    "clinemm_read_events",
+    "clinemm_send_feedback",
+    "clinemm_cancel_run"
+  ],
+  "mcp_client_registration": "factory-lab",
+  "mcp_client_registered_in": "codium-factory",
+  "mcp_proxy_target": "codium-lab only (CLINE_DATA_DIR=.vscodium-lab/cline-data)",
+  "model_selection": {
+    "act_mode_api_provider": "minimax",
+    "act_mode_api_model_id": "MiniMax-M3.1-Flash",
+    "act_mode_reasoning_effort": "low",
+    "plan_mode_reasoning_effort": "low"
+  },
+  "auto_approval": {
+    "enabled": true,
+    "maxRequests": 20,
+    "readFiles": true,
+    "editFiles": true,
+    "executeAllCommands": true,
+    "useMcp": true
+  },
+  "fresh_session_state": {
+    "inherited_sessions": false,
+    "inherited_workspace": false,
+    "active_task_at_entry": false
+  },
+  "no_active_candidate_task_before_proceeding": true,
+  "advertised_capabilities_are_not_mutation_authorization": true,
+  "workspace_binding": {
+    "status": "BLOCKED",
+    "reason": "the codium-lab instance has NO folder open, so the control seam's mutation grant was captured against the SDK's no-workspace CHAT FALLBACK, not against the candidate workspace",
+    "proof": "a start_act asserting the candidate workspace is refused with control_seam_mutation_not_authorized; a start_act asserting the chat fallback workspace is ACCEPTED",
+    "candidate_workspace_assertion_result": "control_seam_mutation_not_authorized",
+    "chat_fallback_assertion_result": "accepted (this was the workspace-binding PROBE, immediately cancelled)",
+    "probe_task_cancelled": true,
+    "probe_task_session_id": "1795572934352_z1xru",
+    "probe_task_terminal_state": "running=false, phase=resumable",
+    "candidate_workspace_untouched_by_probe": true,
+    "mechanism_attempted": [
+      "codium CLI --folder-uri -r (instance-specific user-data-dir + extensions-dir)",
+      "codium CLI -r <folder>",
+      "codium CLI -a <folder>",
+      "codium CLI -n <folder>"
+    ],
+    "mechanism_outcome": "the sandbox cannot bind a folder to the RUNNING lab instance; the CLI does not reach it and a new GUI instance cannot be launched from the sandbox",
+    "operator_command_required": "Open the folder /tmp/mlsmoke/live/candidate in the codium-lab window (File > Open Folder...), or relaunch codium-lab with that folder as its argument, then reload the window so the control seam re-captures its mutation grant against the folder.",
+    "reestablish_authorization": "the seam's mutation grant is captured at extension-host start; a window reload (or an instance restart) re-captures it against the now-open folder. Re-verify with a start_act assertion AFTER the reload."
+  },
+  "credentials_printed": false,
+  "notes": "credentials are recorded by PRESENCE ONLY; no token value appears in this record"
+}

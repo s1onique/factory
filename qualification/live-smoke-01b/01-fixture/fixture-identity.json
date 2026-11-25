@@ -1,0 +1,53 @@
+{
+  "fixture_id": "ML-SMOKE-01",
+  "base_commit": "09fc12c6fb051dce096252bf30c2e96debed962c",
+  "overlay_source_commit": "5c51615f80aa7dfaec53ff0918c8688cfecb9a02",
+  "overlay_scope": "labs/long-horizon-harness/test/ledger-writer/ledger-writer-socket-probe.test.ts",
+  "overlay_sha256": "eb59a9eab4d341c429f94934ffc982fb877402083b433fdcfd57ece0be4506c5",
+  "reference_digest": "cd269fa584b1a547aeb165b5e19cbd509fe3df6cd47a9f4547a92a6031ecf677",
+  "candidate_initial_digest": "cd269fa584b1a547aeb165b5e19cbd509fe3df6cd47a9f4547a92a6031ecf677",
+  "candidate_workspace": "/tmp/mlsmoke/live/candidate",
+  "reference_workspace": "/tmp/mlsmoke/live/prep/workspace",
+  "allowed_path": "labs/long-horizon-harness/test/recovery/cp-crash.test.ts",
+  "single_defect": "REC-TMP01",
+  "required_tests": [
+    "REC-TMP01: tmpDir(base) self-constructs the parent when definitely absent (test/recovery/cp-crash.test.ts)",
+    "REC-TMP02: tmpDir() returns a unique dir per call (test/recovery/cp-crash.test.ts)"
+  ],
+  "required_sock_tests": "SOCK01..SOCK06E (test/ledger-writer/ledger-writer-socket-probe.test.ts)",
+  "task_prompt_sha256": "f8c5a0aa737a6ffbb0e572e8a97318bed93ba546d6948fc9af5bdd2634ad9216",
+  "task_prompt": "In `test/recovery/cp-crash.test.ts`, the REC-TMP01 test constructs its hermetic seam by calling `fs.mkdtemp(join(process.cwd(), '.tmp-home', 'tmp01-'))` directly. `fs.mkdtemp` does NOT create missing parents. On a clean worktree `process.cwd()/.tmp-home` does not exist, so `mkdtemp` throws `ENOENT` and the test fails for fixture-construction reasons rather than qualifying `tmpDir(base)`. Anchor the seam under `os.tmpdir()` (an always-present parent) instead. Do not change any production source under `src/`.\n",
+  "task_prompt_note": "The prompt is the ORIGINAL frozen ML-SMOKE-01 prompt. Its digest is unchanged from the predecessor ACT and was verified against the frozen prompt immediately before the start_act.",
+  "oracle_implementation_identity": {
+    "labs/model-lab/ml_smoke_01_lib.mjs": "8b5ac66de455279d3f26999119fd13a14f9be1574090992c93319fdeb134c19e",
+    "labs/model-lab/ml_smoke_01_test_reporter.mjs": "200ea356d84a1bac4d2de35601eda688a203782be3930dee0748eb784af0a87d",
+    "labs/model-lab/ml_smoke_01_tool.mjs": "7df47e4945d6121f94a1754faa0ff7cc63caa7e05a521c48e4817389d6354ce1",
+    "labs/model-lab/ml_smoke_01_acceptance_oracle.sh": "c4f647c5a8286cb0d6971da962e3858dcecfd0ad45c4582494db893e8b8ca21b",
+    "labs/model-lab/prepare_ml_smoke_01.sh": "b8a95f068e8f6208dc62de4cf43cb5b707e725fd449ce3dac38f0d5c3ee98de8",
+    "labs/model-lab/prepare_ml_06a.sh": "92725420dc855ce93a45b06de685f82f948d7c09a88793100df540f9e2a83ffa",
+    "labs/model-lab/ml_06a_acceptance.test.ts": "85a1ca886fdcb3587b03818a19bd58084509a503a66f5624a30b7643a91a1db6",
+    "labs/model-lab/ml_06a_observations.test.ts": "fcf0ff934068f3ed1e5894605c684b242c4c669becbbd9771e2ab850933d9d42",
+    "labs/model-lab/ml_06a_acceptance_oracle.sh": "534364bb1735de595b8c4670975a4cf207440c6b20d0e309c20410a4b0714f2c",
+    "tests/model_lab/test_ml_smoke_01_lib.mjs": "43f2516f9a7af025e40826033fd63129f3e3fe4fe27cf96b2a938cfe4d597435",
+    "tests/model_lab/test_ml_smoke_01_oracle.sh": "24f00d4b466375e63730b26df06aafdbbec39007580b089775a6f0d62c58cb42",
+    "tests/model_lab/test_ml_06a_qualification.sh": "194b8536fdfb7f7565b8b45f5c44aafaab1e77a2539c969897530deb0e77b85d"
+  },
+  "toolchain": {
+    "node": "v26.0.0",
+    "node_path": "/opt/homebrew/bin/node",
+    "tsx_loader": "49fb46730ddeb226ac4fa9fb990d3573ac8f18fa4de02f1bf723c61d715710c2"
+  },
+  "preparation_seconds": 0.551,
+  "identity_note": "The fixture itself is UNCHANGED from the predecessor ACT. Only the ORACLE's authority changed, and its new identity is recorded above. The fixture digest is byte-identical to the predecessor's recorded digest.",
+  "task_prompt_delivery": {
+    "frozen_prompt_sha256": "f8c5a0aa737a6ffbb0e572e8a97318bed93ba546d6948fc9af5bdd2634ad9216",
+    "frozen_prompt_bytes": 513,
+    "delivered_prompt_sha256": "95de59176fc4301f1da495b1741e0e9d6af7e160c6440903bc93b1977a2fd6fe",
+    "delivered_prompt_bytes": 512,
+    "difference": "EXACTLY the trailing newline. The delivered prompt is byte-identical to the frozen prompt except that its final newline is absent.",
+    "delivered_equals_frozen_minus_final_newline": true,
+    "cause": "the control seam's user-input envelope (a <user_input mode=act> wrapper) strips the trailing newline from the prompt text.",
+    "significance": "NONE for the task's semantics: the prompt is a single terminated instruction whose final newline carries no instruction. The delivered bytes are the frozen bytes.",
+    "verified_from": "the candidate session's OWN first message record (1795576254184_48ilz.messages.json), compared against the frozen prompt in qualification/live-smoke-01/01-fixture/fixture-identity.json"
+  }
+}

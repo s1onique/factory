@@ -1,0 +1,75 @@
+{
+  "schema": "lh07.candidate-discovery/v1",
+  "captured_at_iso": "2026-09-22T09:10:00Z",
+  "candidates": [
+    {
+      "candidate": "PI",
+      "status": "INSTALLED",
+      "qualification_status": "LIVE_QUALIFIED_CANDIDATE",
+      "live_qualification": "CANDIDATE_LIVE",
+      "identity": {
+        "harness_name": "pi",
+        "package_name": "@earendil-works/pi-coding-agent",
+        "package_version": "0.85.1",
+        "cli_reported_version": "0.85.1",
+        "executable_path": "/tmp/npm-prefix/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        "executable_sha256": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c",
+        "executable_shebang": "#!/usr/bin/env node",
+        "selected_protocol": "JSON_EVENTS",
+        "protocol_mode_flag": "--mode json",
+        "native_schema_fingerprint": "411f371861a4a564052194e954efb52d0ab891add3398285a640edac4bde7cf1",
+        "adapter_version": "labs/long-horizon-harness/src/adapter-common (frozen per LH-03)"
+      },
+      "capability_live_evidence": {
+        "session_header_emitted": true,
+        "native_event_count_at_probe": ">=2",
+        "model_used_at_probe": "MiniMax-M3",
+        "provider_used_at_probe": "minimax",
+        "thinking_observed": true,
+        "tool_use_observed": false,
+        "cwd_argument": "--cwd",
+        "session_dir_argument": "--session-dir"
+      }
+    },
+    {
+      "candidate": "CLINEMM",
+      "status": "INSTALLED",
+      "qualification_status": "LIVE_QUALIFIED_CANDIDATE",
+      "live_qualification": "CANDIDATE_LIVE",
+      "identity": {
+        "harness_name": "cline",
+        "repository_identity": "github.com/s1onique/clinemm (fork of cline/cline)",
+        "commit_sha": "1c6649d218519cdaa12a15493243e34587c5bf6e",
+        "build_identity": "apps/cli/dist/index.js (Bun-compiled, no @cline/cli-darwin-arm64 wrapper needed)",
+        "package_name": "@cline/cli",
+        "package_version": "3.0.60",
+        "cli_reported_version": "3.0.60",
+        "executable_path": "/Volumes/UserData/Users/chistyakov/Projects/SPbNIX/clinemm/apps/cli/dist/index.js",
+        "executable_sha256": "09e0734c8d7e3f8103741cf0c04528e01553824fe58cb429894afef293cd0ec7",
+        "executable_size_bytes": 31412631,
+        "executable_shebang": "#!/usr/bin/env bun",
+        "selected_protocol": "JSON_EVENT_STREAM",
+        "protocol_mode_flag": "--json",
+        "native_schema_fingerprint": "cline.agent_event/envelope.v3 (iteration_start, content_start, content_end, usage, tool, iteration_end, done, run_result)",
+        "adapter_version": "labs/long-horizon-harness/src/adapter-common (frozen per LH-03)"
+      },
+      "capability_live_evidence": {
+        "structured_event_emitted": true,
+        "native_event_count_at_probe": ">=3",
+        "model_used_at_probe": "MiniMax-M3",
+        "provider_used_at_probe": "minimax",
+        "tool_use_observed": true,
+        "tool_seen": "submit_and_exit",
+        "cwd_argument": "--cwd",
+        "isolated_state_dir_argument": "--data-dir",
+        "session_resume_argument": "--id"
+      }
+    },
+    {
+      "candidate": "upstream-cline",
+      "status": "DISCOVERY_REFERENCE",
+      "candidate_eligible": false,
+      "note": "Upstream cline/cline v3.x exposes a headless JSON CLI. Recorded only as a discovery reference per ACT §38. NOT used as a run-matrix candidate."
+    }
+  ]
+}

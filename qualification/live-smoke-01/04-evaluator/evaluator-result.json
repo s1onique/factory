@@ -1,0 +1,13 @@
+{
+  "evaluator_executed": false,
+  "reason": "there was no candidate patch to evaluate: the candidate task never started",
+  "oracle_verdict": "NOT_EXECUTED",
+  "scope_check": "NOT_EXECUTED",
+  "reference_reverification": {
+    "reference_digest_before_candidate": "cd269fa584b1a547aeb165b5e19cbd509fe3df6cd47a9f4547a92a6031ecf677",
+    "reference_digest_after": "cd269fa584b1a547aeb165b5e19cbd509fe3df6cd47a9f4547a92a6031ecf677",
+    "candidate_workspace_digest_after": "cd269fa584b1a547aeb165b5e19cbd509fe3df6cd47a9f4547a92a6031ecf677",
+    "unchanged": true
+  },
+  "independent_evaluation": "NOT_EXECUTED"
+}

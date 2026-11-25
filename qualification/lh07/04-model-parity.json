@@ -1,0 +1,38 @@
+{
+  "schema": "lh07.model-parity/v1",
+  "captured_at_iso": "2026-09-22T09:10:00Z",
+  "lane_b_parity_required": {
+    "SAME_PROVIDER": true,
+    "SAME_MODEL": true
+  },
+  "common_provider_model": {
+    "provider_id": "minimax",
+    "model_id": "MiniMax-M3",
+    "rationale": "Both Pi and ClineMM ship a built-in MiniMax provider (Pi: provider id 'MiniMax' using MINIMAX_API_KEY; ClineMM: provider id 'minimax' using MINIMAX_API_KEY with baseURL https://api.minimax.io/anthropic/v1). The user's local secrets store contains a MiniMax API key. The model id MiniMax-M3 is reported verbatim by both harnesses' provider/model identity fields. This is the only provider/model combination both candidates support natively.",
+    "probe_evidence_pi": "Pi --mode json -p 'say hello' emitted message_end with provider='minimax', model='MiniMax-M3', api='anthropic-messages'.",
+    "probe_evidence_clinemm": "ClineMM --json emitted run_result.model.id='MiniMax-M3', run_result.model.provider='minimax', run_result.model.info.family='minimax'."
+  },
+  "candidates": [
+    {
+      "candidate": "PI",
+      "provider": "minimax",
+      "model": "MiniMax-M3",
+      "configured_reasoning_thinking": "provider-default (no --thinking flag)",
+      "temperature": "provider-default",
+      "context_settings": "provider-default",
+      "invocation": "pi --provider MiniMax --model MiniMax-M3 --mode json -p <prompt>"
+    },
+    {
+      "candidate": "CLINEMM",
+      "provider": "minimax",
+      "model": "MiniMax-M3",
+      "configured_reasoning_thinking": "provider-default (no --thinking flag)",
+      "temperature": "provider-default",
+      "context_settings": "provider-default",
+      "invocation": "cline --provider minimax --model MiniMax-M3 --json -y --auto-approve true --cwd <root> --data-dir <isolated> <prompt>"
+    }
+  ],
+  "lane_b_eligibility": "ELIGIBLE",
+  "lane_b_provider_equal": true,
+  "lane_b_model_equal": true
+}

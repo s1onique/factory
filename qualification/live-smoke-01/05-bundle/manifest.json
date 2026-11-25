@@ -1,0 +1,61 @@
+{
+  "bundle": "ACT-FACTORY-LIVE-SMOKE-01",
+  "date": "2026-11-25",
+  "experiment_id": "LIVE-SMOKE-01 / ML-SMOKE-01",
+  "configuration": {
+    "candidate_model": "MiniMax-M3.1-Flash:Low",
+    "candidate_count": 1,
+    "candidate_wall_clock_deadline_seconds": 300,
+    "feedback_or_corrective_reruns": 0,
+    "alternative_models": 0,
+    "automatic_retry_after_uncertain_start": false,
+    "paid_preflight_tasks": 0,
+    "provider_cap_enforceable": false,
+    "provider_cap_note": "NO provider-enforceable token or monetary cap was available; the single-run budget was bounded by the operator's authorization and by the 300 s wall-clock deadline only. This limitation is recorded explicitly.",
+    "operator_spend_authorization": "NOT OBTAINED \u2014 the ACT requires an explicit human authorization for the single candidate execution and associated provider usage. No such authorization was recorded in this session."
+  },
+  "timings_seconds": {
+    "fixture_preparation": 0.551,
+    "candidate_startup": null,
+    "candidate_execution": null,
+    "cancellation_or_terminal_reconciliation": 0,
+    "patch_collection": null,
+    "independent_evaluation": null,
+    "total_time_to_verified_result": null,
+    "total_note": "no candidate result was produced; the verified result is the corrected, qualified oracle and the blocked workspace binding"
+  },
+  "gates": {
+    "ordinary_gate": {
+      "command": "bash scripts/verify_factory.sh",
+      "seconds": 1.633,
+      "exit": 0,
+      "disposition": "PASS"
+    },
+    "qualification_gate": {
+      "command": "bash scripts/verify_factory_qualification.sh",
+      "seconds": 238.44,
+      "exit": 0,
+      "disposition": "PASS",
+      "fast_controls": "PASS=99 FAIL=0",
+      "real_fixture_controls": "PASS=41 FAIL=0"
+    },
+    "codium_lab_readonly": {
+      "command": "bash labs/model-lab/verify_codium_lab_readonly.sh",
+      "exit": 0,
+      "disposition": "PASS",
+      "summary": "PASS=29 FAIL=0"
+    }
+  },
+  "artifacts": {
+    "qualification/live-smoke-01/01-fixture/fixture-identity.json": "71c3fcb67f74d707ec6ae1b89a1fb03a6343d09151a1487ea4247aa55afb12b9",
+    "qualification/live-smoke-01/02-codium-lab/codium-lab-identity.json": "364be63756860ab0a9a82983059da542d3e9d53f9495e19869eb77dd2a0f8067",
+    "qualification/live-smoke-01/05-bundle/changed-file-manifest.md": "c0e0a1f93dde46516c8696048ba68c96ff935deb945167029478fe76af0f8468",
+    "qualification/live-smoke-01/05-bundle/exit-report.md": "1cc5f4c18bfd6f10df28d615ccf90d6cbd1298da508776f35c957f57a8ff1199",
+    "qualification/live-smoke-01/05-bundle/ml-06a-fixture-proposal.md": "5f7c443f6980dc393094fd2cf198b25f4e3f7fb6b7d921089139adcce322dd9b",
+    "qualification/live-smoke-01/00-entry/counterexamples-reproduced.md": "2680aa2003eed6b13894c123dde02bad35bc276420165ab6cc6f7d635292c74c",
+    "qualification/live-smoke-01/00-entry/entry-state.json": "6bb3b547eba38e6f802ea2cb29c4251b8521d61bce6b105371c531111f858083",
+    "qualification/live-smoke-01/04-evaluator/evaluator-result.json": "4f98389363791731db6d0d05ed3b2d1941d2d2f9930cb42faeedeb08d2cec196",
+    "qualification/live-smoke-01/03-candidate/candidate-run.json": "9e20734352235e696972f79a6d710630203facdb5ae7141a396f73c9022ed8f0"
+  },
+  "note": "The bundle is self-describing. The artifact digests cover every file in the bundle EXCEPT this manifest, which cannot contain its own digest."
+}
